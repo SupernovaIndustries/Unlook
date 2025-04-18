@@ -194,6 +194,41 @@ class ConfigManager(QObject):
         """
         return self._config
 
+    def get_camera_config(self, camera_index: int) -> CameraConfig:
+        """
+        Restituisce la configurazione della camera specificata.
+
+        Args:
+            camera_index: Indice della camera (0 per sinistra, 1 per destra)
+
+        Returns:
+            CameraConfig: Configurazione della camera
+        """
+        if camera_index == 0:
+            return self._config.left_camera
+        elif camera_index == 1:
+            return self._config.right_camera
+        else:
+            logger.error(f"Indice camera non valido: {camera_index}")
+            return CameraConfig()
+
+    def get_scan_config(self) -> ScanConfig:
+        """
+        Restituisce la configurazione di scansione.
+
+        Returns:
+            ScanConfig: Configurazione di scansione
+        """
+        return self._config.scan
+
+    def get_app_config(self) -> ApplicationConfig:
+        """
+        Restituisce la configurazione dell'applicazione.
+
+        Returns:
+            ApplicationConfig: Configurazione dell'applicazione
+        """
+        return self._config.app
     def update_camera_config(self, camera_index: int, config: CameraConfig) -> bool:
         """
         Aggiorna la configurazione di una camera.

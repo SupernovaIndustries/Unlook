@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Callable
 from PySide6.QtCore import QObject, Signal, Slot, QTimer
 
-from network.discovery_service import DiscoveryService
+from client.network.discovery_service import DiscoveryService
 
 logger = logging.getLogger(__name__)
 

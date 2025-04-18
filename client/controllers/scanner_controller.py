@@ -16,7 +16,7 @@ try:
     from client.network.connection_manager import ConnectionManager
 except ImportError:
     # Fallback per esecuzione diretta
-    from models.scanner_model import Scanner, ScannerManager, ScannerStatus
+    from client.models.scanner_model import Scanner, ScannerManager, ScannerStatus
     from network.connection_manager import ConnectionManager
 
 logger = logging.getLogger(__name__)

@@ -19,10 +19,15 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, Slot, QSettings
 from PySide6.QtGui import QFont
 
-from controllers.config_controller import ConfigController
-from models.config_model import (
-    CameraConfig, DLPConfig, ToFConfig, ScanConfig, NetworkConfig,
-    ApplicationConfig, StreamResolution, CameraMode
+from client.controllers.config_controller import ConfigController
+from client.models.config_model import (
+    CameraConfig, NetworkConfig, ToFConfig,
+    DLPConfig, ScanConfig, ApplicationConfig
+)
+from client.models.config_model import (
+    CameraConfig, StreamResolution, CameraMode,
+    ConfigManager, NetworkConfig, ToFConfig,
+    DLPConfig, ScanConfig, ApplicationConfig
 )
 
 logger = logging.getLogger(__name__)
@@ -1101,11 +1106,12 @@ class ConfigurationWidget(QWidget):
         super().__init__(parent)
 
         # Crea il gestore di configurazione
-        from models.config_model import ConfigManager
+        from client.models.config_model import ConfigManager
+
         self._config_manager = ConfigManager()
 
         # Crea il controller di configurazione
-        from controllers.config_controller import ConfigController
+        from client.controllers.config_controller import ConfigController
         self._config_controller = ConfigController(self._config_manager)
 
         # Configura l'interfaccia utente

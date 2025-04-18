@@ -166,13 +166,10 @@ class ConnectionWorker(QThread):
 
 
 class ConnectionManager(QObject):
-    """
-    Gestisce le connessioni con gli scanner UnLook.
-    """
-    # Segnali
-    connection_established = Signal(str)  # device_id
-    connection_failed = Signal(str, str)  # device_id, error_message
-    connection_closed = Signal(str)  # device_id
+    # Definisci i segnali come attributi di classe, non come decoratori
+    connection_established = Signal(str)  # signal con un parametro str
+    connection_failed = Signal(str, str)  # signal con due parametri str
+    connection_closed = Signal(str)       # signal con un parametro str
     data_received = Signal(str, dict)  # device_id, parsed_data
 
     def __init__(self):
@@ -317,27 +314,23 @@ class ConnectionManager(QObject):
             except:
                 pass
 
-    @Signal(str)
     def _on_connection_ready(self, device_id: str):
         """Gestisce l'evento di connessione pronta."""
         logger.info(f"Connessione stabilita con {device_id}")
         self.connection_established.emit(device_id)
 
-    @Signal(str, str)
     def _on_connection_error(self, device_id: str, error: str):
         """Gestisce l'evento di errore di connessione."""
         logger.error(f"Errore di connessione per {device_id}: {error}")
         self._cleanup_connection(device_id)
         self.connection_failed.emit(device_id, error)
 
-    @Signal(str)
     def _on_connection_closed(self, device_id: str):
         """Gestisce l'evento di chiusura della connessione."""
         logger.info(f"Connessione chiusa per {device_id}")
         self._cleanup_connection(device_id)
         self.connection_closed.emit(device_id)
 
-    @Signal(str, bytes)
     def _on_data_received(self, device_id: str, data: bytes):
         """Gestisce l'evento di ricezione dati."""
         try:

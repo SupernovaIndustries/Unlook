@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QDockWidget, QSplitter, QFrame, QTabWidget, QMessageBox,
     QMenu
 )
-from PySide6.QtWidgets import QAction # Importa QAction per le azioni del menu
+from PySide6.QtGui import QAction # Importa QAction per le azioni del menu
 from PySide6.QtCore import Qt, Slot, QSettings, QSize, QPoint
 from PySide6.QtGui import QIcon, QPixmap, QFont
 

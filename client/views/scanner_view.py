@@ -17,8 +17,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Slot, Signal, QTimer
 from PySide6.QtGui import QIcon, QFont, QColor
 
-from controllers.scanner_controller import ScannerController
-from models.scanner_model import Scanner, ScannerStatus
+from client.controllers.scanner_controller import ScannerController
+from client.models.scanner_model import Scanner, ScannerStatus
 
 logger = logging.getLogger(__name__)
 

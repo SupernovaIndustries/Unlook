@@ -22,8 +22,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QMutex, QMutexLocker
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen
 
-from models.scanner_model import Scanner, ScannerStatus
-from utils.thread_safe_queue import ThreadSafeQueue
+from client.models.scanner_model import Scanner, ScannerStatus
+from client.utils.thread_safe_queue import ThreadSafeQueue
 
 logger = logging.getLogger(__name__)
 
