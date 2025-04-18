@@ -12,7 +12,7 @@ import struct
 import time
 from typing import Dict, Optional, Tuple, Any, Callable
 
-from PySide6.QtCore import QObject, Signal, QThread, QMutex, QMutexLocker
+from PySide6.QtCore import QObject, Signal, QThread, QMutex, QMutexLocker, QTimer
 
 logger = logging.getLogger(__name__)
 
@@ -169,13 +169,18 @@ class ConnectionManager(QObject):
     # Definisci i segnali come attributi di classe, non come decoratori
     connection_established = Signal(str)  # signal con un parametro str
     connection_failed = Signal(str, str)  # signal con due parametri str
-    connection_closed = Signal(str)       # signal con un parametro str
+    connection_closed = Signal(str)  # signal con un parametro str
     data_received = Signal(str, dict)  # device_id, parsed_data
 
     def __init__(self):
         super().__init__()
         self._connections: Dict[str, ConnectionWorker] = {}
         self._message_handlers: Dict[str, Callable] = {}
+
+        # Aggiungiamo un timer per il heartbeat
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.timeout.connect(self._send_heartbeat)
+        self._heartbeat_timer.start(5000)  # Invia un ping ogni 5 secondi
 
     def connect(self, device_id: str, host: str, port: int) -> bool:
         """
@@ -352,3 +357,9 @@ class ConnectionManager(QObject):
             logger.error(f"Errore di decodifica JSON per {device_id}")
         except Exception as e:
             logger.error(f"Errore nella gestione dei dati ricevuti: {str(e)}")
+
+    def _send_heartbeat(self):
+        """Invia un heartbeat a tutti i dispositivi connessi."""
+        for device_id in list(self._connections.keys()):
+            if self.is_connected(device_id):
+                self.send_message(device_id, "PING", {"timestamp": int(time.time() * 1000)})

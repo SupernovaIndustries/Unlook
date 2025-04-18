@@ -559,7 +559,7 @@ class UnLookServer:
                     with self.client_mutex:
                         if self.client_connected:
                             # Se è passato troppo tempo dall'ultimo comando, considera il client disconnesso
-                            if time.time() - self.client_connection_time > 10.0:  # 10 secondi di timeout
+                            if time.time() - self.client_connection_time > 120.0:  # 2 minuti di timeout
                                 self.client_connected = False
                                 logger.info(f"Client {self.client_ip} disconnesso (timeout)")
                                 self.client_ip = None
@@ -607,15 +607,33 @@ class UnLookServer:
                 # Aggiungi lo stato alla risposta
                 response['state'] = self.state
 
+
             elif command_type == 'START_STREAM':
-                # Avvia lo streaming
-                self.start_streaming()
-                response['streaming'] = True
+                # Verifica se lo streaming è già attivo
+                if self.state["streaming"]:
+                    logger.info("Richiesta di avvio streaming ma lo streaming è già attivo")
+                    response['streaming'] = True
+                    response['message'] = "Streaming già attivo"
+                else:
+                    # Avvia lo streaming
+                    logger.info("Avvio streaming richiesto dal client")
+                    self.start_streaming()
+                    response['streaming'] = True
+                    response['message'] = "Streaming avviato"
 
             elif command_type == 'STOP_STREAM':
-                # Ferma lo streaming
-                self.stop_streaming()
-                response['streaming'] = False
+                # Verifica se lo streaming è attivo
+                if not self.state["streaming"]:
+                    logger.info("Richiesta di arresto streaming ma lo streaming non è attivo")
+                    response['streaming'] = False
+                    response['message'] = "Streaming non attivo"
+                else:
+                    # Ferma lo streaming
+                    logger.info("Arresto streaming richiesto dal client")
+                    self.stop_streaming()
+                    response['streaming'] = False
+                    response['message'] = "Streaming arrestato"
+
 
             elif command_type == 'SET_CONFIG':
                 # Aggiorna la configurazione
@@ -782,100 +800,6 @@ class UnLookServer:
 
         self.stream_threads = []
         logger.info("Streaming video arrestato")
-
-    def _stream_camera(self, camera, camera_index: int):
-        """
-        Funzione che gestisce lo streaming di una camera.
-
-        Args:
-            camera: Oggetto camera
-            camera_index: Indice della camera (0=sinistra, 1=destra)
-        """
-        logger.info(f"Thread di streaming camera {camera_index} avviato")
-
-        try:
-            # Configura il formato dello stream
-            stream_format = self.config["stream"]["format"]
-
-            if stream_format == "h264":
-                # Usa l'encoder H.264 hardware
-                encoder = camera.create_encoder("h264", bitrate=self.config["stream"]["bitrate"])
-                encoder.output.fileoutput = False
-                camera.start_encoder(encoder)
-
-            # Loop principale per lo streaming
-            frame_count = 0
-            start_time = time.time()
-
-            while self.state["streaming"]:
-                try:
-                    if stream_format == "h264":
-                        # Ottieni il frame codificato da H.264
-                        encoded_data = encoder.output.read(timeout=2)
-
-                        if encoded_data:
-                            # Crea l'header del messaggio
-                            header = {
-                                "camera": camera_index,
-                                "frame": frame_count,
-                                "timestamp": time.time(),
-                                "format": "h264",
-                                "resolution": camera.camera_properties["PixelArraySize"]
-                            }
-
-                            # Invia il frame
-                            self.stream_socket.send_json(header, zmq.SNDMORE)
-                            self.stream_socket.send(encoded_data, copy=False)
-
-                            frame_count += 1
-                    else:
-                        # Ottieni il frame raw
-                        frame = camera.capture_array()
-
-                        # Converti in JPEG per ridurre la dimensione
-                        _, encoded_data = cv2.imencode('.jpg', frame,
-                                                       [cv2.IMWRITE_JPEG_QUALITY, 90])
-
-                        # Crea l'header del messaggio
-                        header = {
-                            "camera": camera_index,
-                            "frame": frame_count,
-                            "timestamp": time.time(),
-                            "format": "jpeg",
-                            "resolution": camera.camera_properties["PixelArraySize"]
-                        }
-
-                        # Invia il frame
-                        self.stream_socket.send_json(header, zmq.SNDMORE)
-                        self.stream_socket.send(encoded_data.tobytes(), copy=False)
-
-                        frame_count += 1
-
-                    # Calcola FPS
-                    if frame_count % 30 == 0:
-                        current_time = time.time()
-                        fps = 30 / (current_time - start_time)
-                        start_time = current_time
-                        logger.debug(f"Camera {camera_index} streaming a {fps:.1f} FPS")
-
-                except Exception as e:
-                    logger.error(f"Errore nello streaming della camera {camera_index}: {e}")
-                    if not self.state["streaming"]:
-                        break
-                    time.sleep(0.1)  # Pausa breve in caso di errore
-
-        except Exception as e:
-            logger.error(f"Errore fatale nello streaming della camera {camera_index}: {e}")
-
-        finally:
-            # Ferma l'encoder se attivo
-            if stream_format == "h264":
-                try:
-                    camera.stop_encoder()
-                except:
-                    pass
-
-        logger.info(f"Thread di streaming camera {camera_index} terminato")
 
     def _capture_frames(self) -> bool:
         """

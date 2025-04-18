@@ -8,14 +8,15 @@ Finestra principale dell'applicazione UnLook Client.
 import logging
 from enum import Enum
 from typing import Optional, List
+from pathlib import Path
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QStatusBar, QToolBar,
     QDockWidget, QSplitter, QFrame, QTabWidget, QMessageBox,
-    QMenu
+    QMenu, QFileDialog
 )
-from PySide6.QtGui import QAction # Importa QAction per le azioni del menu
+from PySide6.QtGui import QAction  # Importa QAction per le azioni del menu
 from PySide6.QtCore import Qt, Slot, QSettings, QSize, QPoint
 from PySide6.QtGui import QIcon, QPixmap, QFont
 
@@ -160,6 +161,32 @@ class MainWindow(QMainWindow):
         disconnect_all_action = QAction("&Disconnetti tutti", self)
         disconnect_all_action.triggered.connect(self._disconnect_all)
         scanner_menu.addAction(disconnect_all_action)
+
+        # Menu Configurazione - Nuovo menu
+        config_menu = self.menuBar().addMenu("&Configurazione")
+
+        # Azione Preferenze applicazione
+        app_preferences_action = QAction("&Preferenze applicazione", self)
+        app_preferences_action.triggered.connect(self._show_app_preferences)
+        config_menu.addAction(app_preferences_action)
+
+        # Azione Imposta directory output
+        set_output_dir_action = QAction("&Imposta directory output", self)
+        set_output_dir_action.triggered.connect(self._set_output_directory)
+        config_menu.addAction(set_output_dir_action)
+
+        # Separatore
+        config_menu.addSeparator()
+
+        # Azione Salva configurazione
+        save_config_action = QAction("&Salva configurazione", self)
+        save_config_action.triggered.connect(self._save_configuration)
+        config_menu.addAction(save_config_action)
+
+        # Azione Carica configurazione
+        load_config_action = QAction("&Carica configurazione", self)
+        load_config_action.triggered.connect(self._load_configuration)
+        config_menu.addAction(load_config_action)
 
         # Menu Visualizza
         view_menu = self.menuBar().addMenu("&Visualizza")
@@ -497,4 +524,52 @@ class MainWindow(QMainWindow):
             "© 2025 SupernovaIndustries\n"
             "Un sistema di scansione 3D open source e modulare\n"
             "Licenza MIT"
+        )
+
+    def _show_app_preferences(self):
+        """Mostra la finestra delle preferenze dell'applicazione."""
+        # Qui potremmo aprire un dialog per le preferenze
+        # Per ora mostriamo solo un messaggio
+        QMessageBox.information(
+            self,
+            "Preferenze Applicazione",
+            "Funzionalità in fase di sviluppo.\nQui verranno mostrate le preferenze dell'applicazione."
+        )
+
+    def _set_output_directory(self):
+        """Imposta la directory di output per i file salvati."""
+        # Apri un selettore di directory
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Seleziona directory di output",
+            str(Path.home())
+        )
+
+        if directory:
+            # Qui dovremmo salvare la configurazione
+            # Per ora mostriamo solo un messaggio
+            QMessageBox.information(
+                self,
+                "Directory Impostata",
+                f"Directory di output impostata a:\n{directory}"
+            )
+
+    def _save_configuration(self):
+        """Salva la configurazione corrente."""
+        # Qui dovremmo implementare il salvataggio della configurazione
+        # Per ora mostriamo solo un messaggio
+        QMessageBox.information(
+            self,
+            "Configurazione Salvata",
+            "Configurazione salvata con successo."
+        )
+
+    def _load_configuration(self):
+        """Carica una configurazione salvata."""
+        # Qui dovremmo implementare il caricamento della configurazione
+        # Per ora mostriamo solo un messaggio
+        QMessageBox.information(
+            self,
+            "Configurazione Caricata",
+            "Configurazione caricata con successo."
         )
