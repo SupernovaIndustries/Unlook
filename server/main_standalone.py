@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-UnLook Scanner Server - Versione minima
+UnLook Scanner Server - Versione minima corretta
 Gestisce le camere e lo streaming video verso il client.
 """
 
@@ -43,6 +43,7 @@ logger = logging.getLogger("UnLookServer")
 import zmq
 import numpy as np
 from picamera2 import Picamera2
+import cv2
 
 
 class UnLookServer:
@@ -86,6 +87,7 @@ class UnLookServer:
 
         # Inizializza i thread
         self.discovery_thread = None
+        self.command_thread = None
         self.stream_threads = []
 
         logger.info(f"Server UnLook inizializzato con ID: {self.device_id}")
@@ -242,6 +244,9 @@ class UnLookServer:
         logger.info("Avvio del server UnLook")
 
         try:
+            # Imposta lo stato in esecuzione
+            self.running = True
+
             # Avvia le camere
             for cam_info in self.cameras:
                 cam_info["camera"].start()
@@ -263,8 +268,6 @@ class UnLookServer:
             # Avvia il loop di ricezione comandi
             self._start_command_handler()
 
-            # Imposta lo stato in esecuzione
-            self.running = True
             self.state["status"] = "running"
 
             logger.info("Server UnLook avviato con successo")
@@ -290,18 +293,40 @@ class UnLookServer:
         if self.discovery_thread and self.discovery_thread.is_alive():
             logger.info("Arresto del servizio di discovery...")
             if self.discovery_socket:
-                self.discovery_socket.close()
+                try:
+                    self.discovery_socket.close()
+                except:
+                    pass
+
+        # Attendi che i thread terminino
+        if self.discovery_thread and self.discovery_thread.is_alive():
+            try:
+                self.discovery_thread.join(timeout=2.0)
+            except:
+                pass
+
+        if self.command_thread and self.command_thread.is_alive():
+            try:
+                self.command_thread.join(timeout=2.0)
+            except:
+                pass
 
         # Chiudi i socket ZeroMQ
         logger.info("Chiusura dei socket...")
-        self.command_socket.close()
-        self.stream_socket.close()
-        self.context.term()
+        try:
+            self.command_socket.close()
+            self.stream_socket.close()
+            self.context.term()
+        except:
+            pass
 
         # Ferma le camere
         for cam_info in self.cameras:
             logger.info(f"Arresto della camera {cam_info['name']}...")
-            cam_info["camera"].stop()
+            try:
+                cam_info["camera"].stop()
+            except:
+                pass
 
         logger.info("Server UnLook arrestato")
 
@@ -315,8 +340,16 @@ class UnLookServer:
         self.discovery_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.discovery_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
+        # Permetti di riutilizzare l'indirizzo multicast
+        self.discovery_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+
         # Associa a tutte le interfacce
-        self.discovery_socket.bind(('', self.config["server"]["discovery_port"]))
+        try:
+            self.discovery_socket.bind(('', self.config["server"]["discovery_port"]))
+            logger.info(f"Socket di discovery associato alla porta {self.config['server']['discovery_port']}")
+        except Exception as e:
+            logger.error(f"Errore nell'associazione del socket di discovery: {e}")
+            return
 
         # Avvia il thread di discovery
         self.discovery_thread = threading.Thread(target=self._discovery_loop)
@@ -340,62 +373,70 @@ class UnLookServer:
                 try:
                     # Attendi messaggi di discovery
                     self.discovery_socket.settimeout(1.0)  # Timeout di 1 secondo
-                    data, addr = self.discovery_socket.recvfrom(1024)
 
-                    # Decodifica il messaggio
-                    message = data.decode('utf-8')
+                    try:
+                        data, addr = self.discovery_socket.recvfrom(1024)
+                        logger.debug(f"Dati ricevuti da {addr}: {data[:20]}...")
 
-                    # Verifica se è un messaggio di discovery valido
-                    if message.startswith('{') and message.endswith('}'):
-                        try:
-                            request = json.loads(message)
-                            if request.get('type') == 'UNLOOK_DISCOVER':
-                                logger.info(f"Richiesta di discovery ricevuta da {addr}")
+                        # Decodifica il messaggio
+                        message = data.decode('utf-8')
 
-                                # Prepara la risposta
-                                response = {
-                                    "type": "UNLOOK_ANNOUNCE",
-                                    "device_id": self.device_id,
-                                    "name": self.device_name,
-                                    "version": "1.0.0",
-                                    "cameras": len(self.cameras),
-                                    "port": self.config["server"]["command_port"],
-                                    "capabilities": {
-                                        "dual_camera": len(self.cameras) > 1,
-                                        "color_mode": True,
-                                        "tof": False,
-                                        "dlp": False
+                        # Verifica se è un messaggio di discovery valido
+                        if message.startswith('{') and message.endswith('}'):
+                            try:
+                                request = json.loads(message)
+                                if request.get('type') == 'UNLOOK_DISCOVER':
+                                    logger.info(f"Richiesta di discovery ricevuta da {addr}")
+
+                                    # Prepara la risposta
+                                    response = {
+                                        "type": "UNLOOK_ANNOUNCE",
+                                        "device_id": self.device_id,
+                                        "name": self.device_name,
+                                        "version": "1.0.0",
+                                        "cameras": len(self.cameras),
+                                        "port": self.config["server"]["command_port"],
+                                        "capabilities": {
+                                            "dual_camera": len(self.cameras) > 1,
+                                            "color_mode": True,
+                                            "tof": False,
+                                            "dlp": False
+                                        }
                                     }
-                                }
 
-                                # Invia la risposta
-                                response_data = json.dumps(response).encode('utf-8')
-                                self.discovery_socket.sendto(response_data, addr)
-                                logger.debug(f"Risposta di discovery inviata a {addr}")
-                        except json.JSONDecodeError:
-                            # Messaggio non valido, ignora
-                            pass
+                                    # Invia la risposta
+                                    response_data = json.dumps(response).encode('utf-8')
+                                    self.discovery_socket.sendto(response_data, addr)
+                                    logger.info(f"Risposta di discovery inviata a {addr}")
+                            except json.JSONDecodeError as je:
+                                logger.warning(f"Messaggio non JSON valido: {message[:50]}")
+                            except Exception as e:
+                                logger.error(f"Errore nell'elaborazione del messaggio: {e}")
+                    except socket.timeout:
+                        # Timeout normale, continua
+                        continue
+                    except Exception as e:
+                        logger.error(f"Errore nella ricezione: {e}")
+                        time.sleep(0.1)  # Evita loop troppo rapidi in caso di errore
 
-                except socket.timeout:
-                    # Timeout normale, continua
-                    pass
                 except Exception as e:
                     logger.error(f"Errore nel discovery loop: {e}")
                     if not self.running:
                         break
+                    time.sleep(0.5)  # Pausa in caso di errore
 
         except Exception as e:
             logger.error(f"Errore fatale nel discovery loop: {e}")
-
-        logger.info("Discovery loop terminato")
+        finally:
+            logger.info("Discovery loop terminato")
 
     def _start_command_handler(self):
         """
         Avvia il gestore dei comandi in un thread separato.
         """
-        command_thread = threading.Thread(target=self._command_loop)
-        command_thread.daemon = True
-        command_thread.start()
+        self.command_thread = threading.Thread(target=self._command_loop)
+        self.command_thread.daemon = True
+        self.command_thread.start()
         logger.info("Handler dei comandi avviato")
 
     def _command_loop(self):
@@ -432,6 +473,7 @@ class UnLookServer:
                         })
                     except:
                         pass
+                    time.sleep(0.1)  # Piccola pausa per evitare loop troppo rapidi
 
         except Exception as e:
             logger.error(f"Errore fatale nel command loop: {e}")
@@ -687,7 +729,6 @@ class UnLookServer:
                         frame = camera.capture_array()
 
                         # Converti in JPEG per ridurre la dimensione
-                        import cv2
                         _, encoded_data = cv2.imencode('.jpg', frame,
                                                        [cv2.IMWRITE_JPEG_QUALITY, 90])
 
@@ -803,12 +844,16 @@ def main():
     # Loop principale
     try:
         logger.info("Server UnLook in esecuzione. Premi Ctrl+C per terminare.")
-        while True:
+
+        # Mantieni il thread principale attivo
+        while server.running:
             time.sleep(1)
+
     except KeyboardInterrupt:
         logger.info("Interruzione da tastiera ricevuta. Arresto in corso...")
     finally:
         server.stop()
+
 
 if __name__ == "__main__":
     main()

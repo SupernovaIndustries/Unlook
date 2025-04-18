@@ -5,21 +5,9 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="31592bd9-183c-4f71-ad25-9064a5892649" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/controllers/scanner_controller.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/controllers/scanner_controller.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/models/config_model.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/models/config_model.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/models/scanner_model.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/models/scanner_model.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/network/connection_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/network/connection_manager.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/network/stream_reciever.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/views/config_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/views/config_view.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/views/main_window.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/views/main_window.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/views/main_windows.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/views/scanner_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/views/scanner_view.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/views/streaming_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/views/streaming_view.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/server/install.sh" beforeDir="false" afterPath="$PROJECT_DIR$/server/install.sh" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/main_standalone.py" beforeDir="false" afterPath="$PROJECT_DIR$/server/main_standalone.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
