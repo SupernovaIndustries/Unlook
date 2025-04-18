@@ -1,0 +1,18 @@
+# Dipendenze principali
+PySide6
+opencv-python>=4.5.0
+numpy>=1.19.0
+
+# Dipendenze di rete
+zeroconf>=0.38.0
+pyzmq>=22.0.0
+
+# Utilità
+Pillow>=8.0.0
+scipy>=1.7.0
+psutil>=5.8.0
+
+# Strumenti di sviluppo (opzionali)
+pytest>=6.0.0
+black>=21.5b2
+flake8>=3.9.0

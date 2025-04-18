@@ -1,0 +1,14 @@
+# Dipendenze principali
+pyzmq>=22.0.0
+numpy>=1.19.0
+picamera2>=0.3.9
+pillow>=8.0.0
+
+# Per l'elaborazione immagini
+opencv-python>=4.5.0
+
+# Per la codifica video
+simplejpeg>=1.6.0
+
+# Utilità
+psutil>=5.8.0
