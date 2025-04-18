@@ -35,6 +35,8 @@ class ConnectionWorker(QThread):
         self._running = False
         self._mutex = QMutex()
         self._send_queue = []
+        self._error_count = 0
+        self._max_errors = 3  # Numero massimo di errori prima di chiudere la connessione
 
     def run(self):
         """Esegue il loop principale di connessione."""
@@ -54,13 +56,24 @@ class ConnectionWorker(QThread):
             self._running = True
             self.connection_ready.emit(self.device_id)
 
+            # Invia immediatamente un PING per confermare la connessione
+            self._send_ping()
+
             # Loop principale
             message_buffer = b""
             header_size = 4  # Dimensione dell'header del messaggio (lunghezza)
+            last_ping_time = time.time()
+            ping_interval = 5.0  # Invia un ping ogni 5 secondi
 
             while self._running:
                 # Invia i messaggi in coda
                 self._process_send_queue()
+
+                # Invia periodicamente un ping per mantenere la connessione attiva
+                current_time = time.time()
+                if current_time - last_ping_time > ping_interval:
+                    self._send_ping()
+                    last_ping_time = current_time
 
                 # Ricevi dati
                 try:
@@ -85,6 +98,8 @@ class ConnectionWorker(QThread):
                             message_buffer = message_buffer[header_size + msg_len:]
                             # Emetti il segnale
                             self.data_received.emit(self.device_id, message)
+                            # Resetta il contatore degli errori dopo una ricezione corretta
+                            self._error_count = 0
                         else:
                             # Messaggio incompleto, attendi altri dati
                             break
@@ -93,10 +108,16 @@ class ConnectionWorker(QThread):
                     continue
                 except ConnectionError as e:
                     logger.error(f"Errore di connessione: {str(e)}")
-                    break
+                    self._error_count += 1
+                    if self._error_count >= self._max_errors:
+                        logger.error(f"Troppi errori di connessione. Chiusura della connessione.")
+                        break
                 except Exception as e:
                     logger.error(f"Errore durante la ricezione: {str(e)}")
-                    break
+                    self._error_count += 1
+                    if self._error_count >= self._max_errors:
+                        logger.error(f"Troppi errori generici. Chiusura della connessione.")
+                        break
         except ConnectionRefusedError:
             logger.error(f"Connessione rifiutata da {self.host}:{self.port}")
             self.connection_error.emit(self.device_id, "Connessione rifiutata")
@@ -111,6 +132,16 @@ class ConnectionWorker(QThread):
             self._cleanup()
             # Notifica la chiusura
             self.connection_closed.emit(self.device_id)
+
+    def _send_ping(self):
+        """Invia un ping al server per mantenere la connessione attiva."""
+        ping_message = {
+            "type": "PING",
+            "timestamp": time.time() * 1000  # Millisecondi
+        }
+        data = json.dumps(ping_message).encode('utf-8')
+        self.send_data(data)
+        logger.debug(f"Ping inviato al server {self.host}")
 
     def send_data(self, data: bytes) -> bool:
         """
@@ -147,7 +178,10 @@ class ConnectionWorker(QThread):
                 self._socket.sendall(header + data)
             except Exception as e:
                 logger.error(f"Errore durante l'invio: {str(e)}")
-                self._running = False
+                self._error_count += 1
+                if self._error_count >= self._max_errors:
+                    logger.error(f"Troppi errori di invio. Chiusura della connessione.")
+                    self._running = False
                 break
 
     def stop(self):
@@ -233,6 +267,9 @@ class ConnectionManager(QObject):
         if device_id not in self._connections:
             logger.warning(f"Nessuna connessione attiva per {device_id}")
             return False
+
+        # Invia un messaggio di disconnessione esplicito
+        self.send_message(device_id, "DISCONNECT")
 
         # Ferma il worker
         worker = self._connections[device_id]
