@@ -66,6 +66,9 @@ class UnLookServer:
         # Carica la configurazione
         self.config = self._load_config(config_path)
 
+        # Assicura che le nuove chiavi di configurazione siano presenti
+        self._ensure_config_keys()
+
         # Inizializza le camere
         self.cameras = []
         self._init_cameras()
@@ -101,6 +104,30 @@ class UnLookServer:
 
         logger.info(f"Server UnLook inizializzato con ID: {self.device_id}")
         logger.info(f"È consigliabile etichettare il case con l'UUID: {self.device_id}")
+
+    def _ensure_config_keys(self):
+        """Assicura che tutte le chiavi di configurazione necessarie siano presenti."""
+        # Verifica che la sezione server esista
+        if "server" not in self.config:
+            self.config["server"] = {}
+
+        # Aggiungi le chiavi mancanti con valori predefiniti
+        server_config = self.config["server"]
+
+        if "discovery_port" not in server_config:
+            server_config["discovery_port"] = 5678
+
+        if "command_port" not in server_config:
+            server_config["command_port"] = 5680
+
+        if "stream_port" not in server_config:
+            server_config["stream_port"] = 5681
+
+        if "broadcast_port" not in server_config:
+            server_config["broadcast_port"] = 5679
+
+        if "broadcast_interval" not in server_config:
+            server_config["broadcast_interval"] = 1.0
 
     def _generate_device_id(self) -> str:
         """
@@ -354,14 +381,13 @@ class UnLookServer:
 
         # Bind socket per ricevere risposte (opzionale)
         try:
-            self.broadcast_socket.bind(('', self.config["server"]["broadcast_port"]))
-            logger.info(f"Socket di broadcast associato alla porta {self.config['server']['broadcast_port']}")
-        except Exception as e:
-            logger.error(f"Errore nell'associazione del socket di broadcast: {e}")
-            # Fallback: usa una porta casuale
+            # Usa una porta casuale per l'invio per evitare conflitti
             self.broadcast_socket.bind(('', 0))
             _, port = self.broadcast_socket.getsockname()
-            logger.info(f"Socket di broadcast associato alla porta {port} (fallback)")
+            logger.info(f"Socket di broadcast associato alla porta {port}")
+        except Exception as e:
+            logger.error(f"Errore nell'associazione del socket di broadcast: {e}")
+            # Non richiedere bind, può funzionare comunque per l'invio
 
         # Avvia il thread di broadcast
         self.broadcast_thread = threading.Thread(target=self._broadcast_loop)
@@ -388,15 +414,16 @@ class UnLookServer:
         """
         Loop principale per il servizio di broadcast.
         """
-        broadcast_port = self.config["server"]["broadcast_port"]
         discovery_port = self.config["server"]["discovery_port"]
+        broadcast_port = self.config["server"]["broadcast_port"]
         broadcast_interval = self.config["server"]["broadcast_interval"]
         broadcast_address = "255.255.255.255"  # Indirizzo di broadcast
 
         # Ottieni l'indirizzo IP locale
         local_ip = self._get_local_ip()
 
-        logger.info(f"Broadcast loop avviato (indirizzo: {broadcast_address}, porta: {broadcast_port})")
+        logger.info(f"Broadcast loop avviato (indirizzo: {broadcast_address})")
+        logger.info(f"Inviando sulla porta discovery: {discovery_port} e porta broadcast: {broadcast_port}")
         logger.info(f"Indirizzo IP locale: {local_ip}")
 
         msg_count = 0
