@@ -45,6 +45,7 @@
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
     "Python.check_imporrt.executor": "Run",
+    "Python.connection_manager.executor": "Run",
     "Python.diagnostic.executor": "Run",
     "Python.fix_imports.executor": "Run",
     "Python.fix_threads.executor": "Run",

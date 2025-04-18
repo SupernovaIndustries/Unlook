@@ -31,7 +31,7 @@ CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Configurazione logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Impostato a DEBUG per avere più informazioni dettagliate
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
@@ -86,8 +86,10 @@ class UnLookServer:
         # Inizializza i socket di comunicazione
         self.broadcast_socket = None
         self.context = zmq.Context()
-        self.command_socket = self.context.socket(zmq.REP)  # Socket per i comandi (REP)
-        self.stream_socket = self.context.socket(zmq.PUB)  # Socket per lo streaming (PUB)
+
+        # Cambiato da REP/REQ a ROUTER/DEALER per una comunicazione più flessibile
+        self.command_socket = self.context.socket(zmq.ROUTER)
+        self.stream_socket = self.context.socket(zmq.PUB)
 
         # Inizializza i thread
         self.broadcast_thread = None
@@ -100,6 +102,7 @@ class UnLookServer:
         self.client_connection_time = 0
         self.client_heartbeat_time = 0
         self.client_id = None  # Per tenere traccia dell'ID del client
+        self.client_identity = None  # Per memorizzare l'identità ZMQ del client
 
         # Mutex per proteggere le variabili del client
         self.client_mutex = threading.Lock()
@@ -204,9 +207,9 @@ class UnLookServer:
                 }
             },
             "stream": {
-                "format": "h264",  # h264, mjpeg, raw
-                "quality": 23,  # 0-51 per h264 (più basso è meglio)
-                "bitrate": 2000000  # 2 Mbps
+                "format": "jpeg",  # Cambiato da h264 a jpeg per maggiore semplicità
+                "quality": 90,  # Qualità JPEG (0-100)
+                "bitrate": 2000000  # 2 Mbps (per retrocompatibilità)
             }
         }
 
@@ -309,11 +312,9 @@ class UnLookServer:
             stream_port = self.config["server"]["stream_port"]
 
             # Configura i socket con timeout
-            self.command_socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1 secondo di timeout per le ricezioni
-            self.command_socket.setsockopt(zmq.SNDTIMEO, 1000)  # 1 secondo di timeout per gli invii
             self.command_socket.setsockopt(zmq.LINGER, 0)  # Non aspettare quando si chiude il socket
-
             self.command_socket.bind(f"tcp://*:{command_port}")
+
             self.stream_socket.bind(f"tcp://*:{stream_port}")
 
             logger.info(f"Socket di comando in ascolto su porta {command_port}")
@@ -435,7 +436,7 @@ class UnLookServer:
             try:
                 # Controlla se c'è un client connesso
                 with self.client_mutex:
-                    if self.client_connected:
+                    if self.client_connected and self.client_identity:
                         current_time = time.time()
                         client_timeout = self.config["server"]["client_timeout"]
 
@@ -449,6 +450,7 @@ class UnLookServer:
                             self.client_connected = False
                             self.client_ip = None
                             self.client_id = None
+                            self.client_identity = None
                             self.state["clients_connected"] = 0
 
                             # Se lo streaming è attivo, fermalo
@@ -572,53 +574,76 @@ class UnLookServer:
         logger.info("Command loop avviato")
 
         try:
+            poller = zmq.Poller()
+            poller.register(self.command_socket, zmq.POLLIN)
+
             while self.running:
                 try:
-                    # Attendi un comando
-                    message = self.command_socket.recv_json()
+                    # Usa poller per ricevere con timeout
+                    socks = dict(poller.poll(1000))  # 1 secondo di timeout
 
-                    # Estrai l'indirizzo del client
-                    client_routing_id = self.command_socket.get_routing_id()
+                    # Se non ci sono messaggi, continua
+                    if self.command_socket not in socks:
+                        continue
+
+                    # Con ROUTER, il primo frame è l'identità del client
+                    client_id = self.command_socket.recv()
+                    empty = self.command_socket.recv()  # Frame vuoto (delimiter)
+                    message_data = self.command_socket.recv()  # Frame con i dati
+
+                    # Logga l'identità del client
+                    logger.debug(f"Ricevuto messaggio dal client ID: {client_id.hex()}")
+
+                    # Decodifica il messaggio
+                    message = json.loads(message_data.decode('utf-8'))
+                    command_type = message.get('type', '')
+                    logger.info(f"Comando ricevuto: {command_type}")
+
+                    # Estrai l'indirizzo del client (se possibile)
                     client_ip = None
-
                     try:
-                        # Prova a ottenere l'indirizzo IP del client
-                        peer_endpoint = self.command_socket.get(zmq.LAST_ENDPOINT)
-                        if peer_endpoint:
-                            client_ip = peer_endpoint.split("//")[1].split(":")[0]
-                            logger.debug(f"Comando ricevuto dal client {client_ip}")
+                        endpoints = self.command_socket.get(zmq.LAST_ENDPOINT)
+                        if endpoints:
+                            # Potrebbe essere una lista di endpoint
+                            if isinstance(endpoints, list):
+                                endpoint = endpoints[0]
+                            else:
+                                endpoint = endpoints
+                            client_ip = endpoint.split("//")[1].split(":")[0]
+                            logger.debug(f"IP client: {client_ip}")
                     except Exception as e:
                         logger.debug(f"Impossibile ottenere l'IP del client: {e}")
 
-                    # Aggiorna il timestamp dell'heartbeat
+                    # Registra il client
                     current_time = time.time()
                     with self.client_mutex:
+                        # Memorizza sempre l'identità e l'ultimo heartbeat
+                        self.client_identity = client_id
                         self.client_heartbeat_time = current_time
 
-                        # Se il client non è registrato, registralo
-                        if not self.client_connected and client_ip:
+                        # Se il client non è ancora registrato, registralo
+                        if not self.client_connected:
                             self.client_connected = True
                             self.client_ip = client_ip
                             self.client_connection_time = current_time
                             self.state["clients_connected"] = 1
-                            logger.info(f"Client {client_ip} registrato")
+                            logger.info(f"Client {client_ip} registrato con identità {client_id.hex()}")
 
                     # Processa il comando
                     response = self._process_command(message, client_ip)
 
-                    # Invia la risposta
+                    # Preparazione risposta per ROUTER
                     try:
+                        # In ROUTER/DEALER, devi inviare prima l'identità del client
+                        self.command_socket.send(client_id, zmq.SNDMORE)
+                        self.command_socket.send(b"", zmq.SNDMORE)  # Frame vuoto (delimiter)
                         self.command_socket.send_json(response)
-                        # Azzera il contatore degli errori dopo un invio riuscito
-                        self.communication_errors = 0
-                    except zmq.Again:
-                        logger.error("Timeout nell'invio della risposta al client")
-                        self.communication_errors += 1
+                        self.communication_errors = 0  # Azzera il contatore degli errori
                     except Exception as e:
                         logger.error(f"Errore nell'invio della risposta: {e}")
                         self.communication_errors += 1
 
-                    # Se ci sono troppi errori di comunicazione, considera il client disconnesso
+                    # Gestione di troppi errori di comunicazione
                     if self.communication_errors >= self.max_communication_errors:
                         with self.client_mutex:
                             if self.client_connected:
@@ -626,24 +651,20 @@ class UnLookServer:
                                     f"Troppi errori di comunicazione, client {self.client_ip} considerato disconnesso")
                                 self.client_connected = False
                                 self.client_ip = None
+                                self.client_identity = None
                                 self.state["clients_connected"] = 0
                         self.communication_errors = 0
 
-                except zmq.Again:
-                    # Timeout normale, continua
-                    continue
+                except zmq.ZMQError as e:
+                    if e.errno == zmq.EAGAIN:
+                        # Timeout normale, continua
+                        continue
+                    else:
+                        logger.error(f"Errore ZMQ nel command loop: {e}")
+                        time.sleep(0.1)  # Breve pausa in caso di errore
                 except Exception as e:
                     logger.error(f"Errore nel command loop: {e}")
-                    try:
-                        # Tenta di inviare una risposta di errore
-                        self.command_socket.send_json({
-                            "status": "error",
-                            "error": str(e)
-                        })
-                    except:
-                        pass
-
-                    time.sleep(0.1)  # Piccola pausa per evitare loop troppo rapidi
+                    time.sleep(0.1)  # Breve pausa in caso di errore
 
         except Exception as e:
             logger.error(f"Errore fatale nel command loop: {e}")
@@ -662,7 +683,7 @@ class UnLookServer:
             Dizionario di risposta
         """
         command_type = command.get('type', '')
-        logger.info(f"Comando ricevuto: {command_type}")
+        logger.info(f"Elaborazione comando: {command_type}")
 
         # Prepara una risposta base
         response = {
@@ -674,18 +695,14 @@ class UnLookServer:
             if command_type == 'PING':
                 # Comando ping/heartbeat
                 response['timestamp'] = time.time()
-                # Aggiorna il timestamp dell'heartbeat
-                with self.client_mutex:
-                    self.client_heartbeat_time = time.time()
                 logger.debug(f"Heartbeat da {client_ip}")
 
             elif command_type == 'GET_STATUS':
                 # Aggiorna lo stato
                 self.state['uptime'] = time.time() - self.state['start_time']
-
                 # Aggiungi lo stato alla risposta
                 response['state'] = self.state
-
+                logger.debug(f"Inviando stato al client: {self.state}")
 
             elif command_type == 'START_STREAM':
                 # Verifica se lo streaming è già attivo
@@ -712,7 +729,6 @@ class UnLookServer:
                     self.stop_streaming()
                     response['streaming'] = False
                     response['message'] = "Streaming arrestato"
-
 
             elif command_type == 'SET_CONFIG':
                 # Aggiorna la configurazione
@@ -743,6 +759,7 @@ class UnLookServer:
                     self.client_connected = False
                     logger.info(f"Client {self.client_ip} disconnesso (esplicito)")
                     self.client_ip = None
+                    self.client_identity = None
                     self.state["clients_connected"] = 0
                 response['disconnected'] = True
 
@@ -892,12 +909,13 @@ class UnLookServer:
         logger.info(f"Thread di streaming camera {camera_index} avviato")
 
         try:
-            # Configura il formato dello stream
-            stream_format = self.config["stream"]["format"]
+            # Ottieni parametri di configurazione
+            quality = self.config["stream"]["quality"]
 
             # Loop principale per lo streaming
             frame_count = 0
             start_time = time.time()
+            fps_calc_interval = 30  # Calcola FPS ogni 30 frames
 
             while self.state["streaming"] and self.running:
                 try:
@@ -905,7 +923,12 @@ class UnLookServer:
                     frame = camera.capture_array()
 
                     # Converti in JPEG per ridurre la dimensione
-                    _, encoded_data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                    success, encoded_data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+
+                    if not success:
+                        logger.error(f"Errore nell'encoding JPEG del frame della camera {camera_index}")
+                        time.sleep(0.1)  # Breve pausa prima di riprovare
+                        continue
 
                     # Crea l'header del messaggio
                     header = {
@@ -913,16 +936,27 @@ class UnLookServer:
                         "frame": frame_count,
                         "timestamp": time.time(),
                         "format": "jpeg",
-                        "resolution": camera.camera_properties["PixelArraySize"]
+                        "resolution": list(camera.camera_properties["PixelArraySize"])
                     }
 
-                    # Invia il frame
+                    # Invia l'header e poi i dati del frame
                     try:
-                        self.stream_socket.send_json(header, zmq.SNDMORE)
+                        # Converti l'header in JSON
+                        header_json = json.dumps(header).encode('utf-8')
+
+                        # Invia l'header con SNDMORE
+                        self.stream_socket.send(header_json, zmq.SNDMORE)
+
+                        # Invia i dati del frame
                         self.stream_socket.send(encoded_data.tobytes(), copy=False)
+
                         frame_count += 1
-                    except zmq.Again:
-                        logger.warning(f"Timeout nell'invio del frame della camera {camera_index}")
+                    except zmq.ZMQError as e:
+                        logger.error(f"Errore ZMQ nell'invio del frame: {e}")
+                        if not self.state["streaming"] or not self.running:
+                            break
+                        time.sleep(0.1)  # Pausa breve in caso di errore
+                        continue
                     except Exception as e:
                         logger.error(f"Errore nell'invio del frame: {e}")
                         if not self.state["streaming"] or not self.running:
@@ -930,12 +964,16 @@ class UnLookServer:
                         time.sleep(0.1)  # Pausa breve in caso di errore
                         continue
 
-                    # Calcola FPS
-                    if frame_count % 30 == 0:
+                    # Calcola FPS periodicamente
+                    if frame_count % fps_calc_interval == 0:
                         current_time = time.time()
-                        fps = 30 / (current_time - start_time)
+                        elapsed = current_time - start_time
+
+                        if elapsed > 0:
+                            fps = fps_calc_interval / elapsed
+                            logger.debug(f"Camera {camera_index} streaming a {fps:.1f} FPS")
+
                         start_time = current_time
-                        logger.debug(f"Camera {camera_index} streaming a {fps:.1f} FPS")
 
                 except Exception as e:
                     logger.error(f"Errore nello streaming della camera {camera_index}: {e}")
@@ -998,7 +1036,12 @@ def main():
     parser.add_argument('--broadcast-port', type=int, help='Porta per il broadcast (default: 5679)')
     parser.add_argument('--broadcast-interval', type=float, help='Intervallo di broadcast in secondi (default: 1.0)')
     parser.add_argument('--client-timeout', type=float, help='Timeout client in secondi (default: 30.0)')
+    parser.add_argument('--debug', action='store_true', help='Abilita il livello di log DEBUG')
     args = parser.parse_args()
+
+    # Imposta il livello di log
+    if not args.debug:
+        logging.getLogger().setLevel(logging.INFO)
 
     # Crea e avvia il server
     server = UnLookServer(config_path=args.config)

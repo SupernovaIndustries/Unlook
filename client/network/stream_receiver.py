@@ -15,14 +15,11 @@ from typing import Dict, Any, Optional, Callable, Tuple, List
 import zmq
 from PySide6.QtCore import QObject, Signal, Slot
 
-# Importa i moduli del progetto in modo che funzionino sia con esecuzione diretta che tramite launcher
 try:
     from client.utils.thread_safe_queue import ThreadSafeQueue
-    from common.protocol import FrameMessage, StreamFormat, CameraIndex, Resolution
 except ImportError:
     # Fallback per esecuzione diretta
     from utils.thread_safe_queue import ThreadSafeQueue
-    from common.protocol import FrameMessage, StreamFormat, CameraIndex, Resolution
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +27,7 @@ logger = logging.getLogger(__name__)
 class StreamReceiver(QObject):
     """
     Riceve e gestisce gli stream video dal server UnLook.
-    Supporta streaming H.264 e JPEG.
+    Supporta streaming JPEG.
     """
 
     # Segnali
@@ -59,8 +56,8 @@ class StreamReceiver(QObject):
 
         # Code di frame
         self._frame_queues = {
-            CameraIndex.LEFT.value: ThreadSafeQueue(maxsize=queue_size),
-            CameraIndex.RIGHT.value: ThreadSafeQueue(maxsize=queue_size)
+            0: ThreadSafeQueue(maxsize=queue_size),  # Camera sinistra
+            1: ThreadSafeQueue(maxsize=queue_size)  # Camera destra
         }
 
         # Thread di processamento
@@ -68,24 +65,18 @@ class StreamReceiver(QObject):
 
         # Statistiche
         self._stats = {
-            CameraIndex.LEFT.value: {
+            0: {  # Camera sinistra
                 "frames_received": 0,
                 "frames_processed": 0,
                 "last_frame_time": 0,
                 "fps": 0
             },
-            CameraIndex.RIGHT.value: {
+            1: {  # Camera destra
                 "frames_received": 0,
                 "frames_processed": 0,
                 "last_frame_time": 0,
                 "fps": 0
             }
-        }
-
-        # Decodificatori video
-        self._decoders = {
-            CameraIndex.LEFT.value: None,
-            CameraIndex.RIGHT.value: None
         }
 
         logger.info(f"StreamReceiver inizializzato con host={host}, port={port}")
@@ -94,13 +85,16 @@ class StreamReceiver(QObject):
         """Avvia la ricezione dello stream."""
         if self._running:
             logger.warning("StreamReceiver già in esecuzione")
-            return
+            return True
 
         logger.info(f"Avvio dello StreamReceiver {self.host}:{self.port}")
 
         try:
             # Crea il socket ZeroMQ
             self._socket = self._context.socket(zmq.SUB)
+
+            # Configura il socket
+            self._socket.setsockopt(zmq.LINGER, 0)  # Non aspettare alla chiusura
             self._socket.connect(f"tcp://{self.host}:{self.port}")
             self._socket.setsockopt(zmq.SUBSCRIBE, b"")  # Sottoscrivi a tutti i messaggi
 
@@ -185,26 +179,48 @@ class StreamReceiver(QObject):
         logger.info("Thread di ricezione avviato")
 
         try:
+            # Setup poller per timeout più preciso
+            poller = zmq.Poller()
+            poller.register(self._socket, zmq.POLLIN)
+
             while self._running:
                 try:
-                    # Ricevi l'header (timeout di 1 secondo)
-                    if self._socket.poll(1000) == 0:
+                    # Usa il poller con timeout
+                    socks = dict(poller.poll(500))  # 500ms di timeout
+
+                    # Se non ci sono messaggi, continua
+                    if self._socket not in socks:
                         continue
 
-                    # Ricevi l'header e i dati
-                    header_data = self._socket.recv_json()
-                    frame_data = self._socket.recv()
+                    # Ricevi il messaggio (header JSON e dati binari)
+                    try:
+                        # Ricevi l'header
+                        header_data = self._socket.recv()
+
+                        # Assicurati che ci siano altri dati da ricevere
+                        if not self._socket.get(zmq.RCVMORE):
+                            logger.warning("Ricevuto header senza dati del frame")
+                            continue
+
+                        # Ricevi i dati del frame
+                        frame_data = self._socket.recv()
+
+                        # Decodifica l'header
+                        header = json.loads(header_data.decode('utf-8'))
+                    except zmq.ZMQError as e:
+                        logger.error(f"Errore ZMQ nella ricezione: {e}")
+                        continue
+                    except Exception as e:
+                        logger.error(f"Errore nella decodifica dell'header: {e}")
+                        continue
 
                     # Salta i frame se in pausa
                     if self._paused:
                         continue
 
-                    # Elabora il frame
-                    self._process_frame_message(header_data, frame_data)
+                    # Processa il frame
+                    self._process_frame_message(header, frame_data)
 
-                except zmq.Again:
-                    # Timeout normale, continua
-                    continue
                 except Exception as e:
                     logger.error(f"Errore nella ricezione del frame: {e}")
                     if not self._running:
@@ -252,7 +268,7 @@ class StreamReceiver(QObject):
         except Exception as e:
             logger.error(f"Errore nell'elaborazione del messaggio di frame: {e}")
 
-    def _start_processor(self, camera_index: int, format_str: str, resolution: Tuple[int, int]):
+    def _start_processor(self, camera_index: int, format_str: str, resolution: List[int]):
         """
         Avvia un thread di processamento per una camera.
 
@@ -267,18 +283,10 @@ class StreamReceiver(QObject):
             if thread.is_alive():
                 return
 
-        # Crea il decodificatore appropriato
-        if format_str == "h264":
-            # Crea un decodificatore H.264
-            self._decoders[camera_index] = cv2.VideoCapture()
-        else:
-            # Per JPEG o raw, non serve un decodificatore specifico
-            self._decoders[camera_index] = None
-
         # Avvia il thread di processamento
         thread = threading.Thread(
             target=self._process_frames,
-            args=(camera_index, format_str, resolution)
+            args=(camera_index, format_str, tuple(resolution))
         )
         thread.daemon = True
         thread.start()
@@ -304,12 +312,6 @@ class StreamReceiver(QObject):
                 thread.join(timeout=2.0)
             del self._processor_threads[camera_index]
 
-        # Rilascia il decodificatore
-        if camera_index in self._decoders and self._decoders[camera_index]:
-            if isinstance(self._decoders[camera_index], cv2.VideoCapture):
-                self._decoders[camera_index].release()
-            self._decoders[camera_index] = None
-
         # Svuota la coda
         if camera_index in self._frame_queues:
             self._frame_queues[camera_index].clear()
@@ -332,7 +334,6 @@ class StreamReceiver(QObject):
         try:
             queue = self._frame_queues[camera_index]
             stats = self._stats[camera_index]
-            decoder = self._decoders[camera_index]
 
             # Imposta la larghezza e altezza
             width, height = resolution
@@ -346,37 +347,29 @@ class StreamReceiver(QObject):
 
                     frame_number, timestamp, format_str, resolution, data = frame_data
 
-                    # Decodifica il frame
-                    if format_str == "h264":
-                        # Decodifica H.264
-                        if decoder:
-                            # Crea un file temporaneo in memoria
+                    # Decodifica il frame in base al formato
+                    if format_str.lower() == "jpeg":
+                        # Decodifica JPEG
+                        try:
+                            # Converti i dati in un buffer numpy
                             frame_buffer = np.frombuffer(data, dtype=np.uint8)
 
-                            # Decodifica il frame
-                            decoded_frame = self._decode_h264_frame(frame_buffer, width, height)
-                            if decoded_frame is not None:
+                            # Decodifica l'immagine JPEG
+                            frame = cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
+
+                            if frame is not None and frame.size > 0:
                                 # Emetti il frame decodificato
-                                self.frame_received.emit(camera_index, decoded_frame)
+                                self.frame_received.emit(camera_index, frame)
                                 stats["frames_processed"] += 1
-
-                    elif format_str == "jpeg":
-                        # Decodifica JPEG
-                        frame_buffer = np.frombuffer(data, dtype=np.uint8)
-                        frame = cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
-
-                        if frame is not None:
-                            # Emetti il frame decodificato
-                            self.frame_received.emit(camera_index, frame)
-                            stats["frames_processed"] += 1
-
-                    else:  # raw
-                        # Decodifica raw (senza compressione)
-                        frame = np.frombuffer(data, dtype=np.uint8).reshape((height, width, 3))
-
-                        # Emetti il frame
-                        self.frame_received.emit(camera_index, frame)
-                        stats["frames_processed"] += 1
+                            else:
+                                logger.warning(f"Frame non valido ricevuto dalla camera {camera_index}")
+                        except Exception as e:
+                            logger.error(f"Errore nella decodifica JPEG: {e}")
+                            continue
+                    else:
+                        # Formato non supportato
+                        logger.warning(f"Formato frame non supportato: {format_str}")
+                        continue
 
                     # Calcola FPS
                     current_time = time.time()
@@ -405,60 +398,23 @@ class StreamReceiver(QObject):
 
         logger.info(f"Thread di processamento camera {camera_index} terminato")
 
-    def _decode_h264_frame(self, frame_buffer: np.ndarray, width: int, height: int) -> Optional[np.ndarray]:
-        """
-        Decodifica un frame H.264.
-
-        Args:
-            frame_buffer: Buffer del frame compresso
-            width: Larghezza attesa
-            height: Altezza attesa
-
-        Returns:
-            Frame decodificato o None in caso di errore
-        """
-        try:
-            # Usa FFmpeg tramite OpenCV per decodificare H.264
-            # Nota: questo è un approccio semplificato, una implementazione più robusta
-            # richiederebbe l'uso di FFmpeg direttamente o di altre librerie specializzate
-
-            # Approccio alternativo: usare il decoder H.264 hardware se disponibile
-            # Per ora, usiamo un approccio semplificato con OpenCV
-
-            # Crea un decoder temporaneo per questo frame
-            decoder = cv2.VideoCapture()
-
-            # Crea un file temporaneo con i dati del frame
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix=".h264", delete=True) as tmp:
-                tmp.write(frame_buffer.tobytes())
-                tmp.flush()
-
-                # Apri il file con OpenCV
-                if decoder.open(tmp.name):
-                    ret, frame = decoder.read()
-                    if ret:
-                        return frame
-
-            return None
-
-        except Exception as e:
-            logger.error(f"Errore nella decodifica H.264: {e}")
-            return None
-
     def _cleanup(self):
         """Pulisce le risorse."""
         # Chiudi il socket
         if self._socket:
-            self._socket.close()
+            try:
+                self._socket.close()
+            except:
+                pass
             self._socket = None
 
-        # Rilascia i decodificatori
-        for camera_index, decoder in self._decoders.items():
-            if decoder:
-                if isinstance(decoder, cv2.VideoCapture):
-                    decoder.release()
-                self._decoders[camera_index] = None
+        # Termina il context ZMQ
+        if self._context:
+            try:
+                self._context.term()
+            except:
+                pass
+            self._context = None
 
         # Svuota le code
         for queue in self._frame_queues.values():
@@ -467,3 +423,7 @@ class StreamReceiver(QObject):
         # Reimposta lo stato
         self._cameras_receiving = set()
         self._processor_threads = {}
+
+
+# Import json qui per evitare errori di circularità
+import json
