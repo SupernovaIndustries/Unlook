@@ -19,6 +19,7 @@
       <change beforePath="$PROJECT_DIR$/client/views/scanner_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/views/scanner_view.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/client/views/streaming_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/views/streaming_view.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/install.sh" beforeDir="false" afterPath="$PROJECT_DIR$/server/install.sh" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
