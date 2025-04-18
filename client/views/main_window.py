@@ -11,18 +11,19 @@ from typing import Optional, List
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QComboBox, QStatusBar, QAction, QToolBar,
+    QPushButton, QComboBox, QStatusBar, QToolBar,
     QDockWidget, QSplitter, QFrame, QTabWidget, QMessageBox,
     QMenu
 )
+from PySide6.QtWidgets import QAction # Importa QAction per le azioni del menu
 from PySide6.QtCore import Qt, Slot, QSettings, QSize, QPoint
 from PySide6.QtGui import QIcon, QPixmap, QFont
 
-from controllers.scanner_controller import ScannerController
-from models.scanner_model import Scanner, ScannerStatus
-from views.scanner_view import ScannerDiscoveryWidget
-from views.streaming_view import DualStreamView
-from views.config_view import ConfigurationWidget
+from client.controllers.scanner_controller import ScannerController
+from client.models.scanner_model import Scanner, ScannerStatus
+from client.views.scanner_view import ScannerDiscoveryWidget
+from client.views.streaming_view import DualStreamView
+from client.views.config_view import ConfigurationWidget
 
 logger = logging.getLogger(__name__)
 

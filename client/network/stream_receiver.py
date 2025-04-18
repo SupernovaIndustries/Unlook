@@ -15,8 +15,14 @@ from typing import Dict, Any, Optional, Callable, Tuple, List
 import zmq
 from PySide6.QtCore import QObject, Signal, Slot
 
-from utils.thread_safe_queue import ThreadSafeQueue
-from common.protocol import FrameMessage, StreamFormat, CameraIndex, Resolution
+# Importa i moduli del progetto in modo che funzionino sia con esecuzione diretta che tramite launcher
+try:
+    from client.utils.thread_safe_queue import ThreadSafeQueue
+    from common.protocol import FrameMessage, StreamFormat, CameraIndex, Resolution
+except ImportError:
+    # Fallback per esecuzione diretta
+    from utils.thread_safe_queue import ThreadSafeQueue
+    from common.protocol import FrameMessage, StreamFormat, CameraIndex, Resolution
 
 logger = logging.getLogger(__name__)
 

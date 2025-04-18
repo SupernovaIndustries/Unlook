@@ -1,0 +1,60 @@
+{
+  "application": {
+    "name": "UnLook Scanner Client",
+    "version": "1.0.0",
+    "organization": "SupernovaIndustries",
+    "log_level": "INFO"
+  },
+  "network": {
+    "discovery_port": 5678,
+    "discovery_group": "239.255.255.250",
+    "command_port": 5680,
+    "stream_port": 5681,
+    "connection_timeout": 5000
+  },
+  "user_interface": {
+    "theme": "fusion",
+    "language": "it",
+    "window_width": 1280,
+    "window_height": 800,
+    "stream_display_quality": "high"
+  },
+  "streaming": {
+    "preferred_format": "h264",
+    "buffer_size": 5,
+    "max_fps": 30,
+    "auto_reconnect": true,
+    "reconnect_attempts": 3
+  },
+  "cameras": {
+    "left": {
+      "enabled": true,
+      "default_resolution": [1280, 720],
+      "processing": {
+        "enable_enhancement": false,
+        "show_grid": false,
+        "show_features": false
+      }
+    },
+    "right": {
+      "enabled": true,
+      "default_resolution": [1280, 720],
+      "processing": {
+        "enable_enhancement": false,
+        "show_grid": false,
+        "show_features": false
+      }
+    }
+  },
+  "capture": {
+    "save_dir": "${HOME}/UnLook/captures",
+    "format": "png",
+    "quality": 100,
+    "naming_template": "unlook_%Y%m%d_%H%M%S_${camera}"
+  },
+  "development": {
+    "debug_mode": false,
+    "mock_server": false,
+    "performance_logging": false
+  }
+}

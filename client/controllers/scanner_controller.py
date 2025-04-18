@@ -10,8 +10,14 @@ from typing import List, Optional, Callable
 
 from PySide6.QtCore import QObject, Signal, Slot, Property
 
-from models.scanner_model import Scanner, ScannerManager, ScannerStatus
-from network.connection_manager import ConnectionManager
+# Importa i moduli del progetto in modo che funzionino sia con esecuzione diretta che tramite launcher
+try:
+    from client.models.scanner_model import Scanner, ScannerManager, ScannerStatus
+    from client.network.connection_manager import ConnectionManager
+except ImportError:
+    # Fallback per esecuzione diretta
+    from models.scanner_model import Scanner, ScannerManager, ScannerStatus
+    from network.connection_manager import ConnectionManager
 
 logger = logging.getLogger(__name__)
 
