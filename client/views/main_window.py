@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QStatusBar, QToolBar,
     QDockWidget, QSplitter, QFrame, QTabWidget, QMessageBox,
-    QMenu, QFileDialog
+    QMenu, QFileDialog, QDialog
 )
 from PySide6.QtGui import QAction  # Importa QAction per le azioni del menu
 from PySide6.QtCore import Qt, Slot, QSettings, QSize, QPoint
@@ -24,9 +24,41 @@ from client.controllers.scanner_controller import ScannerController
 from client.models.scanner_model import Scanner, ScannerStatus
 from client.views.scanner_view import ScannerDiscoveryWidget
 from client.views.streaming_view import DualStreamView
-from client.views.config_view import ConfigurationWidget
+from client.views.config_view import ApplicationConfigWidget
 
 logger = logging.getLogger(__name__)
+
+
+class AppSettingsDialog(QDialog):
+    """
+    Dialog per le impostazioni dell'applicazione.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Impostazioni Applicazione")
+        self.setMinimumWidth(500)
+
+        layout = QVBoxLayout(self)
+
+        # Creiamo un'istanza del widget di configurazione dell'applicazione
+        from client.models.config_model import ConfigManager
+        from client.controllers.config_controller import ConfigController
+
+        config_manager = ConfigManager()
+        config_controller = ConfigController(config_manager)
+
+        self.app_config_widget = ApplicationConfigWidget(config_controller)
+        layout.addWidget(self.app_config_widget)
+
+        # Pulsanti di chiusura
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        ok_button.clicked.connect(self.accept)
+        button_layout.addStretch(1)
+        button_layout.addWidget(ok_button)
+
+        layout.addLayout(button_layout)
 
 
 class MainWindow(QMainWindow):
@@ -40,7 +72,6 @@ class MainWindow(QMainWindow):
         """Indici delle schede nella finestra principale."""
         SCANNER = 0
         STREAMING = 1
-        CONFIG = 2
 
     def __init__(self, scanner_controller: ScannerController):
         super().__init__()
@@ -73,16 +104,13 @@ class MainWindow(QMainWindow):
         # Crea i widget delle schede
         self.scanner_widget = ScannerDiscoveryWidget(self.scanner_controller)
         self.streaming_widget = DualStreamView()
-        self.config_widget = ConfigurationWidget()
 
         # Aggiungi le schede
         self.central_tabs.addTab(self.scanner_widget, "Scanner")
         self.central_tabs.addTab(self.streaming_widget, "Streaming")
-        self.central_tabs.addTab(self.config_widget, "Configurazione")
 
         # Disabilita le schede che richiedono una connessione attiva
         self.central_tabs.setTabEnabled(self.TabIndex.STREAMING.value, False)
-        self.central_tabs.setTabEnabled(self.TabIndex.CONFIG.value, False)
 
         # Configura la barra di stato
         self.status_bar = QStatusBar()
@@ -143,6 +171,18 @@ class MainWindow(QMainWindow):
         # Menu File
         file_menu = self.menuBar().addMenu("&File")
 
+        # Azione Impostazioni Applicazione
+        settings_action = QAction("&Impostazioni applicazione", self)
+        settings_action.triggered.connect(self._show_app_settings)
+        file_menu.addAction(settings_action)
+
+        # Azione Imposta directory output
+        set_output_dir_action = QAction("&Imposta directory output", self)
+        set_output_dir_action.triggered.connect(self._set_output_directory)
+        file_menu.addAction(set_output_dir_action)
+
+        file_menu.addSeparator()
+
         # Azione Esci
         exit_action = QAction("E&sci", self)
         exit_action.setShortcut("Ctrl+Q")
@@ -161,32 +201,6 @@ class MainWindow(QMainWindow):
         disconnect_all_action = QAction("&Disconnetti tutti", self)
         disconnect_all_action.triggered.connect(self._disconnect_all)
         scanner_menu.addAction(disconnect_all_action)
-
-        # Menu Configurazione - Nuovo menu
-        config_menu = self.menuBar().addMenu("&Configurazione")
-
-        # Azione Preferenze applicazione
-        app_preferences_action = QAction("&Preferenze applicazione", self)
-        app_preferences_action.triggered.connect(self._show_app_preferences)
-        config_menu.addAction(app_preferences_action)
-
-        # Azione Imposta directory output
-        set_output_dir_action = QAction("&Imposta directory output", self)
-        set_output_dir_action.triggered.connect(self._set_output_directory)
-        config_menu.addAction(set_output_dir_action)
-
-        # Separatore
-        config_menu.addSeparator()
-
-        # Azione Salva configurazione
-        save_config_action = QAction("&Salva configurazione", self)
-        save_config_action.triggered.connect(self._save_configuration)
-        config_menu.addAction(save_config_action)
-
-        # Azione Carica configurazione
-        load_config_action = QAction("&Carica configurazione", self)
-        load_config_action.triggered.connect(self._load_configuration)
-        config_menu.addAction(load_config_action)
 
         # Menu Visualizza
         view_menu = self.menuBar().addMenu("&Visualizza")
@@ -329,7 +343,6 @@ class MainWindow(QMainWindow):
 
         # Abilita le schede che richiedono una connessione
         self.central_tabs.setTabEnabled(self.TabIndex.STREAMING.value, True)
-        self.central_tabs.setTabEnabled(self.TabIndex.CONFIG.value, True)
 
         # Cambia il testo del pulsante di connessione
         self.action_toggle_connection.setText("Disconnetti")
@@ -351,7 +364,6 @@ class MainWindow(QMainWindow):
 
         # Disabilita le schede che richiedono una connessione
         self.central_tabs.setTabEnabled(self.TabIndex.STREAMING.value, False)
-        self.central_tabs.setTabEnabled(self.TabIndex.CONFIG.value, False)
 
         # Cambia il testo del pulsante di connessione
         self.action_toggle_connection.setText("Connetti")
@@ -410,9 +422,6 @@ class MainWindow(QMainWindow):
         # Aggiorna l'interfaccia in base alla scheda selezionata
         if index == self.TabIndex.STREAMING.value:
             # Scheda di streaming
-            pass
-        elif index == self.TabIndex.CONFIG.value:
-            # Scheda di configurazione
             pass
 
     @Slot()
@@ -526,15 +535,11 @@ class MainWindow(QMainWindow):
             "Licenza MIT"
         )
 
-    def _show_app_preferences(self):
-        """Mostra la finestra delle preferenze dell'applicazione."""
-        # Qui potremmo aprire un dialog per le preferenze
-        # Per ora mostriamo solo un messaggio
-        QMessageBox.information(
-            self,
-            "Preferenze Applicazione",
-            "Funzionalità in fase di sviluppo.\nQui verranno mostrate le preferenze dell'applicazione."
-        )
+    def _show_app_settings(self):
+        """Mostra la finestra delle impostazioni dell'applicazione."""
+        # Apre il dialog delle impostazioni
+        dialog = AppSettingsDialog(self)
+        dialog.exec()
 
     def _set_output_directory(self):
         """Imposta la directory di output per i file salvati."""
@@ -542,34 +547,28 @@ class MainWindow(QMainWindow):
         directory = QFileDialog.getExistingDirectory(
             self,
             "Seleziona directory di output",
-            str(Path.home())
+            str(Path.home()),
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
         )
 
         if directory:
-            # Qui dovremmo salvare la configurazione
-            # Per ora mostriamo solo un messaggio
-            QMessageBox.information(
-                self,
-                "Directory Impostata",
-                f"Directory di output impostata a:\n{directory}"
-            )
+            # Qui implementiamo il salvataggio della configurazione
+            try:
+                from client.models.config_model import ConfigManager
+                config_manager = ConfigManager()
+                app_config = config_manager.get_app_config()
+                app_config.save_path = directory
+                config_manager.update_app_config(app_config)
+                config_manager.save_config()
 
-    def _save_configuration(self):
-        """Salva la configurazione corrente."""
-        # Qui dovremmo implementare il salvataggio della configurazione
-        # Per ora mostriamo solo un messaggio
-        QMessageBox.information(
-            self,
-            "Configurazione Salvata",
-            "Configurazione salvata con successo."
-        )
-
-    def _load_configuration(self):
-        """Carica una configurazione salvata."""
-        # Qui dovremmo implementare il caricamento della configurazione
-        # Per ora mostriamo solo un messaggio
-        QMessageBox.information(
-            self,
-            "Configurazione Caricata",
-            "Configurazione caricata con successo."
-        )
+                QMessageBox.information(
+                    self,
+                    "Directory Impostata",
+                    f"Directory di output impostata a:\n{directory}"
+                )
+            except Exception as e:
+                QMessageBox.warning(
+                    self,
+                    "Errore",
+                    f"Errore nell'impostazione della directory:\n{str(e)}"
+                )

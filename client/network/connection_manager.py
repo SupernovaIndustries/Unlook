@@ -3,12 +3,12 @@
 
 """
 Gestisce le connessioni con gli scanner UnLook.
+Versione semplificata con meno controlli e senza timeout.
 """
 
 import json
 import logging
 import socket
-import struct
 import time
 from typing import Dict, Optional, Tuple, Any, Callable
 
@@ -42,22 +42,16 @@ class ConnectionWorker(QThread):
         self._running = False
         self._mutex = QMutex()
         self._send_queue = []
-        self._error_count = 0
-        self._max_errors = 3  # Numero massimo di errori prima di chiudere la connessione
 
     def run(self):
         """Esegue il loop principale di connessione."""
         try:
             # Crea e configura il socket ZMQ
             self._context = zmq.Context()
-            self._socket = self._context.socket(zmq.DEALER)  # Usiamo DEALER invece di REQ
+            self._socket = self._context.socket(zmq.REQ)  # Usiamo REQ che corrisponde a REP del server
 
-            # Configura socket
+            # Non imposta timeout sul socket per evitare disconnessioni impreviste
             self._socket.setsockopt(zmq.LINGER, 0)  # Non aspettare alla chiusura
-
-            # Genera un'identità casuale o usa lo user_id come identità
-            identity = f"client-{self.device_id[:8]}".encode('utf-8')
-            self._socket.setsockopt(zmq.IDENTITY, identity)
 
             # Connessione
             endpoint = f"tcp://{self.host}:{self.port}"
@@ -72,66 +66,13 @@ class ConnectionWorker(QThread):
             # Invia immediatamente un PING per confermare la connessione
             self._send_ping()
 
-            # Setup poller
-            poller = zmq.Poller()
-            poller.register(self._socket, zmq.POLLIN)
-
             # Loop principale
-            last_ping_time = time.time()
-            ping_interval = 5.0  # Invia un ping ogni 5 secondi
-
             while self._running:
                 # Invia i messaggi in coda
                 self._process_send_queue()
 
-                # Invia periodicamente un ping per mantenere la connessione attiva
-                current_time = time.time()
-                if current_time - last_ping_time > ping_interval:
-                    self._send_ping()
-                    last_ping_time = current_time
-
-                # Ricevi dati con timeout usando il poller
-                try:
-                    socks = dict(poller.poll(500))  # 500ms di timeout
-
-                    if self._socket in socks and socks[self._socket] == zmq.POLLIN:
-                        # In DEALER/ROUTER, il primo frame è vuoto (delimiter)
-                        empty = self._socket.recv()
-
-                        # Verifica che sia un frame vuoto (delimiter)
-                        if empty:
-                            logger.debug(f"Ricevuto frame non vuoto come delimiter: {empty}")
-
-                        # Il secondo frame contiene i dati
-                        message_data = self._socket.recv()
-
-                        # Decodifica il messaggio
-                        message_json = message_data.decode('utf-8')
-                        message = json.loads(message_json)
-
-                        # Emetti il segnale con i dati decodificati
-                        self.data_received.emit(self.device_id, message)
-
-                        # Resetta il contatore degli errori
-                        self._error_count = 0
-                except zmq.ZMQError as e:
-                    if e.errno == zmq.EAGAIN:
-                        # Timeout normale, continua
-                        continue
-                    else:
-                        logger.error(f"Errore ZMQ: {e}")
-                        self._error_count += 1
-                except Exception as e:
-                    logger.error(f"Errore durante la ricezione: {str(e)}")
-                    self._error_count += 1
-
-                # Se ci sono troppi errori, chiudi la connessione
-                if self._error_count >= self._max_errors:
-                    logger.error(f"Troppi errori di connessione. Chiusura della connessione.")
-                    break
-
-                # Breve pausa per non sovraccaricare la CPU
-                self.msleep(10)
+                # Aspetta un po' prima del prossimo ciclo
+                time.sleep(0.1)
 
         except zmq.ZMQError as e:
             logger.error(f"Errore ZMQ nella connessione: {e}")
@@ -152,7 +93,8 @@ class ConnectionWorker(QThread):
         """Invia un ping al server per mantenere la connessione attiva."""
         ping_message = {
             "type": "PING",
-            "timestamp": int(time.time() * 1000)  # Millisecondi
+            "timestamp": time.time(),
+            "ip_address": socket.gethostbyname(socket.gethostname())
         }
         message_data = json.dumps(ping_message).encode('utf-8')
         self.send_data(message_data)
@@ -180,31 +122,31 @@ class ConnectionWorker(QThread):
             if not self._send_queue:
                 return
 
-            # Preleva tutti i messaggi dalla coda
-            messages = self._send_queue
-            self._send_queue = []
+            # Preleva un messaggio dalla coda (solo uno per volta con REQ/REP)
+            if self._send_queue:
+                data = self._send_queue.pop(0)
+            else:
+                return
 
-        # Invia i messaggi
-        for data in messages:
+        # Invia il messaggio
+        try:
+            # Invia il messaggio
+            self._socket.send(data)
+
+            # Attendi la risposta (pattern REQ/REP: req->rep->req->rep...)
+            reply = self._socket.recv()
+
             try:
-                # In DEALER/ROUTER, si invia prima un frame vuoto come delimiter
-                self._socket.send(b"", zmq.SNDMORE)
-                # Poi si inviano i dati
-                self._socket.send(data)
-            except zmq.ZMQError as e:
-                logger.error(f"Errore ZMQ durante l'invio: {e}")
-                self._error_count += 1
-                if self._error_count >= self._max_errors:
-                    logger.error(f"Troppi errori di invio. Chiusura della connessione.")
-                    self._running = False
-                break
+                # Decodifica e processa la risposta
+                reply_json = reply.decode('utf-8')
+                reply_data = json.loads(reply_json)
+                self.data_received.emit(self.device_id, reply_data)
             except Exception as e:
-                logger.error(f"Errore durante l'invio: {str(e)}")
-                self._error_count += 1
-                if self._error_count >= self._max_errors:
-                    logger.error(f"Troppi errori di invio. Chiusura della connessione.")
-                    self._running = False
-                break
+                logger.error(f"Errore nella decodifica della risposta: {e}")
+        except zmq.ZMQError as e:
+            logger.error(f"Errore ZMQ durante l'invio: {e}")
+        except Exception as e:
+            logger.error(f"Errore durante l'invio: {str(e)}")
 
     def stop(self):
         """Ferma il worker e chiude la connessione."""
@@ -299,29 +241,23 @@ class ConnectionManager(QObject):
             logger.warning(f"Nessuna connessione attiva per {device_id}")
             return False
 
-        # Invia un messaggio di disconnessione esplicito
-        self.send_message(device_id, "DISCONNECT")
+        # Invia un messaggio di disconnessione esplicito (se possibile)
+        try:
+            self.send_message(device_id, "DISCONNECT")
+        except:
+            pass
 
-        # Attendi un momento per permettere l'invio del messaggio
-        QTimer.singleShot(200, lambda: self._complete_disconnect(device_id))
-
-        return True
-
-    def _complete_disconnect(self, device_id: str):
-        """Completa la disconnessione dopo aver inviato il messaggio."""
         # Ferma il worker
-        if device_id in self._connections:
-            worker = self._connections[device_id]
-            worker.stop()
+        worker = self._connections[device_id]
+        worker.stop()
 
-            # Attendi la terminazione
-            if worker.isRunning():
-                worker.wait(1000)  # Attendi al massimo 1 secondo
+        # Non attendiamo la terminazione per semplificare
 
-            # Rimuovi la connessione
-            self._cleanup_connection(device_id)
+        # Rimuovi la connessione
+        self._cleanup_connection(device_id)
 
-            logger.info(f"Disconnessione completata per {device_id}")
+        logger.info(f"Disconnessione completata per {device_id}")
+        return True
 
     def send_message(self, device_id: str, message_type: str, payload: Dict = None) -> bool:
         """
@@ -347,7 +283,7 @@ class ConnectionManager(QObject):
         # Prepara il messaggio
         message = {
             "type": message_type,
-            "timestamp": int(time.time() * 1000),
+            "timestamp": time.time(),
         }
 
         # Aggiungi il payload se presente
@@ -435,4 +371,5 @@ class ConnectionManager(QObject):
         """Invia un heartbeat a tutti i dispositivi connessi."""
         for device_id in list(self._connections.keys()):
             if self.is_connected(device_id):
+                # Invia un ping/heartbeat
                 self.send_message(device_id, "PING")
