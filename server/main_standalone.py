@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-UnLook Scanner Server - Versione minima corretta
+UnLook Scanner Server - Applicazione server per il Raspberry Pi
 Gestisce le camere e lo streaming video verso il client.
+Implementa un sistema di broadcast automatico per la scoperta senza multicast.
 """
 
 import os
@@ -80,17 +81,26 @@ class UnLookServer:
         }
 
         # Inizializza i socket di comunicazione
-        self.discovery_socket = None
+        self.broadcast_socket = None
         self.context = zmq.Context()
         self.command_socket = self.context.socket(zmq.REP)  # Socket per i comandi (REP)
         self.stream_socket = self.context.socket(zmq.PUB)  # Socket per lo streaming (PUB)
 
         # Inizializza i thread
-        self.discovery_thread = None
+        self.broadcast_thread = None
         self.command_thread = None
         self.stream_threads = []
 
+        # Flag per tenere traccia del client connesso
+        self.client_connected = False
+        self.client_ip = None
+        self.client_connection_time = 0
+
+        # Mutex per proteggere l'accesso al flag client_connected
+        self.client_mutex = threading.Lock()
+
         logger.info(f"Server UnLook inizializzato con ID: {self.device_id}")
+        logger.info(f"È consigliabile etichettare il case con l'UUID: {self.device_id}")
 
     def _generate_device_id(self) -> str:
         """
@@ -135,7 +145,8 @@ class UnLookServer:
                 "discovery_port": 5678,
                 "command_port": 5680,
                 "stream_port": 5681,
-                "announce_interval": 2.0  # secondi
+                "broadcast_interval": 1.0,  # secondi
+                "broadcast_port": 5679  # porta per il broadcast diretto
             },
             "camera": {
                 "left": {
@@ -262,8 +273,8 @@ class UnLookServer:
             logger.info(f"Socket di comando in ascolto su porta {command_port}")
             logger.info(f"Socket di streaming in ascolto su porta {stream_port}")
 
-            # Avvia il servizio di discovery
-            self._start_discovery_service()
+            # Avvia il servizio di broadcast
+            self._start_broadcast_service()
 
             # Avvia il loop di ricezione comandi
             self._start_command_handler()
@@ -289,19 +300,19 @@ class UnLookServer:
         # Ferma lo streaming
         self.stop_streaming()
 
-        # Ferma il servizio di discovery
-        if self.discovery_thread and self.discovery_thread.is_alive():
-            logger.info("Arresto del servizio di discovery...")
-            if self.discovery_socket:
+        # Ferma il servizio di broadcast
+        if self.broadcast_thread and self.broadcast_thread.is_alive():
+            logger.info("Arresto del servizio di broadcast...")
+            if self.broadcast_socket:
                 try:
-                    self.discovery_socket.close()
+                    self.broadcast_socket.close()
                 except:
                     pass
 
         # Attendi che i thread terminino
-        if self.discovery_thread and self.discovery_thread.is_alive():
+        if self.broadcast_thread and self.broadcast_thread.is_alive():
             try:
-                self.discovery_thread.join(timeout=2.0)
+                self.broadcast_thread.join(timeout=2.0)
             except:
                 pass
 
@@ -330,105 +341,126 @@ class UnLookServer:
 
         logger.info("Server UnLook arrestato")
 
-    def _start_discovery_service(self):
+    def _start_broadcast_service(self):
         """
-        Avvia il servizio di discovery per permettere ai client di trovare il server.
+        Avvia il servizio di broadcast per permettere ai client di trovare il server.
         """
-        logger.info("Avvio del servizio di discovery...")
+        logger.info("Avvio del servizio di broadcast...")
 
-        # Crea un socket multicast
-        self.discovery_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        self.discovery_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Crea un socket UDP per il broadcast
+        self.broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self.broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-        # Permetti di riutilizzare l'indirizzo multicast
-        self.discovery_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
-
-        # Associa a tutte le interfacce
+        # Bind socket per ricevere risposte (opzionale)
         try:
-            self.discovery_socket.bind(('', self.config["server"]["discovery_port"]))
-            logger.info(f"Socket di discovery associato alla porta {self.config['server']['discovery_port']}")
+            self.broadcast_socket.bind(('', self.config["server"]["broadcast_port"]))
+            logger.info(f"Socket di broadcast associato alla porta {self.config['server']['broadcast_port']}")
         except Exception as e:
-            logger.error(f"Errore nell'associazione del socket di discovery: {e}")
-            return
+            logger.error(f"Errore nell'associazione del socket di broadcast: {e}")
+            # Fallback: usa una porta casuale
+            self.broadcast_socket.bind(('', 0))
+            _, port = self.broadcast_socket.getsockname()
+            logger.info(f"Socket di broadcast associato alla porta {port} (fallback)")
 
-        # Avvia il thread di discovery
-        self.discovery_thread = threading.Thread(target=self._discovery_loop)
-        self.discovery_thread.daemon = True
-        self.discovery_thread.start()
+        # Avvia il thread di broadcast
+        self.broadcast_thread = threading.Thread(target=self._broadcast_loop)
+        self.broadcast_thread.daemon = True
+        self.broadcast_thread.start()
 
-        logger.info("Servizio di discovery avviato")
+        logger.info("Servizio di broadcast avviato")
 
-    def _discovery_loop(self):
+    def _get_local_ip(self):
+        """Ottiene l'indirizzo IP locale principale."""
+        try:
+            # Crea un socket temporaneo per ottenere il proprio IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))  # Connettiti a un server esterno (Google DNS)
+            local_ip = s.getsockname()[0]
+            s.close()
+            return local_ip
+        except Exception as e:
+            logger.error(f"Errore nell'ottenere l'IP locale: {e}")
+            # Fallback a localhost
+            return "127.0.0.1"
+
+    def _broadcast_loop(self):
         """
-        Loop principale per il servizio di discovery.
+        Loop principale per il servizio di broadcast.
         """
-        discovery_group = "239.255.255.250"
+        broadcast_port = self.config["server"]["broadcast_port"]
         discovery_port = self.config["server"]["discovery_port"]
-        announce_interval = self.config["server"]["announce_interval"]
+        broadcast_interval = self.config["server"]["broadcast_interval"]
+        broadcast_address = "255.255.255.255"  # Indirizzo di broadcast
 
-        logger.info(f"Discovery loop avviato (gruppo: {discovery_group}, porta: {discovery_port})")
+        # Ottieni l'indirizzo IP locale
+        local_ip = self._get_local_ip()
 
+        logger.info(f"Broadcast loop avviato (indirizzo: {broadcast_address}, porta: {broadcast_port})")
+        logger.info(f"Indirizzo IP locale: {local_ip}")
+
+        msg_count = 0
         try:
             while self.running:
                 try:
-                    # Attendi messaggi di discovery
-                    self.discovery_socket.settimeout(1.0)  # Timeout di 1 secondo
+                    # Controlla se c'è un client connesso
+                    with self.client_mutex:
+                        has_client = self.client_connected
+
+                    # Se c'è un client connesso, non inviare il broadcast
+                    if has_client:
+                        time.sleep(1.0)  # Controlla meno frequentemente quando connesso
+                        continue
+
+                    # Prepara il messaggio di annuncio
+                    announce_msg = {
+                        "type": "UNLOOK_ANNOUNCE",
+                        "device_id": self.device_id,
+                        "name": self.device_name,
+                        "version": "1.0.0",
+                        "cameras": len(self.cameras),
+                        "ip_address": local_ip,
+                        "port": self.config["server"]["command_port"],
+                        "capabilities": {
+                            "dual_camera": len(self.cameras) > 1,
+                            "color_mode": True,
+                            "tof": False,
+                            "dlp": False
+                        }
+                    }
+
+                    # Converti il messaggio in JSON e poi in bytes
+                    message = json.dumps(announce_msg).encode('utf-8')
+
+                    # Invia il messaggio in broadcast
+                    # Tenta l'invio sul socket di discovery (5678) e su quello di broadcast (5679)
+                    try:
+                        self.broadcast_socket.sendto(message, (broadcast_address, discovery_port))
+                    except Exception as e:
+                        logger.debug(f"Errore nell'invio al socket discovery: {e}")
 
                     try:
-                        data, addr = self.discovery_socket.recvfrom(1024)
-                        logger.debug(f"Dati ricevuti da {addr}: {data[:20]}...")
-
-                        # Decodifica il messaggio
-                        message = data.decode('utf-8')
-
-                        # Verifica se è un messaggio di discovery valido
-                        if message.startswith('{') and message.endswith('}'):
-                            try:
-                                request = json.loads(message)
-                                if request.get('type') == 'UNLOOK_DISCOVER':
-                                    logger.info(f"Richiesta di discovery ricevuta da {addr}")
-
-                                    # Prepara la risposta
-                                    response = {
-                                        "type": "UNLOOK_ANNOUNCE",
-                                        "device_id": self.device_id,
-                                        "name": self.device_name,
-                                        "version": "1.0.0",
-                                        "cameras": len(self.cameras),
-                                        "port": self.config["server"]["command_port"],
-                                        "capabilities": {
-                                            "dual_camera": len(self.cameras) > 1,
-                                            "color_mode": True,
-                                            "tof": False,
-                                            "dlp": False
-                                        }
-                                    }
-
-                                    # Invia la risposta
-                                    response_data = json.dumps(response).encode('utf-8')
-                                    self.discovery_socket.sendto(response_data, addr)
-                                    logger.info(f"Risposta di discovery inviata a {addr}")
-                            except json.JSONDecodeError as je:
-                                logger.warning(f"Messaggio non JSON valido: {message[:50]}")
-                            except Exception as e:
-                                logger.error(f"Errore nell'elaborazione del messaggio: {e}")
-                    except socket.timeout:
-                        # Timeout normale, continua
-                        continue
+                        self.broadcast_socket.sendto(message, (broadcast_address, broadcast_port))
                     except Exception as e:
-                        logger.error(f"Errore nella ricezione: {e}")
-                        time.sleep(0.1)  # Evita loop troppo rapidi in caso di errore
+                        logger.debug(f"Errore nell'invio al socket broadcast: {e}")
+
+                    msg_count += 1
+                    if msg_count % 10 == 0:  # Log ogni 10 messaggi per ridurre il rumore
+                        logger.info(f"Messaggio di broadcast #{msg_count} inviato")
+
+                    # Attendi prima del prossimo invio
+                    time.sleep(broadcast_interval)
 
                 except Exception as e:
-                    logger.error(f"Errore nel discovery loop: {e}")
+                    logger.error(f"Errore nel broadcast loop: {e}")
                     if not self.running:
                         break
-                    time.sleep(0.5)  # Pausa in caso di errore
+                    time.sleep(1.0)  # Pausa più lunga in caso di errore
 
         except Exception as e:
-            logger.error(f"Errore fatale nel discovery loop: {e}")
+            logger.error(f"Errore fatale nel broadcast loop: {e}")
         finally:
-            logger.info("Discovery loop terminato")
+            logger.info("Broadcast loop terminato")
 
     def _start_command_handler(self):
         """
@@ -454,8 +486,30 @@ class UnLookServer:
                     # Attendi un comando
                     message = self.command_socket.recv_json()
 
+                    # Estrai l'indirizzo del client
+                    client_routing_id = self.command_socket.get_routing_id()
+                    client_ip = None
+
+                    try:
+                        # Prova a ottenere l'indirizzo IP del client
+                        peer_endpoint = self.command_socket.get(zmq.LAST_ENDPOINT)
+                        if peer_endpoint:
+                            client_ip = peer_endpoint.split("//")[1].split(":")[0]
+                            logger.info(f"Comando ricevuto dal client {client_ip}")
+                    except Exception as e:
+                        logger.debug(f"Impossibile ottenere l'IP del client: {e}")
+
+                    # Quando si riceve un comando, considera il client come connesso
+                    if client_ip:
+                        with self.client_mutex:
+                            if not self.client_connected:
+                                self.client_connected = True
+                                self.client_ip = client_ip
+                                self.client_connection_time = time.time()
+                                logger.info(f"Client {client_ip} connesso")
+
                     # Processa il comando
-                    response = self._process_command(message)
+                    response = self._process_command(message, client_ip)
 
                     # Invia la risposta
                     self.command_socket.send_json(response)
@@ -473,6 +527,16 @@ class UnLookServer:
                         })
                     except:
                         pass
+
+                    # Controlla disconnessione client
+                    with self.client_mutex:
+                        if self.client_connected:
+                            # Se è passato troppo tempo dall'ultimo comando, considera il client disconnesso
+                            if time.time() - self.client_connection_time > 10.0:  # 10 secondi di timeout
+                                self.client_connected = False
+                                logger.info(f"Client {self.client_ip} disconnesso (timeout)")
+                                self.client_ip = None
+
                     time.sleep(0.1)  # Piccola pausa per evitare loop troppo rapidi
 
         except Exception as e:
@@ -480,18 +544,23 @@ class UnLookServer:
 
         logger.info("Command loop terminato")
 
-    def _process_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
+    def _process_command(self, command: Dict[str, Any], client_ip: Optional[str] = None) -> Dict[str, Any]:
         """
         Processa un comando ricevuto da un client.
 
         Args:
             command: Dizionario rappresentante il comando
+            client_ip: Indirizzo IP del client (se disponibile)
 
         Returns:
             Dizionario di risposta
         """
         command_type = command.get('type', '')
         logger.info(f"Comando ricevuto: {command_type}")
+
+        # Aggiorna il timestamp della connessione
+        with self.client_mutex:
+            self.client_connection_time = time.time()
 
         # Prepara una risposta base
         response = {
@@ -543,6 +612,14 @@ class UnLookServer:
                 else:
                     response['status'] = 'error'
                     response['error'] = 'Errore nella cattura dei frame'
+
+            elif command_type == 'DISCONNECT':
+                # Il client si disconnette esplicitamente
+                with self.client_mutex:
+                    self.client_connected = False
+                    logger.info(f"Client {self.client_ip} disconnesso (esplicito)")
+                    self.client_ip = None
+                response['disconnected'] = True
 
             else:
                 # Comando sconosciuto
@@ -820,6 +897,8 @@ def main():
     parser = argparse.ArgumentParser(description='UnLook Scanner Server')
     parser.add_argument('-c', '--config', type=str, help='Percorso del file di configurazione')
     parser.add_argument('-p', '--port', type=int, help='Porta per i comandi (default dal config)')
+    parser.add_argument('--broadcast-port', type=int, help='Porta per il broadcast (default: 5679)')
+    parser.add_argument('--broadcast-interval', type=float, help='Intervallo di broadcast in secondi (default: 1.0)')
     args = parser.parse_args()
 
     # Crea e avvia il server
@@ -828,6 +907,14 @@ def main():
     # Override della porta se specificata
     if args.port:
         server.config["server"]["command_port"] = args.port
+
+    # Override della porta di broadcast se specificata
+    if args.broadcast_port:
+        server.config["server"]["broadcast_port"] = args.broadcast_port
+
+    # Override dell'intervallo di broadcast se specificato
+    if args.broadcast_interval:
+        server.config["server"]["broadcast_interval"] = args.broadcast_interval
 
     # Gestione dei segnali per un arresto pulito
     def signal_handler(sig, frame):
@@ -844,6 +931,8 @@ def main():
     # Loop principale
     try:
         logger.info("Server UnLook in esecuzione. Premi Ctrl+C per terminare.")
+        logger.info(f"Identificatore UUID dispositivo: {server.device_id}")
+        logger.info("Ricorda di etichettare il case con questo UUID!")
 
         # Mantieni il thread principale attivo
         while server.running:
