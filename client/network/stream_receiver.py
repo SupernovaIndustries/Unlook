@@ -122,6 +122,52 @@ class StreamReceiver(QObject):
             self._cleanup()
             return False
 
+    def _process_frame_message(self, header: Dict[str, Any], data: bytes):
+        """
+        Processa un messaggio di frame ricevuto.
+
+        Args:
+            header: Header del messaggio
+            data: Dati binari del frame
+        """
+        try:
+            # Estrai le informazioni dall'header
+            camera_index = header["camera"]
+            frame_number = header["frame"]
+            timestamp = header["timestamp"]
+            format_str = header["format"]
+            resolution = header["resolution"]
+
+            # Debug per vedere cosa stiamo ricevendo
+            logger.debug(
+                f"Header frame: camera={camera_index}, n={frame_number}, formato={format_str}, risoluzione={resolution}")
+            logger.debug(f"Dimensione dati frame: {len(data)} bytes")
+
+            # Aggiorna le statistiche
+            stats = self._stats[camera_index]
+            stats["frames_received"] += 1
+
+            # Se è il primo frame per questa camera, avvia il processore
+            if camera_index not in self._cameras_receiving:
+                self._cameras_receiving.add(camera_index)
+                self._start_processor(camera_index, format_str, resolution)
+                self.stream_started.emit(camera_index)
+
+            # Aggiungi il frame alla coda (non bloccare se la coda è piena)
+            # Nota: qui passiamo una tupla con (frame_number, timestamp, format_str, resolution, data)
+            frame_data = (frame_number, timestamp, format_str, resolution, data)
+
+            # Verifico che stiamo inserendo dati validi
+            if data is None or len(data) == 0:
+                logger.warning(f"Dati frame vuoti/None per camera {camera_index}, frame {frame_number}")
+                return
+
+            self._frame_queues[camera_index].put(frame_data, block=False)
+            logger.debug(f"Frame accodato: camera={camera_index}, n={frame_number}, formato={format_str}")
+
+        except Exception as e:
+            logger.error(f"Errore nell'elaborazione del messaggio di frame: {e}")
+
     def _initialize_connection(self):
         """Inizializza la connessione ZeroMQ."""
         with QMutexLocker(self._socket_mutex):
@@ -442,37 +488,52 @@ class StreamReceiver(QObject):
                 try:
                     # Preleva un frame dalla coda
                     frame_data = queue.get(block=True, timeout=1.0)
-                    if not frame_data:
+
+                    # Verifica che frame_data non sia None (timeout della coda)
+                    if frame_data is None:
+                        logger.debug(f"Timeout o dati None dalla coda per camera {camera_index}")
                         continue
 
-                    frame_number, timestamp, format_str, resolution, data = frame_data
+                    # Stampa debug per verificare cosa stiamo ricevendo
+                    logger.debug(f"Dati frame estratti dalla coda: camera={camera_index}, tipo={type(frame_data)}")
 
-                    # Decodifica il frame in base al formato
-                    if format_str.lower() == "jpeg":
-                        # Decodifica JPEG
-                        try:
-                            # Converti i dati in un buffer numpy
-                            frame_buffer = np.frombuffer(data, dtype=np.uint8)
+                    try:
+                        # Ora spacchetta la tupla in modo sicuro
+                        frame_number, timestamp, format_str, resolution, data = frame_data
 
-                            # Decodifica l'immagine JPEG
-                            frame = cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
+                        logger.debug(
+                            f"Frame decodificato: n={frame_number}, formato={format_str}, dim_dati={len(data) if data is not None else 'None'}")
 
-                            if frame is not None and frame.size > 0:
-                                # Emetti il frame decodificato
-                                self.frame_received.emit(camera_index, frame)
-                                stats["frames_processed"] += 1
-                            else:
-                                logger.warning(f"Frame non valido ricevuto dalla camera {camera_index}")
-                        except Exception as e:
-                            logger.error(f"Errore nella decodifica JPEG: {e}")
+                        # Decodifica il frame in base al formato
+                        if format_str.lower() == "jpeg":
+                            # Decodifica JPEG
+                            try:
+                                # Converti i dati in un buffer numpy
+                                frame_buffer = np.frombuffer(data, dtype=np.uint8)
+
+                                # Decodifica l'immagine JPEG
+                                frame = cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
+
+                                if frame is not None and frame.size > 0:
+                                    logger.debug(f"Frame decodificato con successo: shape={frame.shape}")
+                                    # Emetti il frame decodificato
+                                    self.frame_received.emit(camera_index, frame)
+                                    stats["frames_processed"] += 1
+                                else:
+                                    logger.warning(f"Frame non valido ricevuto dalla camera {camera_index}")
+                            except Exception as e:
+                                logger.error(f"Errore nella decodifica JPEG: {e}")
+                                continue
+                        elif format_str.lower() == "h264":
+                            # Per ora, saltiamo i frame H.264 (richiederebbe un decoder specifico)
+                            logger.warning("Formato H264 ricevuto ma non supportato dal StreamReceiver")
                             continue
-                    elif format_str.lower() == "h264":
-                        # Per ora, saltiamo i frame H.264 (richiederebbe un decoder specifico)
-                        logger.warning("Formato H264 ricevuto ma non supportato dal StreamReceiver")
-                        continue
-                    else:
-                        # Formato non supportato
-                        logger.warning(f"Formato frame non supportato: {format_str}")
+                        else:
+                            # Formato non supportato
+                            logger.warning(f"Formato frame non supportato: {format_str}")
+                            continue
+                    except ValueError as e:
+                        logger.error(f"Errore nello spacchettamento dei dati del frame: {e}, dati={frame_data}")
                         continue
 
                     # Calcola FPS

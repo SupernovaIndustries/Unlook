@@ -154,11 +154,11 @@ class MainWindow(QMainWindow):
 
         self.toolbar.addSeparator()
 
-        # Pulsante per acquisire un'immagine
+        """# Pulsante per acquisire un'immagine
         self.action_capture = QAction("Acquisizione", self)
         self.action_capture.setEnabled(False)
         self.action_capture.triggered.connect(self._capture_frame)
-        self.toolbar.addAction(self.action_capture)
+        self.toolbar.addAction(self.action_capture)"""
 
     def _setup_menu(self):
         """Configura il menu dell'applicazione."""
@@ -489,9 +489,9 @@ class MainWindow(QMainWindow):
         self.action_toggle_connection.setText("Disconnetti" if is_connected else "Connetti")
         self.action_toggle_connection.setEnabled(True)
 
-        # Aggiorna il pulsante di acquisizione
+        """# Aggiorna il pulsante di acquisizione
         is_streaming = selected_scanner.status == ScannerStatus.STREAMING
-        self.action_capture.setEnabled(is_streaming)
+        self.action_capture.setEnabled(is_streaming)"""
 
     def _show_about_dialog(self):
         """Mostra la finestra di dialogo Informazioni su."""

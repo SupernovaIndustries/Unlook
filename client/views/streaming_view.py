@@ -54,126 +54,49 @@ class FrameProcessor(QThread):
         while self._running:
             try:
                 # Attendi un nuovo frame dalla coda
-                camera_index, frame = self._frame_queue.get(block=True, timeout=0.1)
+                item = self._frame_queue.get(block=True, timeout=0.1)
 
-                # Se la coda è vuota, continua
-                if frame is None:
+                # Se la coda è vuota o si è verificato un timeout, continuiamo
+                if item is None:
                     continue
 
-                # Elabora il frame
-                processed_frame = self._process_frame(frame)
+                # Ora spacchetta il valore in modo sicuro
+                try:
+                    camera_index, frame = item
 
-                # Converti in QImage
-                height, width = processed_frame.shape[:2]
-                bytes_per_line = 3 * width
+                    # Stampa debug per capire cosa stiamo ricevendo
+                    if frame is None:
+                        logger.warning(f"Frame dalla coda è None per camera {camera_index}")
+                        continue
 
-                # OpenCV usa BGR, Qt usa RGB
-                if len(processed_frame.shape) == 3 and processed_frame.shape[2] == 3:
-                    # Immagine a colori
-                    rgb_image = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-                    qimage = QImage(rgb_image.data, width, height, bytes_per_line, QImage.Format_RGB888)
-                else:
-                    # Immagine in scala di grigi
-                    qimage = QImage(processed_frame.data, width, height, width, QImage.Format_Grayscale8)
+                    logger.debug(f"Frame ricevuto per camera {camera_index}, forma: {frame.shape}, tipo: {frame.dtype}")
 
-                # Emetti il segnale con il frame elaborato
-                self.new_frame_ready.emit(camera_index, qimage)
+                    # Elabora il frame
+                    processed_frame = self._process_frame(frame)
+
+                    # Converti in QImage
+                    height, width = processed_frame.shape[:2]
+                    bytes_per_line = 3 * width
+
+                    # OpenCV usa BGR, Qt usa RGB
+                    if len(processed_frame.shape) == 3 and processed_frame.shape[2] == 3:
+                        # Immagine a colori
+                        rgb_image = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+                        qimage = QImage(rgb_image.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                    else:
+                        # Immagine in scala di grigi
+                        qimage = QImage(processed_frame.data, width, height, width, QImage.Format_Grayscale8)
+
+                    # Emetti il segnale con il frame elaborato
+                    self.new_frame_ready.emit(camera_index, qimage)
+                except Exception as e:
+                    logger.error(f"Errore nel processamento del frame: {str(e)}")
+                    continue
+
             except Exception as e:
                 if self._running:  # Solo se il thread è ancora attivo
                     logger.error(f"Errore nel frame processor: {str(e)}")
                     time.sleep(0.1)  # Evita di sovraccaricare il sistema in caso di errori ripetuti
-
-    def _process_frame(self, frame):
-        """
-        Elabora un frame applicando le opzioni di visualizzazione.
-
-        Args:
-            frame: Frame OpenCV da elaborare
-
-        Returns:
-            Frame elaborato
-        """
-        with QMutexLocker(self._mutex):
-            # Crea una copia del frame per l'elaborazione
-            processed = frame.copy()
-
-            # Converti in scala di grigi se necessario
-            if len(processed.shape) == 3 and processed.shape[2] == 3:
-                gray = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = processed
-
-            # Applica miglioramento del contrasto se abilitato
-            if self._enhance_contrast:
-                # Equalizzazione dell'istogramma adattiva (CLAHE)
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                enhanced = clahe.apply(gray)
-
-                # Se il frame originale era a colori, applica il miglioramento solo alla luminosità
-                if len(processed.shape) == 3 and processed.shape[2] == 3:
-                    # Converti in HSV
-                    hsv = cv2.cvtColor(processed, cv2.COLOR_BGR2HSV)
-                    # Sostituisci il canale V (luminosità)
-                    hsv[:, :, 2] = enhanced
-                    # Torna in BGR
-                    processed = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-                else:
-                    processed = enhanced
-
-            # Applica una griglia se abilitata
-            if self._show_grid:
-                height, width = processed.shape[:2]
-                grid_size = 50  # Dimensione delle celle della griglia
-
-                # Disegna linee orizzontali
-                for y in range(0, height, grid_size):
-                    if len(processed.shape) == 3:
-                        cv2.line(processed, (0, y), (width, y), (0, 255, 0), 1)
-                    else:
-                        cv2.line(processed, (0, y), (width, y), 200, 1)
-
-                # Disegna linee verticali
-                for x in range(0, width, grid_size):
-                    if len(processed.shape) == 3:
-                        cv2.line(processed, (x, 0), (x, height), (0, 255, 0), 1)
-                    else:
-                        cv2.line(processed, (x, 0), (x, height), 200, 1)
-
-            # Rileva e disegna caratteristiche se abilitato
-            if self._show_features:
-                # Crea un rilevatore di feature
-                feature_detector = cv2.FastFeatureDetector_create(threshold=25)
-
-                # Rileva keypoints
-                keypoints = feature_detector.detect(gray, None)
-
-                # Disegna keypoints sul frame
-                if len(processed.shape) == 3:
-                    processed = cv2.drawKeypoints(
-                        processed, keypoints, None, (0, 0, 255),
-                        cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
-                    )
-                else:
-                    processed = cv2.drawKeypoints(
-                        cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR), keypoints, None,
-                        (0, 0, 255), cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
-                    )
-
-            return processed
-
-    def set_options(self, show_grid: bool, show_features: bool, enhance_contrast: bool):
-        """Imposta le opzioni di visualizzazione."""
-        with QMutexLocker(self._mutex):
-            self._show_grid = show_grid
-            self._show_features = show_features
-            self._enhance_contrast = enhance_contrast
-
-    def stop(self):
-        """Ferma il thread di elaborazione."""
-        self._running = False
-        # Attendi la terminazione
-        self.wait(1000)
-        logger.info("Frame processor fermato")
 
 
 class StreamView(QWidget):
@@ -336,6 +259,31 @@ class DualStreamView(QWidget):
         streams_layout.addWidget(splitter)
         main_layout.addWidget(streams_container)
 
+        # Pulsanti di controllo sotto le camere
+        control_buttons = QHBoxLayout()
+
+        # Pulsante avvia/ferma streaming
+        self.toggle_stream_button = QPushButton("Avvia Streaming")
+        self.toggle_stream_button.clicked.connect(self._on_toggle_stream_clicked)
+        self.toggle_stream_button.setEnabled(False)
+
+        # Pulsante avvia scansione
+        self.start_scan_button = QPushButton("Avvia Scansione")
+        self.start_scan_button.clicked.connect(self._on_start_scan_clicked)
+        self.start_scan_button.setEnabled(False)
+
+        # Pulsante cattura frame
+        self.capture_button = QPushButton("Acquisisci Frame")
+        self.capture_button.clicked.connect(self.capture_frame)
+        self.capture_button.setEnabled(False)
+
+        control_buttons.addWidget(self.toggle_stream_button)
+        control_buttons.addWidget(self.capture_button)
+        control_buttons.addStretch(1)
+        control_buttons.addWidget(self.start_scan_button)
+
+        main_layout.addLayout(control_buttons)
+
         # Pannello di controllo
         control_panel = QTabWidget()
 
@@ -361,11 +309,14 @@ class DualStreamView(QWidget):
         view_options_layout.addLayout(options_layout)
         camera_layout.addWidget(view_options_group)
 
-        # Gruppo dei parametri del sensore
-        sensor_group = QGroupBox("Parametri fotocamera")
-        sensor_layout = QFormLayout(sensor_group)
+        # Gruppo dei parametri del sensore con tab separate per le due camere
+        self.camera_tabs = QTabWidget()
 
-        # Layout esposizione camera sinistra
+        # Tab Camera Sinistra
+        left_cam_tab = QWidget()
+        left_cam_layout = QFormLayout(left_cam_tab)
+
+        # Esposizione camera sinistra
         left_exposure_layout = QHBoxLayout()
         self.left_exposure_slider = QSlider(Qt.Horizontal)
         self.left_exposure_slider.setRange(0, 100)
@@ -374,9 +325,68 @@ class DualStreamView(QWidget):
         self.left_exposure_slider.valueChanged.connect(lambda v: self.left_exposure_value.setText(str(v)))
         left_exposure_layout.addWidget(self.left_exposure_slider)
         left_exposure_layout.addWidget(self.left_exposure_value)
-        sensor_layout.addRow("Esposizione Camera SX:", left_exposure_layout)
+        left_cam_layout.addRow("Esposizione:", left_exposure_layout)
 
-        # Layout esposizione camera destra
+        # Guadagno camera sinistra
+        left_gain_layout = QHBoxLayout()
+        self.left_gain_slider = QSlider(Qt.Horizontal)
+        self.left_gain_slider.setRange(0, 100)
+        self.left_gain_slider.setValue(50)
+        self.left_gain_value = QLabel("50")
+        self.left_gain_slider.valueChanged.connect(lambda v: self.left_gain_value.setText(str(v)))
+        left_gain_layout.addWidget(self.left_gain_slider)
+        left_gain_layout.addWidget(self.left_gain_value)
+        left_cam_layout.addRow("Guadagno:", left_gain_layout)
+
+        # Luminosità camera sinistra
+        left_brightness_layout = QHBoxLayout()
+        self.left_brightness_slider = QSlider(Qt.Horizontal)
+        self.left_brightness_slider.setRange(0, 100)
+        self.left_brightness_slider.setValue(50)
+        self.left_brightness_value = QLabel("50")
+        self.left_brightness_slider.valueChanged.connect(lambda v: self.left_brightness_value.setText(str(v)))
+        left_brightness_layout.addWidget(self.left_brightness_slider)
+        left_brightness_layout.addWidget(self.left_brightness_value)
+        left_cam_layout.addRow("Luminosità:", left_brightness_layout)
+
+        # Contrasto camera sinistra
+        left_contrast_layout = QHBoxLayout()
+        self.left_contrast_slider = QSlider(Qt.Horizontal)
+        self.left_contrast_slider.setRange(0, 100)
+        self.left_contrast_slider.setValue(50)
+        self.left_contrast_value = QLabel("50")
+        self.left_contrast_slider.valueChanged.connect(lambda v: self.left_contrast_value.setText(str(v)))
+        left_contrast_layout.addWidget(self.left_contrast_slider)
+        left_contrast_layout.addWidget(self.left_contrast_value)
+        left_cam_layout.addRow("Contrasto:", left_contrast_layout)
+
+        # Nitidezza camera sinistra
+        left_sharpness_layout = QHBoxLayout()
+        self.left_sharpness_slider = QSlider(Qt.Horizontal)
+        self.left_sharpness_slider.setRange(0, 100)
+        self.left_sharpness_slider.setValue(50)
+        self.left_sharpness_value = QLabel("50")
+        self.left_sharpness_slider.valueChanged.connect(lambda v: self.left_sharpness_value.setText(str(v)))
+        left_sharpness_layout.addWidget(self.left_sharpness_slider)
+        left_sharpness_layout.addWidget(self.left_sharpness_value)
+        left_cam_layout.addRow("Nitidezza:", left_sharpness_layout)
+
+        # Saturazione camera sinistra
+        left_saturation_layout = QHBoxLayout()
+        self.left_saturation_slider = QSlider(Qt.Horizontal)
+        self.left_saturation_slider.setRange(0, 100)
+        self.left_saturation_slider.setValue(50)
+        self.left_saturation_value = QLabel("50")
+        self.left_saturation_slider.valueChanged.connect(lambda v: self.left_saturation_value.setText(str(v)))
+        left_saturation_layout.addWidget(self.left_saturation_slider)
+        left_saturation_layout.addWidget(self.left_saturation_value)
+        left_cam_layout.addRow("Saturazione:", left_saturation_layout)
+
+        # Tab Camera Destra
+        right_cam_tab = QWidget()
+        right_cam_layout = QFormLayout(right_cam_tab)
+
+        # Esposizione camera destra
         right_exposure_layout = QHBoxLayout()
         self.right_exposure_slider = QSlider(Qt.Horizontal)
         self.right_exposure_slider.setRange(0, 100)
@@ -385,24 +395,78 @@ class DualStreamView(QWidget):
         self.right_exposure_slider.valueChanged.connect(lambda v: self.right_exposure_value.setText(str(v)))
         right_exposure_layout.addWidget(self.right_exposure_slider)
         right_exposure_layout.addWidget(self.right_exposure_value)
-        sensor_layout.addRow("Esposizione Camera DX:", right_exposure_layout)
+        right_cam_layout.addRow("Esposizione:", right_exposure_layout)
 
-        # Pulsante per applicare le impostazioni
-        self.apply_settings_button = QPushButton("Applica impostazioni")
+        # Guadagno camera destra
+        right_gain_layout = QHBoxLayout()
+        self.right_gain_slider = QSlider(Qt.Horizontal)
+        self.right_gain_slider.setRange(0, 100)
+        self.right_gain_slider.setValue(50)
+        self.right_gain_value = QLabel("50")
+        self.right_gain_slider.valueChanged.connect(lambda v: self.right_gain_value.setText(str(v)))
+        right_gain_layout.addWidget(self.right_gain_slider)
+        right_gain_layout.addWidget(self.right_gain_value)
+        right_cam_layout.addRow("Guadagno:", right_gain_layout)
+
+        # Luminosità camera destra
+        right_brightness_layout = QHBoxLayout()
+        self.right_brightness_slider = QSlider(Qt.Horizontal)
+        self.right_brightness_slider.setRange(0, 100)
+        self.right_brightness_slider.setValue(50)
+        self.right_brightness_value = QLabel("50")
+        self.right_brightness_slider.valueChanged.connect(lambda v: self.right_brightness_value.setText(str(v)))
+        right_brightness_layout.addWidget(self.right_brightness_slider)
+        right_brightness_layout.addWidget(self.right_brightness_value)
+        right_cam_layout.addRow("Luminosità:", right_brightness_layout)
+
+        # Contrasto camera destra
+        right_contrast_layout = QHBoxLayout()
+        self.right_contrast_slider = QSlider(Qt.Horizontal)
+        self.right_contrast_slider.setRange(0, 100)
+        self.right_contrast_slider.setValue(50)
+        self.right_contrast_value = QLabel("50")
+        self.right_contrast_slider.valueChanged.connect(lambda v: self.right_contrast_value.setText(str(v)))
+        right_contrast_layout.addWidget(self.right_contrast_slider)
+        right_contrast_layout.addWidget(self.right_contrast_value)
+        right_cam_layout.addRow("Contrasto:", right_contrast_layout)
+
+        # Nitidezza camera destra
+        right_sharpness_layout = QHBoxLayout()
+        self.right_sharpness_slider = QSlider(Qt.Horizontal)
+        self.right_sharpness_slider.setRange(0, 100)
+        self.right_sharpness_slider.setValue(50)
+        self.right_sharpness_value = QLabel("50")
+        self.right_sharpness_slider.valueChanged.connect(lambda v: self.right_sharpness_value.setText(str(v)))
+        right_sharpness_layout.addWidget(self.right_sharpness_slider)
+        right_sharpness_layout.addWidget(self.right_sharpness_value)
+        right_cam_layout.addRow("Nitidezza:", right_sharpness_layout)
+
+        # Saturazione camera destra
+        right_saturation_layout = QHBoxLayout()
+        self.right_saturation_slider = QSlider(Qt.Horizontal)
+        self.right_saturation_slider.setRange(0, 100)
+        self.right_saturation_slider.setValue(50)
+        self.right_saturation_value = QLabel("50")
+        self.right_saturation_slider.valueChanged.connect(lambda v: self.right_saturation_value.setText(str(v)))
+        right_saturation_layout.addWidget(self.right_saturation_slider)
+        right_saturation_layout.addWidget(self.right_saturation_value)
+        right_cam_layout.addRow("Saturazione:", right_saturation_layout)
+
+        # Aggiungi le tab al tab widget
+        self.camera_tabs.addTab(left_cam_tab, "Camera Sinistra")
+        self.camera_tabs.addTab(right_cam_tab, "Camera Destra")
+
+        # Pulsante per applicare le impostazioni delle camere
+        apply_layout = QHBoxLayout()
+        self.apply_settings_button = QPushButton("Applica impostazioni fotocamera")
         self.apply_settings_button.setEnabled(False)
         self.apply_settings_button.clicked.connect(self._apply_camera_settings)
-        sensor_layout.addRow("", self.apply_settings_button)
+        apply_layout.addStretch(1)
+        apply_layout.addWidget(self.apply_settings_button)
 
-        camera_layout.addWidget(sensor_group)
-
-        # Pulsante per la cattura
-        capture_layout = QHBoxLayout()
-        self.capture_button = QPushButton("Acquisisci Frame")
-        self.capture_button.setEnabled(False)
-        self.capture_button.clicked.connect(self.capture_frame)
-        capture_layout.addStretch(1)
-        capture_layout.addWidget(self.capture_button)
-        camera_layout.addLayout(capture_layout)
+        # Aggiungi i controlli al layout
+        camera_layout.addWidget(self.camera_tabs)
+        camera_layout.addLayout(apply_layout)
 
         # Tab per i controlli di scansione
         scan_controls = QWidget()
@@ -459,15 +523,11 @@ class DualStreamView(QWidget):
         # Pulsanti di azione per la scansione
         scan_buttons_layout = QHBoxLayout()
 
-        self.start_scan_button = QPushButton("Avvia Scansione")
-        self.start_scan_button.setEnabled(False)
-        self.start_scan_button.clicked.connect(self._on_start_scan_clicked)
-
         self.save_scan_button = QPushButton("Salva Scansione")
         self.save_scan_button.setEnabled(False)
         self.save_scan_button.clicked.connect(self._on_save_scan_clicked)
 
-        scan_buttons_layout.addWidget(self.start_scan_button)
+        scan_buttons_layout.addStretch(1)
         scan_buttons_layout.addWidget(self.save_scan_button)
 
         scan_layout.addLayout(scan_buttons_layout)
@@ -507,8 +567,12 @@ class DualStreamView(QWidget):
             # Connessione stabilita, prova ad avviare lo streaming
             self._retry_timer.stop()
 
-            # Avvia il vero streaming - ora che la connessione è confermata
-            self._start_actual_streaming()
+            # Abilita il pulsante di streaming
+            self.toggle_stream_button.setEnabled(True)
+
+            # Aggiorna pulsanti di interfaccia
+            self._update_ui_buttons()
+
         else:
             self._retry_count += 1
             logger.info(f"Tentativo di connessione {self._retry_count}/{self._max_retries}")
@@ -529,6 +593,32 @@ class DualStreamView(QWidget):
                     self._scanner.ip_address,
                     self._scanner.port
                 )
+
+    def _on_toggle_stream_clicked(self):
+        """Gestisce il clic sul pulsante per avviare/fermare lo streaming."""
+        if self._streaming:
+            # Ferma lo streaming
+            self.stop_streaming()
+            self.toggle_stream_button.setText("Avvia Streaming")
+        else:
+            # Avvia lo streaming
+            if self._scanner:
+                success = self.start_streaming(self._scanner)
+                if success:
+                    self.toggle_stream_button.setText("Ferma Streaming")
+
+    def _update_ui_buttons(self):
+        """Aggiorna lo stato dei pulsanti in base allo stato corrente."""
+        is_connected = self._scanner and self._scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
+        is_streaming = self._streaming
+
+        self.toggle_stream_button.setEnabled(is_connected)
+        self.toggle_stream_button.setText("Ferma Streaming" if is_streaming else "Avvia Streaming")
+
+        self.capture_button.setEnabled(is_streaming)
+        self.start_scan_button.setEnabled(is_streaming)
+        self.save_scan_button.setEnabled(False)
+        self.apply_settings_button.setEnabled(is_connected)
 
     def start_streaming(self, scanner: Scanner) -> bool:
         """
@@ -616,10 +706,8 @@ class DualStreamView(QWidget):
             self._streaming = True
             logger.info(f"Streaming avviato da {self._scanner.name}")
 
-            # Abilita i pulsanti appropriati
-            self.capture_button.setEnabled(True)
-            self.start_scan_button.setEnabled(True)
-            self.apply_settings_button.setEnabled(True)
+            # Aggiorna i pulsanti dell'interfaccia
+            self._update_ui_buttons()
 
             return True
         except Exception as e:
@@ -663,11 +751,8 @@ class DualStreamView(QWidget):
         self._streaming = False
         logger.info("Streaming fermato")
 
-        # Disabilita i pulsanti
-        self.capture_button.setEnabled(False)
-        self.start_scan_button.setEnabled(False)
-        self.save_scan_button.setEnabled(False)
-        self.apply_settings_button.setEnabled(False)
+        # Aggiorna i pulsanti dell'interfaccia
+        self._update_ui_buttons()
 
     def is_streaming(self) -> bool:
         """Verifica se lo streaming è attivo."""
@@ -693,10 +778,23 @@ class DualStreamView(QWidget):
     @Slot(int, np.ndarray)
     def _on_frame_received(self, camera_index: int, frame: np.ndarray):
         """Gestisce l'arrivo di un nuovo frame dallo stream."""
-        # Questo metodo viene chiamato quando il StreamReceiver riceve un frame
-        # Aggiungiamo il frame alla coda del processore appropriato
-        if 0 <= camera_index < len(self._frame_queues):
-            self._frame_queues[camera_index].put((camera_index, frame))
+        try:
+            # Stampa debug per capire cosa stiamo ricevendo
+            if frame is None:
+                logger.warning(f"Frame ricevuto da StreamReceiver è None per camera {camera_index}")
+                return
+
+            logger.debug(
+                f"Frame ricevuto da StreamReceiver: camera={camera_index}, shape={frame.shape}, tipo={frame.dtype}")
+
+            # Questo metodo viene chiamato quando il StreamReceiver riceve un frame
+            # Aggiungiamo il frame alla coda del processore appropriato
+            if 0 <= camera_index < len(self._frame_queues):
+                # È importante passare una tupla valida per evitare l'errore nel processore
+                self._frame_queues[camera_index].put((camera_index, frame))
+                logger.debug(f"Frame messo in coda per processore: camera={camera_index}")
+        except Exception as e:
+            logger.error(f"Errore in _on_frame_received: {e}")
 
     @Slot(int)
     def _on_stream_started(self, camera_index: int):
@@ -784,16 +882,37 @@ class DualStreamView(QWidget):
 
         # Raccogli le impostazioni
         left_exposure = self.left_exposure_slider.value()
+        left_gain = self.left_gain_slider.value()
+        left_brightness = self.left_brightness_slider.value()
+        left_contrast = self.left_contrast_slider.value()
+        left_sharpness = self.left_sharpness_slider.value()
+        left_saturation = self.left_saturation_slider.value()
+
         right_exposure = self.right_exposure_slider.value()
+        right_gain = self.right_gain_slider.value()
+        right_brightness = self.right_brightness_slider.value()
+        right_contrast = self.right_contrast_slider.value()
+        right_sharpness = self.right_sharpness_slider.value()
+        right_saturation = self.right_saturation_slider.value()
 
         # Crea il payload di configurazione
         config = {
             "camera": {
                 "left": {
-                    "exposure": left_exposure
+                    "exposure": left_exposure,
+                    "gain": left_gain,
+                    "brightness": left_brightness,
+                    "contrast": left_contrast,
+                    "sharpness": left_sharpness,
+                    "saturation": left_saturation
                 },
                 "right": {
-                    "exposure": right_exposure
+                    "exposure": right_exposure,
+                    "gain": right_gain,
+                    "brightness": right_brightness,
+                    "contrast": right_contrast,
+                    "sharpness": right_sharpness,
+                    "saturation": right_saturation
                 }
             }
         }

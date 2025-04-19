@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Controller per la gestione delle configurazioni dell'applicazione.
+Controller per la gestione della configurazione del sistema UnLook.
 """
 
 import logging
@@ -10,12 +10,12 @@ from typing import Dict, Any, Optional, List, Tuple
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from models.config_model import (
-    ConfigManager, UnLookConfig, CameraConfig, DLPConfig,
-    ToFConfig, ScanConfig, NetworkConfig, ApplicationConfig,
+from client.models.config_model import (
+    ConfigManager, CameraConfig, NetworkConfig, ToFConfig,
+    DLPConfig, ScanConfig, ApplicationConfig,
     StreamResolution, CameraMode
 )
-from models.scanner_model import Scanner
+from client.models.scanner_model import Scanner
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +192,7 @@ class ConfigController(QObject):
         Returns:
             True se il salvataggio è riuscito, False altrimenti
         """
-        return self._config_manager.save_config()
+        return self._config_manager.save_config()  # Correzione: prima era .save()
 
     @Slot()
     def load_config(self) -> bool:
