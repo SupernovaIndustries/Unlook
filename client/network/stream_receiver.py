@@ -47,11 +47,13 @@ class StreamReceiverThread(QThread):
             self._context = zmq.Context()
             self._socket = self._context.socket(zmq.SUB)
 
-            # Configurazione critica per minimizzare il buffering
+            # Configurazione base per ZeroMQ
             self._socket.setsockopt(zmq.LINGER, 0)  # Non attendere alla chiusura
-            self._socket.setsockopt(zmq.RCVHWM, 1)  # Limitare buffer di ricezione a 1
-            self._socket.setsockopt(zmq.RCVTIMEO, 100)  # 100ms timeout
+            self._socket.setsockopt(zmq.RCVHWM, 2)  # Limita buffer ma mantieni compatibilità multipart
             self._socket.setsockopt_string(zmq.SUBSCRIBE, "")  # Sottoscrivi a tutto
+
+            # Importante: non usare CONFLATE per evitare problemi con messaggi multipart
+            # self._socket.setsockopt(zmq.CONFLATE, 1) # Questo causava il crash
 
             # Connetti all'endpoint
             endpoint = f"tcp://{self.host}:{self.port}"
@@ -66,8 +68,20 @@ class StreamReceiverThread(QThread):
             # Loop principale
             while self._running:
                 try:
-                    # Attendi l'header con timeout
-                    header_data = self._socket.recv()
+                    # Utilizziamo una ricezione standard con un timeout per controllare l'attività
+                    self._socket.setsockopt(zmq.RCVTIMEO, 500)  # 500ms timeout
+
+                    # Attendi l'header
+                    try:
+                        header_data = self._socket.recv()
+                    except zmq.Again:
+                        # Controlla l'inattività
+                        current_time = time.time()
+                        if current_time - self._last_activity > 3.0 and self._connected:
+                            self._connected = False
+                            logger.warning("Connessione persa - nessuna attività per 3 secondi")
+                            self.connection_state_changed.emit(False)
+                        continue
 
                     # Aggiorna timestamp di attività
                     self._last_activity = time.time()
@@ -81,10 +95,14 @@ class StreamReceiverThread(QThread):
                     frame_data = self._socket.recv()
 
                     # Decodifica header
-                    header = json.loads(header_data.decode('utf-8'))
-                    camera_index = header.get("camera")
-                    timestamp = header.get("timestamp")
-                    format_str = header.get("format")
+                    try:
+                        header = json.loads(header_data.decode('utf-8'))
+                        camera_index = header.get("camera")
+                        timestamp = header.get("timestamp")
+                        format_str = header.get("format")
+                    except json.JSONDecodeError:
+                        logger.warning("Header JSON non valido")
+                        continue
 
                     # Verifica dati minimi necessari
                     if None in (camera_index, timestamp, format_str):
@@ -93,24 +111,24 @@ class StreamReceiverThread(QThread):
 
                     # Decodifica frame immediatamente
                     if format_str.lower() == "jpeg":
-                        frame_buffer = np.frombuffer(frame_data, dtype=np.uint8)
-                        frame = cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
+                        try:
+                            frame_buffer = np.frombuffer(frame_data, dtype=np.uint8)
+                            frame = cv2.imdecode(frame_buffer, cv2.IMREAD_UNCHANGED)
 
-                        if frame is None or frame.size == 0:
-                            logger.warning(f"Decodifica fallita per frame della camera {camera_index}")
+                            if frame is None or frame.size == 0:
+                                logger.warning(f"Decodifica fallita per frame della camera {camera_index}")
+                                continue
+
+                            # Emetti il frame decodificato direttamente
+                            self.frame_decoded.emit(camera_index, frame, timestamp)
+
+                        except Exception as decode_error:
+                            logger.warning(f"Errore nella decodifica: {decode_error}")
                             continue
-
-                        # Emetti il frame decodificato direttamente
-                        self.frame_decoded.emit(camera_index, frame, timestamp)
 
                 except zmq.ZMQError as e:
                     if e.errno == zmq.EAGAIN:
-                        # Timeout normale, verifica se la connessione è attiva
-                        if time.time() - self._last_activity > 3.0:
-                            logger.warning("Nessuna attività per 3 secondi, verifica connessione...")
-                            if self._connected:
-                                self._connected = False
-                                self.connection_state_changed.emit(False)
+                        # Timeout normale, continua
                         continue
 
                     logger.error(f"Errore ZMQ: {e}")
@@ -121,14 +139,20 @@ class StreamReceiverThread(QThread):
                     try:
                         if self._socket:
                             self._socket.close()
+
+                        # Ricrea socket con configurazione corretta
                         self._socket = self._context.socket(zmq.SUB)
                         self._socket.setsockopt(zmq.LINGER, 0)
-                        self._socket.setsockopt(zmq.RCVHWM, 1)
-                        self._socket.setsockopt(zmq.RCVTIMEO, 100)
+                        self._socket.setsockopt(zmq.RCVHWM, 2)
                         self._socket.setsockopt_string(zmq.SUBSCRIBE, "")
+
+                        # Riprova connessione
+                        endpoint = f"tcp://{self.host}:{self.port}"
                         self._socket.connect(endpoint)
+                        logger.info(f"Tentativo di riconnessione a {endpoint}")
                     except Exception as reconnect_error:
                         logger.error(f"Errore durante la riconnessione: {reconnect_error}")
+                        time.sleep(1.0)  # Pausa prima di riprovare
 
                 except Exception as e:
                     logger.error(f"Errore nella ricezione: {e}")
@@ -192,7 +216,7 @@ class StreamReceiver(QObject):
                 "lag_ms": 0
             }
 
-        logger.info(f"StreamReceiver senza buffering inizializzato: host={host}, port={port}")
+        logger.info(f"StreamReceiver ottimizzato inizializzato: host={host}, port={port}")
 
     def start(self) -> bool:
         """Avvia la ricezione dello stream."""

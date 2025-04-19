@@ -659,6 +659,11 @@ class DualStreamView(QWidget):
         # Aggiungi il gruppo avanzato
         left_cam_layout.addRow(left_advanced_group)
 
+        # Salva i riferimenti alle righe di saturazione per poter controllare la visibilità
+        self.left_saturation_row = (
+        left_advanced_layout.itemAt(left_advanced_layout.rowCount() - 1, QFormLayout.LabelRole).widget(),
+        left_advanced_layout.itemAt(left_advanced_layout.rowCount() - 1, QFormLayout.FieldRole).widget())
+
         # Collegamento tra modalità e saturazione per camera sinistra
         self.left_mode_color.toggled.connect(lambda checked: self._update_saturation_visibility(checked, True))
         self.left_mode_grayscale.toggled.connect(lambda checked: self._update_saturation_visibility(not checked, True))
@@ -767,6 +772,11 @@ class DualStreamView(QWidget):
         # Aggiungi il gruppo avanzato
         right_cam_layout.addRow(right_advanced_group)
 
+        # Salva i riferimenti alle righe di saturazione per poter controllare la visibilità
+        self.right_saturation_row = (
+        right_advanced_layout.itemAt(right_advanced_layout.rowCount() - 1, QFormLayout.LabelRole).widget(),
+        right_advanced_layout.itemAt(right_advanced_layout.rowCount() - 1, QFormLayout.FieldRole).widget())
+
         # Collegamento tra modalità e saturazione per camera destra
         self.right_mode_color.toggled.connect(lambda checked: self._update_saturation_visibility(checked, False))
         self.right_mode_grayscale.toggled.connect(
@@ -783,19 +793,17 @@ class DualStreamView(QWidget):
             is_left_camera: True per camera sinistra, False per destra
         """
         if is_left_camera:
-            # Trova la riga della saturazione nel layout
-            saturation_widget = self.left_saturation_slider.parent()
-            label = saturation_widget.parent().labelForField(saturation_widget)
-            if label:
+            # Usa i riferimenti diretti salvati durante l'inizializzazione
+            label, widget = self.left_saturation_row
+            if label and widget:
                 label.setVisible(visible)
-                saturation_widget.setVisible(visible)
+                widget.setVisible(visible)
         else:
-            # Trova la riga della saturazione nel layout
-            saturation_widget = self.right_saturation_slider.parent()
-            label = saturation_widget.parent().labelForField(saturation_widget)
-            if label:
+            # Usa i riferimenti diretti salvati durante l'inizializzazione
+            label, widget = self.right_saturation_row
+            if label and widget:
                 label.setVisible(visible)
-                saturation_widget.setVisible(visible)
+                widget.setVisible(visible)
 
     def _connect_signals(self):
         """Collega i segnali."""
