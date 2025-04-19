@@ -12,7 +12,7 @@ import numpy as np
 import time
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict, List, Any
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -33,7 +33,7 @@ class FrameProcessor(QThread):
     """
     Thread dedicato all'elaborazione dei frame ricevuti dallo scanner.
     """
-    new_frame_ready = Signal(int, QImage)  # camera_index, qimage
+    new_frame_ready = Signal(int, QImage, float)  # camera_index, qimage, timestamp (aggiunto timestamp)
 
     def __init__(self, frame_queue):
         super().__init__()
@@ -62,7 +62,7 @@ class FrameProcessor(QThread):
 
                 # Ora spacchetta il valore in modo sicuro
                 try:
-                    camera_index, frame = item
+                    camera_index, frame, timestamp = item  # Aggiunto timestamp
 
                     # Stampa debug per capire cosa stiamo ricevendo
                     if frame is None:
@@ -87,8 +87,8 @@ class FrameProcessor(QThread):
                         # Immagine in scala di grigi
                         qimage = QImage(processed_frame.data, width, height, width, QImage.Format_Grayscale8)
 
-                    # Emetti il segnale con il frame elaborato
-                    self.new_frame_ready.emit(camera_index, qimage)
+                    # Emetti il segnale con il frame elaborato e il timestamp
+                    self.new_frame_ready.emit(camera_index, qimage, timestamp)
                 except Exception as e:
                     logger.error(f"Errore nel processamento del frame: {str(e)}")
                     continue
@@ -96,7 +96,7 @@ class FrameProcessor(QThread):
             except Exception as e:
                 if self._running:  # Solo se il thread è ancora attivo
                     logger.error(f"Errore nel frame processor: {str(e)}")
-                    time.sleep(0.1)  # Evita di sovraccaricare il sistema in caso di errori ripetuti
+                    time.sleep(0.1)
 
     def _process_frame(self, frame):
         """
@@ -255,8 +255,8 @@ class StreamView(QWidget):
 
         layout.addLayout(info_layout)
 
-    @Slot(QImage)
-    def update_frame(self, frame: QImage):
+    @Slot(QImage, float)  # Modifica la firma dello slot per includere il timestamp
+    def update_frame(self, frame: QImage, timestamp: float = None):
         """Aggiorna il frame visualizzato con calcolo di lag."""
         if not frame:
             logger.warning(f"Frame nullo ricevuto per camera {self.camera_index}")
@@ -277,12 +277,10 @@ class StreamView(QWidget):
 
         self._last_frame_time = current_time
 
-        # Calcola il lag se il frame ha un timestamp
-        # I frame trasmessi dal server hanno questo attributo aggiunto nel StreamReceiver
-        if hasattr(frame, 'timestamp'):
+        # Calcola il lag se è stato fornito un timestamp
+        if timestamp is not None:
             now = time.time()
-            frame_timestamp = frame.timestamp
-            self._lag_ms = int((now - frame_timestamp) * 1000)
+            self._lag_ms = int((now - timestamp) * 1000)
 
             # Aggiorna l'etichetta del lag e il colore in base al valore
             if self._lag_ms < 100:
@@ -1160,12 +1158,12 @@ class DualStreamView(QWidget):
         """Verifica se lo streaming è attivo."""
         return self._streaming
 
-    @Slot(int, QImage)
-    def _on_new_frame(self, camera_index: int, frame: QImage):
+    @Slot(int, QImage, float)  # Aggiunto float per il timestamp
+    def _on_new_frame(self, camera_index: int, frame: QImage, timestamp: float):
         """Gestisce l'arrivo di un nuovo frame."""
         # Aggiorna la vista corrispondente
         if 0 <= camera_index < len(self.stream_views):
-            self.stream_views[camera_index].update_frame(frame)
+            self.stream_views[camera_index].update_frame(frame, timestamp)  # Passa anche il timestamp
 
     @Slot()
     def _update_visualization_options(self):
@@ -1177,8 +1175,8 @@ class DualStreamView(QWidget):
         for processor in self._frame_processors:
             processor.set_options(show_grid, show_features, enhance_contrast)
 
-    @Slot(int, np.ndarray)
-    def _on_frame_received(self, camera_index: int, frame: np.ndarray):
+    @Slot(int, np.ndarray, float)  # Aggiunto float per il timestamp
+    def _on_frame_received(self, camera_index: int, frame: np.ndarray, timestamp: float):
         """Gestisce l'arrivo di un nuovo frame dallo stream."""
         try:
             # Stampa debug per capire cosa stiamo ricevendo
@@ -1193,7 +1191,7 @@ class DualStreamView(QWidget):
             # Aggiungiamo il frame alla coda del processore appropriato
             if 0 <= camera_index < len(self._frame_queues):
                 # È importante passare una tupla valida per evitare l'errore nel processore
-                self._frame_queues[camera_index].put((camera_index, frame))
+                self._frame_queues[camera_index].put((camera_index, frame, timestamp))  # Include il timestamp
                 logger.debug(f"Frame messo in coda per processore: camera={camera_index}")
         except Exception as e:
             logger.error(f"Errore in _on_frame_received: {e}")

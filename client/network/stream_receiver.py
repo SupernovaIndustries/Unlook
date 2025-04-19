@@ -38,7 +38,7 @@ class StreamReceiver(QObject):
     """
 
     # Segnali
-    frame_received = Signal(int, np.ndarray)  # camera_index, frame
+    frame_received = Signal(int, np.ndarray, float)  # camera_index, frame
     stream_started = Signal(int)  # camera_index
     stream_stopped = Signal(int)  # camera_index
     stream_error = Signal(int, str)  # camera_index, error_message
@@ -431,7 +431,7 @@ class StreamReceiver(QObject):
                 logger.info(f"Stream avviato per camera {camera_index}")
 
             # Aggiungi il frame alla coda (non bloccare se la coda è piena)
-            frame_data = (frame_number, timestamp, format_str, resolution, data)
+            frame_data = (camera_index, data, timestamp)
 
             # Verifica che i dati siano validi
             if data is None or len(data) == 0:
@@ -568,16 +568,12 @@ class StreamReceiver(QObject):
                                     logger.debug(f"Primi 50 bytes: {repr(data[:50])}")
                                 continue
 
-                            # Aggiungi il timestamp del frame all'immagine
-                            # per calcolare il lag nell'interfaccia
-                            frame.timestamp = timestamp
-
                             # Log solo occasionalmente per non intasare
                             if frame_count % 30 == 0:
                                 logger.debug(f"Frame decodificato per camera {camera_index}: shape={frame.shape}")
 
-                            # Emetti il frame decodificato
-                            self.frame_received.emit(camera_index, frame)
+                            # Emetti il frame decodificato con il timestamp
+                            self.frame_received.emit(camera_index, frame, timestamp)
                             stats["frames_processed"] += 1
 
                         elif format_str.lower() == "h264":
