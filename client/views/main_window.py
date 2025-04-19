@@ -268,7 +268,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """
         Gestisce l'evento di chiusura della finestra.
-        Versione migliorata con disconnessione esplicita.
         """
         logger.info("Chiusura dell'applicazione in corso...")
 
@@ -278,27 +277,28 @@ class MainWindow(QMainWindow):
         # Ferma la scoperta degli scanner
         self.scanner_controller.stop_discovery()
 
-        # Ferma lo streaming se attivo
-        if hasattr(self, 'streaming_widget') and self.streaming_widget:
-            logger.info("Arresto dello streaming...")
-            self.streaming_widget.stop_streaming()
-
-        # Invia un comando di disconnessione esplicito se connesso
+        # Invia un comando di arresto streaming esplicito se connesso
         selected_scanner = self.scanner_controller.selected_scanner
         if selected_scanner and self.scanner_controller.is_connected(selected_scanner.device_id):
-            logger.info(f"Invio comando di disconnessione a {selected_scanner.name}...")
+            logger.info(f"Scanner connesso trovato: {selected_scanner.name}")
 
             # Importa qui per evitare problemi di importazione circolare
             from client.network.connection_manager import ConnectionManager
+            connection_manager = ConnectionManager()
 
             try:
-                # Invia il comando DISCONNECT
-                ConnectionManager().send_message(selected_scanner.device_id, "DISCONNECT")
-                # Attendiamo un momento per assicurarci che il messaggio venga inviato
-                logger.info("Attesa per invio comando disconnessione...")
-                time.sleep(0.5)
+                # Ferma lo streaming se attivo
+                if hasattr(self, 'streaming_widget') and self.streaming_widget:
+                    logger.info("Arresto dello streaming...")
+                    self.streaming_widget.stop_streaming()
+
+                # Invia esplicitamente il comando STOP_STREAM
+                logger.info(f"Invio comando STOP_STREAM a {selected_scanner.name}...")
+                connection_manager.send_message(selected_scanner.device_id, "STOP_STREAM")
+                # Breve pausa per assicurarsi che il comando venga processato
+                time.sleep(0.3)
             except Exception as e:
-                logger.error(f"Errore nell'invio del comando di disconnessione: {e}")
+                logger.error(f"Errore nell'invio del comando STOP_STREAM: {e}")
 
         # Disconnetti tutti gli scanner
         logger.info("Disconnessione da tutti gli scanner...")

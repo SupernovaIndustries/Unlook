@@ -207,6 +207,7 @@ class StreamView(QWidget):
         self._last_update_time = time.time()
         self._healthy = False  # Stato di salute dello stream
         self._lag_ms = 0  # Latenza in millisecondi
+        self._max_lag_warning = 200  # ms, soglia per avviso lag
 
         # Configura l'interfaccia utente
         self._setup_ui()
@@ -282,17 +283,18 @@ class StreamView(QWidget):
             now = time.time()
             self._lag_ms = int((now - timestamp) * 1000)
 
-            # Aggiorna l'etichetta del lag e il colore in base al valore
-            if self._lag_ms < 100:
-                self.lag_label.setStyleSheet("color: green; font-weight: bold;")
-            elif self._lag_ms < 300:
-                self.lag_label.setStyleSheet("color: orange; font-weight: bold;")
-            else:
-                self.lag_label.setStyleSheet("color: red; font-weight: bold;")
+            # Se il lag è molto alto (> 500ms), non aggiorniamo il display
+            # e tagliamo il frame come "saltato" a meno che non sia uno dei primi 10 frame
+            if self._lag_ms > 500 and self._frame_count > 10 and self._frame is not None:
+                # Aggiorna solo l'etichetta del lag senza aggiornare l'immagine
+                self._update_lag_label()
+                return  # Saltiamo questo frame per recuperare il lag
 
-            self.lag_label.setText(f"Lag: {self._lag_ms}ms")
+            # Aggiorna l'etichetta del lag e il colore in base al valore
+            self._update_lag_label()
         else:
             self.lag_label.setText("Lag: N/A")
+            self.lag_label.setStyleSheet("color: gray;")
 
         # Aggiorna lo stato di salute
         self._healthy = True
@@ -318,6 +320,22 @@ class StreamView(QWidget):
         fps_text = f"{self._fps:.1f} FPS" if self._fps > 0 else ""
 
         self.info_label.setText(f"Camera {camera_name} | {size_text} | {fps_text}")
+
+    def _update_lag_label(self):
+        """Aggiorna l'etichetta del lag e imposta il colore appropriato."""
+        # Aggiorna l'etichetta del lag e il colore in base al valore
+        if self._lag_ms < 100:
+            self.lag_label.setStyleSheet("color: green; font-weight: bold;")
+        elif self._lag_ms < 200:
+            self.lag_label.setStyleSheet("color: orange; font-weight: bold;")
+        else:
+            self.lag_label.setStyleSheet("color: red; font-weight: bold;")
+
+        self.lag_label.setText(f"Lag: {self._lag_ms}ms")
+
+        # Aggiungi avviso se il lag supera la soglia
+        if self._lag_ms > self._max_lag_warning:
+            logger.warning(f"Lag elevato su camera {self.camera_index}: {self._lag_ms}ms")
 
     def clear(self):
         """Pulisce il display."""
@@ -396,20 +414,6 @@ class StreamView(QWidget):
                     Qt.SmoothTransformation
                 )
                 self.display_label.setPixmap(scaled_pixmap)
-
-    def resizeEvent(self, event):
-        """Gestisce il ridimensionamento del widget."""
-        super().resizeEvent(event)
-
-        # Riscala il frame se presente
-        if self._frame and not self.display_label.pixmap().isNull():
-            pixmap = QPixmap.fromImage(self._frame)
-            scaled_pixmap = pixmap.scaled(
-                self.display_label.size(),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            )
-            self.display_label.setPixmap(scaled_pixmap)
 
 
 class DualStreamView(QWidget):

@@ -34,16 +34,16 @@ class StreamReceiver(QObject):
     """
     Riceve e gestisce gli stream video dal server UnLook.
     Supporta streaming JPEG con riconnessione automatica.
-    Versione con diagnostica avanzata e correzioni.
+    Versione con diagnostica avanzata e correzioni per ridurre lag.
     """
 
     # Segnali
-    frame_received = Signal(int, np.ndarray, float)  # camera_index, frame
+    frame_received = Signal(int, np.ndarray, float)  # camera_index, frame, timestamp
     stream_started = Signal(int)  # camera_index
     stream_stopped = Signal(int)  # camera_index
     stream_error = Signal(int, str)  # camera_index, error_message
 
-    def __init__(self, host: str, port: int, queue_size: int = 1):  # Ridotto da 5 a 1
+    def __init__(self, host: str, port: int, queue_size: int = 1):
         super().__init__()
         self.host = host
         self.port = port
@@ -71,10 +71,10 @@ class StreamReceiver(QObject):
         self._receiver_thread = None
         self._processor_threads = {}
 
-        # Code di frame
+        # Code di frame - IMPORTANTE: dimensione 1 per evitare accumulo di lag
         self._frame_queues = {
-            0: ThreadSafeQueue(maxsize=1),  # Camera sinistra (era queue_size)
-            1: ThreadSafeQueue(maxsize=1)  # Camera destra (era queue_size)
+            0: ThreadSafeQueue(maxsize=1),  # Camera sinistra, un solo frame alla volta
+            1: ThreadSafeQueue(maxsize=1)  # Camera destra, un solo frame alla volta
         }
 
         # Statistiche
@@ -82,16 +82,18 @@ class StreamReceiver(QObject):
             0: {  # Camera sinistra
                 "frames_received": 0,
                 "frames_processed": 0,
+                "frames_skipped": 0,  # Contatore per i frame saltati
                 "last_frame_time": 0,
                 "fps": 0,
-                "lag_ms": 0  # Aggiungiamo tracciamento del lag
+                "lag_ms": 0
             },
             1: {  # Camera destra
                 "frames_received": 0,
                 "frames_processed": 0,
+                "frames_skipped": 0,  # Contatore per i frame saltati
                 "last_frame_time": 0,
                 "fps": 0,
-                "lag_ms": 0  # Aggiungiamo tracciamento del lag
+                "lag_ms": 0
             }
         }
 
@@ -148,9 +150,9 @@ class StreamReceiver(QObject):
 
                 # Configura il socket
                 self._socket.setsockopt(zmq.LINGER, 100)  # Non aspettare troppo alla chiusura
-                # Riduciamo la coda di ricezione hardware per evitare accumuli
-                self._socket.setsockopt(zmq.RCVHWM, 2)  # Ridotto da 10 a 2
-                self._socket.setsockopt(zmq.RCVTIMEO, 100)  # Ridotto a 100ms per reagire più velocemente
+                # Riduciamo ancora di più la coda di ricezione hardware per evitare accumuli
+                self._socket.setsockopt(zmq.RCVHWM, 1)  # Ridotto a 1
+                self._socket.setsockopt(zmq.RCVTIMEO, 100)  # 100ms di timeout per reagire velocemente
                 self._socket.setsockopt(zmq.RECONNECT_IVL, 100)  # 100ms tra tentativi di riconnessione
                 self._socket.setsockopt(zmq.RECONNECT_IVL_MAX, 5000)  # Max 5 secondi tra tentativi
 
@@ -403,6 +405,11 @@ class StreamReceiver(QObject):
             if isinstance(resolution, list):
                 resolution = tuple(resolution)
 
+            # Verifica che i dati siano validi
+            if data is None or len(data) == 0:
+                logger.warning(f"Dati frame vuoti per camera {camera_index}, frame {frame_number}")
+                return
+
             # Aggiorna le statistiche
             if camera_index in self._stats:
                 stats = self._stats[camera_index]
@@ -414,11 +421,16 @@ class StreamReceiver(QObject):
                     lag_ms = int((current_time - timestamp) * 1000)
                     stats["lag_ms"] = lag_ms
 
+                    # Segnala se il lag è eccessivo
+                    if lag_ms > 200:  # 200ms è già un lag significativo
+                        if stats["frames_received"] % 30 == 0:  # Log ogni 30 frame
+                            logger.warning(f"Lag elevato per camera {camera_index}: {lag_ms}ms")
+
                 # Debug ogni 30 frame o al primo frame
                 if stats["frames_received"] == 1 or stats["frames_received"] % 30 == 0:
                     logger.debug(f"Frame #{stats['frames_received']} ricevuto: camera={camera_index}, "
                                  f"n={frame_number}, formato={format_str}, risoluzione={resolution}, "
-                                 f"lag={stats['lag_ms']}ms")
+                                 f"lag={stats['lag_ms']}ms, saltati={stats['frames_skipped']}")
 
             # Aggiorna il timestamp dell'ultimo frame
             self._last_frame_time = time.time()
@@ -430,30 +442,47 @@ class StreamReceiver(QObject):
                 self.stream_started.emit(camera_index)
                 logger.info(f"Stream avviato per camera {camera_index}")
 
-            # Aggiungi il frame alla coda (non bloccare se la coda è piena)
-            frame_data = (frame_number, timestamp, format_str, resolution, data)  # Manteniamo il formato originale
-
-            # Verifica che i dati siano validi
-            if data is None or len(data) == 0:
-                logger.warning(f"Dati frame vuoti per camera {camera_index}, frame {frame_number}")
-                return
-
-            # OTTIMIZZAZIONE: Svuota la coda prima di aggiungere un nuovo frame
-            # per evitare l'accumulo di frame vecchi che causano lag
+            # OTTIMIZZAZIONE CRITICA: Svuota sempre la coda prima di aggiungere un nuovo frame
             queue = self._frame_queues[camera_index]
-            if not queue.empty():
+            frames_skipped = 0
+
+            # Svuota completamente la coda, contando i frame scartati
+            while not queue.empty():
                 try:
-                    # Scarta i frame vecchi
                     queue.get_nowait()
+                    frames_skipped += 1
                 except:
                     pass
 
-            # Metti il frame in coda (non bloccare mai)
-            queue_result = queue.put(frame_data, block=False)
-            if not queue_result:
-                # La coda è piena, log solo occasionalmente per non intasare
-                if frame_number % 10 == 0:
-                    logger.debug(f"Coda piena per camera {camera_index}, frame scartato")
+            # Se abbiamo scartato frame, aumentiamo il contatore e logghiamo
+            if frames_skipped > 0:
+                if camera_index in self._stats:
+                    self._stats[camera_index]["frames_skipped"] += frames_skipped
+                    # Log meno frequente per non intasare
+                    if frames_skipped > 1 and self._stats[camera_index]["frames_received"] % 60 == 0:
+                        logger.debug(f"Camera {camera_index}: scartati {frames_skipped} frame per ridurre lag")
+
+            # Aggiungiamo il frame alla coda solo quando è vuota
+            # frame_data = (frame_number, timestamp, format_str, resolution, data)
+            # Modifica: passiamo direttamente camera_index, frame decodificato e timestamp al processore
+            # per evitare passaggi intermedi che aumentano il lag
+
+            # Decodifica subito il frame (invece di metterlo in coda e decodificarlo dopo)
+            try:
+                if format_str.lower() == "jpeg":
+                    # Converti i dati in un buffer numpy
+                    frame_buffer = np.frombuffer(data, dtype=np.uint8)
+                    # Decodifica l'immagine JPEG
+                    frame = cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
+
+                    if frame is None or frame.size == 0:
+                        logger.warning(f"Decodifica JPEG fallita per camera {camera_index}")
+                        return
+
+                    # Metti in coda la tripla (camera_index, frame, timestamp)
+                    queue.put((camera_index, frame, timestamp), block=False)
+            except Exception as e:
+                logger.error(f"Errore nella decodifica del frame: {e}")
 
         except Exception as e:
             logger.error(f"Errore nell'elaborazione del messaggio di frame: {e}")
@@ -522,7 +551,7 @@ class StreamReceiver(QObject):
         logger.info(f"Thread di processamento camera {camera_index} avviato")
 
         frame_count = 0
-        last_log_time = time.time()
+        last_fps_update = time.time()
 
         try:
             queue = self._frame_queues[camera_index]
@@ -540,66 +569,38 @@ class StreamReceiver(QObject):
                 try:
                     # Preleva un frame dalla coda con un timeout breve
                     # per reagire più velocemente alle interruzioni
-                    frame_data = queue.get(block=True, timeout=0.1)  # Ridotto da 1.0 a 0.1
+                    frame_data = queue.get(block=True, timeout=0.1)  # 100ms timeout
 
                     # Verifica che frame_data non sia None (timeout della coda)
                     if frame_data is None:
                         continue
 
-                    try:
-                        # Ora spacchetta la tupla in modo sicuro
-                        # Ci aspettiamo (camera_index, data, timestamp)
-                        cam_idx, data, timestamp = frame_data
+                    # Frame già decodificato nel metodo _process_frame_message
+                    cam_idx, frame, timestamp = frame_data
 
-                        frame_count += 1
-                        current_time = time.time()
-
-                        # Decodifica il frame in base al formato
-                        if format_str.lower() == "jpeg":
-                            # Converti i dati in un buffer numpy
-                            frame_buffer = np.frombuffer(data, dtype=np.uint8)
-
-                            # Decodifica l'immagine JPEG
-                            frame = cv2.imdecode(frame_buffer, cv2.IMREAD_COLOR)
-
-                            if frame is None or frame.size == 0:
-                                logger.warning(f"Decodifica JPEG fallita per camera {camera_index}")
-                                continue
-
-                            # Log solo occasionalmente per non intasare
-                            if frame_count % 30 == 0:
-                                logger.debug(f"Frame decodificato per camera {camera_index}: shape={frame.shape}")
-
-                            # Emetti il frame decodificato
-                            self.frame_received.emit(camera_index, frame, timestamp)
-                            stats["frames_processed"] += 1
-
-                        elif format_str.lower() == "h264":
-                            # Per ora, saltiamo i frame H.264 (richiederebbe un decoder specifico)
-                            logger.warning("Formato H264 ricevuto ma non supportato")
-                            continue
-                        else:
-                            # Formato non supportato
-                            logger.warning(f"Formato frame non supportato: {format_str}")
-                            continue
-
-                    except ValueError as e:
-                        logger.error(f"Errore nello spacchettamento dei dati del frame: {e}")
+                    if frame is None or frame.size == 0:
+                        logger.warning(f"Frame invalido per camera {camera_index}")
                         continue
 
-                    # Calcola FPS solo se abbiamo elaborato almeno un frame
-                    if stats["frames_processed"] > 0:
-                        current_time = time.time()
-                        if stats["last_frame_time"] > 0:
-                            time_diff = current_time - stats["last_frame_time"]
-                            if time_diff > 0:
-                                # Calcola FPS istantaneo
-                                instant_fps = 1.0 / time_diff
-                                # Media mobile per stabilizzare il valore
-                                alpha = 0.2
-                                stats["fps"] = (1.0 - alpha) * stats["fps"] + alpha * instant_fps
+                    frame_count += 1
 
-                        stats["last_frame_time"] = current_time
+                    # Calcola FPS
+                    current_time = time.time()
+                    if current_time - last_fps_update >= 1.0:  # Aggiorna FPS ogni secondo
+                        elapsed = current_time - last_fps_update
+                        if elapsed > 0:
+                            current_fps = frame_count / elapsed
+                            # Media mobile per stabilizzare
+                            alpha = 0.3
+                            stats["fps"] = (1 - alpha) * stats["fps"] + alpha * current_fps
+
+                        # Reset contatori
+                        frame_count = 0
+                        last_fps_update = current_time
+
+                    # Emetti il frame decodificato insieme al timestamp
+                    self.frame_received.emit(camera_index, frame, timestamp)
+                    stats["frames_processed"] += 1
 
                 except Exception as e:
                     if camera_index in self._cameras_receiving and self._running:
