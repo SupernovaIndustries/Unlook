@@ -14,10 +14,10 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QStatusBar, QToolBar, QDockWidget, QSplitter, QFrame,
-    QTabWidget, QMessageBox, QMenu, QFileDialog, QDialog, QAction
+    QTabWidget, QMessageBox, QMenu, QFileDialog, QDialog
 )
 from PySide6.QtCore import Qt, Slot, QSettings, QSize, QPoint
-from PySide6.QtGui import QIcon, QPixmap, QFont
+from PySide6.QtGui import QIcon, QPixmap, QFont, QAction
 
 from client.controllers.scanner_controller import ScannerController
 from client.models.scanner_model import Scanner, ScannerStatus
@@ -153,12 +153,6 @@ class MainWindow(QMainWindow):
         self.toolbar.addAction(self.action_toggle_connection)
 
         self.toolbar.addSeparator()
-
-        # Pulsante per avviare/fermare lo streaming
-        self.action_toggle_streaming = QAction("Avvia streaming", self)
-        self.action_toggle_streaming.setEnabled(False)
-        self.action_toggle_streaming.triggered.connect(self._toggle_streaming)
-        self.toolbar.addAction(self.action_toggle_streaming)
 
         # Pulsante per acquisire un'immagine
         self.action_capture = QAction("Acquisizione", self)
@@ -348,9 +342,6 @@ class MainWindow(QMainWindow):
         # Cambia il testo del pulsante di connessione
         self.action_toggle_connection.setText("Disconnetti")
 
-        # Abilita il pulsante di streaming
-        self.action_toggle_streaming.setEnabled(True)
-
         # Passa alla scheda di streaming
         self.central_tabs.setCurrentIndex(self.TabIndex.STREAMING.value)
 
@@ -369,8 +360,7 @@ class MainWindow(QMainWindow):
         # Cambia il testo del pulsante di connessione
         self.action_toggle_connection.setText("Connetti")
 
-        # Disabilita il pulsante di streaming e acquisizione
-        self.action_toggle_streaming.setEnabled(False)
+        # Disabilita il pulsante di acquisizione
         self.action_capture.setEnabled(False)
 
         # Ferma lo streaming se attivo
@@ -425,18 +415,9 @@ class MainWindow(QMainWindow):
             # Verifica se lo streaming è attivo
             selected_scanner = self.scanner_controller.selected_scanner
             if selected_scanner and selected_scanner.status == ScannerStatus.CONNECTED:
-                # Se il dispositivo è connesso ma lo streaming non è attivo, chiede all'utente
-                # se vuole avviarlo
+                # Se il dispositivo è connesso ma lo streaming non è attivo, avvia lo streaming automaticamente
                 if not self.streaming_widget.is_streaming():
-                    response = QMessageBox.question(
-                        self,
-                        "Avvio streaming",
-                        f"Vuoi avviare lo streaming dal dispositivo {selected_scanner.name}?",
-                        QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.Yes
-                    )
-                    if response == QMessageBox.Yes:
-                        self._toggle_streaming()
+                    self.streaming_widget.start_streaming(selected_scanner)
 
     @Slot()
     def _toggle_discovery(self):
@@ -475,28 +456,6 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(f"Disconnessione in corso...", 3000)
 
     @Slot()
-    def _toggle_streaming(self):
-        """Avvia/ferma lo streaming video."""
-        # Verifica se c'è uno scanner connesso
-        selected_scanner = self.scanner_controller.selected_scanner
-        if not selected_scanner or not self.scanner_controller.is_connected(selected_scanner.device_id):
-            return
-
-        # Avvia/ferma lo streaming
-        if self.action_toggle_streaming.text() == "Avvia streaming":
-            # Avvia lo streaming
-            success = self.streaming_widget.start_streaming(selected_scanner)
-            if success:
-                self.status_bar.showMessage("Avvio streaming in corso...", 3000)
-                # Il pulsante verrà aggiornato quando lo streaming sarà effettivamente avviato
-        else:
-            # Ferma lo streaming
-            self.streaming_widget.stop_streaming()
-            self.action_toggle_streaming.setText("Avvia streaming")
-            self.action_capture.setEnabled(False)
-            self.status_bar.showMessage("Streaming fermato", 3000)
-
-    @Slot()
     def _capture_frame(self):
         """Acquisisce un frame dallo streaming."""
         # Verifica se lo streaming è attivo
@@ -530,10 +489,8 @@ class MainWindow(QMainWindow):
         self.action_toggle_connection.setText("Disconnetti" if is_connected else "Connetti")
         self.action_toggle_connection.setEnabled(True)
 
-        # Aggiorna i pulsanti di streaming e acquisizione
+        # Aggiorna il pulsante di acquisizione
         is_streaming = selected_scanner.status == ScannerStatus.STREAMING
-        self.action_toggle_streaming.setText("Ferma streaming" if is_streaming else "Avvia streaming")
-        self.action_toggle_streaming.setEnabled(is_connected)
         self.action_capture.setEnabled(is_streaming)
 
     def _show_about_dialog(self):

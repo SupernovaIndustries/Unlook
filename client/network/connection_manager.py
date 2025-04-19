@@ -3,7 +3,7 @@
 
 """
 Gestisce le connessioni con gli scanner UnLook.
-Versione migliorata con gestione più robusta delle connessioni.
+Versione semplificata senza controlli di connessione aggiuntivi.
 """
 
 import json
@@ -12,7 +12,7 @@ import socket
 import time
 from typing import Dict, Optional, Tuple, Any, Callable
 
-from PySide6.QtCore import QObject, Signal, QThread, QMutex, QMutexLocker, QTimer
+from PySide6.QtCore import QObject, Signal, QThread, QMutex, QMutexLocker
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +42,6 @@ class ConnectionWorker(QThread):
         self._running = False
         self._mutex = QMutex()
         self._send_queue = []
-        self._last_ping_time = 0
-        self._last_response_time = 0
-        self._ping_interval = 3.0  # secondi
-        self._response_timeout = 10.0  # secondi
-        self._connected = False
 
     def run(self):
         """Esegue il loop principale di connessione."""
@@ -54,13 +49,6 @@ class ConnectionWorker(QThread):
             # Crea e configura il socket ZMQ
             self._context = zmq.Context()
             self._socket = self._context.socket(zmq.REQ)  # Usiamo REQ che corrisponde a REP del server
-
-            # Configurazione del socket per una connessione più robusta
-            self._socket.setsockopt(zmq.LINGER, 100)  # Attesa minima alla chiusura (ms)
-            self._socket.setsockopt(zmq.RCVTIMEO, 2000)  # Timeout di ricezione (ms)
-            self._socket.setsockopt(zmq.SNDTIMEO, 2000)  # Timeout di invio (ms)
-            self._socket.setsockopt(zmq.RECONNECT_IVL, 100)  # Intervallo tra i tentativi di riconnessione (ms)
-            self._socket.setsockopt(zmq.RECONNECT_IVL_MAX, 5000)  # Intervallo massimo tra i tentativi (ms)
 
             # Connessione
             endpoint = f"tcp://{self.host}:{self.port}"
@@ -70,30 +58,12 @@ class ConnectionWorker(QThread):
             # Connessione riuscita
             logger.info(f"Connessione stabilita con {self.host}:{self.port}")
             self._running = True
-            self._connected = True
             self.connection_ready.emit(self.device_id)
-
-            # Invia immediatamente un PING per confermare la connessione
-            self._send_ping()
-            self._last_ping_time = time.time()
 
             # Loop principale
             while self._running:
-                # Verifica se è necessario inviare un ping
-                current_time = time.time()
-                if current_time - self._last_ping_time >= self._ping_interval:
-                    self._send_ping()
-                    self._last_ping_time = current_time
-
-                # Verifica timeout di risposta
-                if self._last_response_time > 0 and current_time - self._last_response_time > self._response_timeout:
-                    logger.warning(f"Timeout di risposta dal server {self.host}")
-                    self._connected = False
-                    # Riprova a connettersi (ZMQ gestirà i tentativi di riconnessione)
-
-                # Invia i messaggi in coda se connesso
-                if self._connected:
-                    self._process_send_queue()
+                # Invia i messaggi in coda
+                self._process_send_queue()
 
                 # Pausa breve per evitare di sovraccaricare la CPU
                 time.sleep(0.05)
@@ -112,28 +82,6 @@ class ConnectionWorker(QThread):
             self._cleanup()
             # Notifica la chiusura
             self.connection_closed.emit(self.device_id)
-
-    def _send_ping(self):
-        """Invia un ping al server per mantenere la connessione attiva."""
-        ping_message = {
-            "type": "PING",
-            "timestamp": time.time(),
-            "ip_address": self._get_local_ip()
-        }
-        message_data = json.dumps(ping_message).encode('utf-8')
-        if not self.send_data(message_data):
-            logger.warning(f"Impossibile inviare ping al server {self.host}")
-
-    def _get_local_ip(self):
-        """Ottiene l'indirizzo IP locale."""
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))  # Connessione a un server esterno
-            local_ip = s.getsockname()[0]
-            s.close()
-            return local_ip
-        except:
-            return "127.0.0.1"  # Fallback a localhost
 
     def send_data(self, data: bytes) -> bool:
         """
@@ -171,10 +119,6 @@ class ConnectionWorker(QThread):
             # Attendi la risposta (pattern REQ/REP: req->rep->req->rep...)
             reply = self._socket.recv()
 
-            # Aggiorna il timestamp dell'ultima risposta
-            self._last_response_time = time.time()
-            self._connected = True
-
             try:
                 # Decodifica e processa la risposta
                 reply_json = reply.decode('utf-8')
@@ -184,11 +128,8 @@ class ConnectionWorker(QThread):
                 logger.error(f"Errore nella decodifica della risposta: {e}")
         except zmq.ZMQError as e:
             logger.error(f"Errore ZMQ durante l'invio: {e}")
-            # Imposta lo stato di non connesso
-            self._connected = False
         except Exception as e:
             logger.error(f"Errore durante l'invio: {str(e)}")
-            self._connected = False
 
     def stop(self):
         """Ferma il worker e chiude la connessione."""
@@ -239,11 +180,6 @@ class ConnectionManager(QObject):
         self._connections: Dict[str, ConnectionWorker] = {}
         self._message_handlers: Dict[str, Callable] = {}
         self._initialized = True
-
-        # Timer per verificare le connessioni
-        self._check_timer = QTimer(self)
-        self._check_timer.timeout.connect(self._check_connections)
-        self._check_timer.start(5000)  # Controlla ogni 5 secondi
 
     def connect(self, device_id: str, host: str, port: int) -> bool:
         """
@@ -390,14 +326,6 @@ class ConnectionManager(QObject):
                 worker.data_received.disconnect()
             except:
                 pass
-
-    def _check_connections(self):
-        """Verifica lo stato di tutte le connessioni attive."""
-        for device_id, worker in list(self._connections.items()):
-            if not worker.isRunning():
-                logger.warning(f"Worker per {device_id} non più in esecuzione, pulizia...")
-                self._cleanup_connection(device_id)
-                self.connection_closed.emit(device_id)
 
     def _on_connection_ready(self, device_id: str):
         """Gestisce l'evento di connessione pronta."""
