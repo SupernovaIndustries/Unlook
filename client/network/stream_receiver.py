@@ -431,7 +431,7 @@ class StreamReceiver(QObject):
                 logger.info(f"Stream avviato per camera {camera_index}")
 
             # Aggiungi il frame alla coda (non bloccare se la coda è piena)
-            frame_data = (camera_index, data, timestamp)
+            frame_data = (frame_number, timestamp, format_str, resolution, data)  # Manteniamo il formato originale
 
             # Verifica che i dati siano validi
             if data is None or len(data) == 0:
@@ -548,7 +548,8 @@ class StreamReceiver(QObject):
 
                     try:
                         # Ora spacchetta la tupla in modo sicuro
-                        frame_number, timestamp, format_str, resolution, data = frame_data
+                        # Ci aspettiamo (camera_index, data, timestamp)
+                        cam_idx, data, timestamp = frame_data
 
                         frame_count += 1
                         current_time = time.time()
@@ -563,16 +564,13 @@ class StreamReceiver(QObject):
 
                             if frame is None or frame.size == 0:
                                 logger.warning(f"Decodifica JPEG fallita per camera {camera_index}")
-                                # Debug solo per il primo frame fallito
-                                if stats["frames_processed"] == 0:
-                                    logger.debug(f"Primi 50 bytes: {repr(data[:50])}")
                                 continue
 
                             # Log solo occasionalmente per non intasare
                             if frame_count % 30 == 0:
                                 logger.debug(f"Frame decodificato per camera {camera_index}: shape={frame.shape}")
 
-                            # Emetti il frame decodificato con il timestamp
+                            # Emetti il frame decodificato
                             self.frame_received.emit(camera_index, frame, timestamp)
                             stats["frames_processed"] += 1
 
