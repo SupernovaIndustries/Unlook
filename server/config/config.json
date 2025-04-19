@@ -3,7 +3,9 @@
     "discovery_port": 5678,
     "command_port": 5680,
     "stream_port": 5681,
-    "broadcast_interval": 1.0
+    "broadcast_interval": 1.0,
+    "frame_interval": 0.01,
+    "dynamic_fps": true
   },
   "camera": {
     "left": {
@@ -22,6 +24,8 @@
   "stream": {
     "format": "jpeg",
     "quality": 90,
-    "bitrate": 2000000
+    "bitrate": 2000000,
+    "max_fps": 30,
+    "min_fps": 15
   }
 }

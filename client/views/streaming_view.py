@@ -3,7 +3,7 @@
 
 """
 Widget per la visualizzazione dello streaming video dual-camera degli scanner UnLook.
-Versione migliorata con configurazioni integrate e gestione delle connessioni più robusta.
+Versione ottimizzata con eliminazione delle code e buffer per ridurre la latenza.
 """
 
 import logging
@@ -20,181 +20,18 @@ from PySide6.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QFrame, QSplitter, QFileDialog,
     QMessageBox, QTabWidget, QRadioButton, QButtonGroup, QLineEdit
 )
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QMutex, QMutexLocker
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QMutex, QMutexLocker
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
 
 from client.models.scanner_model import Scanner, ScannerStatus
-from client.utils.thread_safe_queue import ThreadSafeQueue
 
 logger = logging.getLogger(__name__)
-
-
-class FrameProcessor(QThread):
-    """
-    Thread dedicato all'elaborazione dei frame ricevuti dallo scanner.
-    """
-    new_frame_ready = Signal(int, QImage, float)  # camera_index, qimage, timestamp (aggiunto timestamp)
-
-    def __init__(self, frame_queue):
-        super().__init__()
-        self._frame_queue = frame_queue
-        self._running = False
-        self._mutex = QMutex()
-
-        # Opzioni di visualizzazione
-        self._show_grid = False
-        self._show_features = False
-        self._enhance_contrast = False
-
-    def run(self):
-        """Esegue il loop principale di elaborazione dei frame."""
-        self._running = True
-        logger.info("Frame processor avviato")
-
-        while self._running:
-            try:
-                # Attendi un nuovo frame dalla coda
-                item = self._frame_queue.get(block=True, timeout=0.1)
-
-                # Se la coda è vuota o si è verificato un timeout, continuiamo
-                if item is None:
-                    continue
-
-                # Ora spacchetta il valore in modo sicuro
-                try:
-                    camera_index, frame, timestamp = item  # Aggiunto timestamp
-
-                    # Stampa debug per capire cosa stiamo ricevendo
-                    if frame is None:
-                        logger.warning(f"Frame dalla coda è None per camera {camera_index}")
-                        continue
-
-                    logger.debug(f"Frame ricevuto per camera {camera_index}, forma: {frame.shape}, tipo: {frame.dtype}")
-
-                    # Elabora il frame
-                    processed_frame = self._process_frame(frame)
-
-                    # Converti in QImage
-                    height, width = processed_frame.shape[:2]
-                    bytes_per_line = 3 * width
-
-                    # OpenCV usa BGR, Qt usa RGB
-                    if len(processed_frame.shape) == 3 and processed_frame.shape[2] == 3:
-                        # Immagine a colori
-                        rgb_image = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-                        qimage = QImage(rgb_image.data, width, height, bytes_per_line, QImage.Format_RGB888)
-                    else:
-                        # Immagine in scala di grigi
-                        qimage = QImage(processed_frame.data, width, height, width, QImage.Format_Grayscale8)
-
-                    # Emetti il segnale con il frame elaborato e il timestamp
-                    self.new_frame_ready.emit(camera_index, qimage, timestamp)
-                except Exception as e:
-                    logger.error(f"Errore nel processamento del frame: {str(e)}")
-                    continue
-
-            except Exception as e:
-                if self._running:  # Solo se il thread è ancora attivo
-                    logger.error(f"Errore nel frame processor: {str(e)}")
-                    time.sleep(0.1)
-
-    def _process_frame(self, frame):
-        """
-        Elabora un frame applicando le opzioni di visualizzazione.
-
-        Args:
-            frame: Frame OpenCV da elaborare
-
-        Returns:
-            Frame elaborato
-        """
-        with QMutexLocker(self._mutex):
-            # Crea una copia del frame per l'elaborazione
-            processed = frame.copy()
-
-            # Converti in scala di grigi se necessario
-            if len(processed.shape) == 3 and processed.shape[2] == 3:
-                gray = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = processed
-
-            # Applica miglioramento del contrasto se abilitato
-            if self._enhance_contrast:
-                # Equalizzazione dell'istogramma adattiva (CLAHE)
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                enhanced = clahe.apply(gray)
-
-                # Se il frame originale era a colori, applica il miglioramento solo alla luminosità
-                if len(processed.shape) == 3 and processed.shape[2] == 3:
-                    # Converti in HSV
-                    hsv = cv2.cvtColor(processed, cv2.COLOR_BGR2HSV)
-                    # Sostituisci il canale V (luminosità)
-                    hsv[:, :, 2] = enhanced
-                    # Torna in BGR
-                    processed = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-                else:
-                    processed = enhanced
-
-            # Applica una griglia se abilitata
-            if self._show_grid:
-                height, width = processed.shape[:2]
-                grid_size = 50  # Dimensione delle celle della griglia
-
-                # Disegna linee orizzontali
-                for y in range(0, height, grid_size):
-                    if len(processed.shape) == 3:
-                        cv2.line(processed, (0, y), (width, y), (0, 255, 0), 1)
-                    else:
-                        cv2.line(processed, (0, y), (width, y), 200, 1)
-
-                # Disegna linee verticali
-                for x in range(0, width, grid_size):
-                    if len(processed.shape) == 3:
-                        cv2.line(processed, (x, 0), (x, height), (0, 255, 0), 1)
-                    else:
-                        cv2.line(processed, (x, 0), (x, height), 200, 1)
-
-            # Rileva e disegna caratteristiche se abilitato
-            if self._show_features:
-                # Crea un rilevatore di feature
-                feature_detector = cv2.FastFeatureDetector_create(threshold=25)
-
-                # Rileva keypoints
-                keypoints = feature_detector.detect(gray, None)
-
-                # Disegna keypoints sul frame
-                if len(processed.shape) == 3:
-                    processed = cv2.drawKeypoints(
-                        processed, keypoints, None, (0, 0, 255),
-                        cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
-                    )
-                else:
-                    processed = cv2.drawKeypoints(
-                        cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR), keypoints, None,
-                        (0, 0, 255), cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
-                    )
-
-            return processed
-
-    def set_options(self, show_grid: bool, show_features: bool, enhance_contrast: bool):
-        """Imposta le opzioni di visualizzazione."""
-        with QMutexLocker(self._mutex):
-            self._show_grid = show_grid
-            self._show_features = show_features
-            self._enhance_contrast = enhance_contrast
-
-    def stop(self):
-        """Ferma il thread di elaborazione."""
-        self._running = False
-        # Attendi la terminazione
-        self.wait(1000)  # timeout di 1 secondo
-        logger.info("Frame processor fermato")
 
 
 class StreamView(QWidget):
     """
     Widget che visualizza lo stream di una singola camera.
-    Versione migliorata con indicatore di lag e stato di connessione.
+    Versione ottimizzata con elaborazione in linea e senza buffer.
     """
 
     def __init__(self, camera_index: int, parent=None):
@@ -203,20 +40,27 @@ class StreamView(QWidget):
         self._frame = None
         self._last_frame_time = 0
         self._fps = 0
-        self._frame_count = 0  # Contatore per i frame ricevuti
+        self._frame_count = 0
         self._last_update_time = time.time()
-        self._healthy = False  # Stato di salute dello stream
-        self._lag_ms = 0  # Latenza in millisecondi
+        self._healthy = False
+        self._lag_ms = 0
         self._max_lag_warning = 200  # ms, soglia per avviso lag
 
-        # Configura l'interfaccia utente
+        # Opzioni di visualizzazione
+        self._enhance_contrast = False
+        self._show_grid = False
+        self._show_features = False
+
+        # Mutex per proteggere l'accesso al frame e alle opzioni
+        self._mutex = QMutex()
+
+        # Configurazione dell'interfaccia
         self._setup_ui()
 
-        # Avvia un timer per l'aggiornamento dello stato di salute
-        from PySide6.QtCore import QTimer
+        # Timer per controllare lo stato di salute
         self._health_timer = QTimer(self)
         self._health_timer.timeout.connect(self._check_health)
-        self._health_timer.start(1000)  # Controlla ogni secondo
+        self._health_timer.start(1000)  # Ogni secondo
 
     def _setup_ui(self):
         """Configura l'interfaccia utente."""
@@ -230,7 +74,7 @@ class StreamView(QWidget):
         self.display_label.setMinimumSize(320, 240)
         self.display_label.setStyleSheet("background-color: black;")
 
-        # Aggiungi un messaggio a video
+        # Messaggio iniziale
         font = self.display_label.font()
         font.setPointSize(12)
         self.display_label.setFont(font)
@@ -239,91 +83,178 @@ class StreamView(QWidget):
 
         layout.addWidget(self.display_label)
 
-        # Etichetta per FPS e informazioni
+        # Etichette di informazione
         self.info_label = QLabel("Camera non attiva")
         self.info_label.setAlignment(Qt.AlignCenter)
 
-        # Aggiunta etichetta specifica per latenza
         self.lag_label = QLabel("Lag: N/A")
         self.lag_label.setAlignment(Qt.AlignCenter)
-        # Stile condizionale per il lag
         self.lag_label.setStyleSheet("color: green;")
 
-        # Layout per le informazioni
+        # Layout per informazioni
         info_layout = QHBoxLayout()
         info_layout.addWidget(self.info_label)
         info_layout.addWidget(self.lag_label)
 
         layout.addLayout(info_layout)
 
-    @Slot(QImage, float)  # Modifica la firma dello slot per includere il timestamp
-    def update_frame(self, frame: QImage, timestamp: float = None):
-        """Aggiorna il frame visualizzato con calcolo di lag."""
-        if not frame:
-            logger.warning(f"Frame nullo ricevuto per camera {self.camera_index}")
+    @Slot(np.ndarray, float)
+    def update_frame(self, frame: np.ndarray, timestamp: float = None):
+        """
+        Aggiorna il frame visualizzato, elaborando direttamente senza buffer.
+
+        Args:
+            frame: Frame in formato numpy array
+            timestamp: Timestamp del frame (per calcolo del lag)
+        """
+        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+            logger.warning(f"Frame nullo o non valido ricevuto per camera {self.camera_index}")
             return
 
-        # Incrementa il contatore dei frame
+        # Fai una copia del frame per non modificare l'originale
+        with QMutexLocker(self._mutex):
+            # Applica elaborazione se abilitata
+            processed_frame = self._process_frame(frame.copy())
+
+            # Converti in QImage per visualizzare
+            height, width = processed_frame.shape[:2]
+            bytes_per_line = processed_frame.strides[0]
+
+            # Converti in RGB per Qt
+            if len(processed_frame.shape) == 3 and processed_frame.shape[2] == 3:
+                # Immagine a colori
+                qt_image = QImage(processed_frame.data, width, height,
+                                  bytes_per_line, QImage.Format_RGB888)
+                qt_image = qt_image.rgbSwapped()  # OpenCV usa BGR, Qt usa RGB
+            else:
+                # Immagine in scala di grigi
+                qt_image = QImage(processed_frame.data, width, height,
+                                  processed_frame.strides[0], QImage.Format_Grayscale8)
+
+            # Salva copia del frame elaborato
+            self._frame = qt_image.copy()
+
+        # Incrementa contatore
         self._frame_count += 1
 
-        # Calcola FPS e latenza
+        # Calcola FPS
         current_time = time.time()
         if self._last_frame_time > 0:
             time_diff = current_time - self._last_frame_time
             if time_diff > 0:
                 instantaneous_fps = 1.0 / time_diff
-                # Media mobile per stabilizzare il valore di FPS
-                alpha = 0.1  # Fattore di smoothing
+                # Media mobile per stabilizzare
+                alpha = 0.1
                 self._fps = (1.0 - alpha) * self._fps + alpha * instantaneous_fps
 
         self._last_frame_time = current_time
 
-        # Calcola il lag se è stato fornito un timestamp
+        # Calcola lag se è stato fornito un timestamp
         if timestamp is not None:
             now = time.time()
             self._lag_ms = int((now - timestamp) * 1000)
-
-            # Se il lag è molto alto (> 500ms), non aggiorniamo il display
-            # e tagliamo il frame come "saltato" a meno che non sia uno dei primi 10 frame
-            if self._lag_ms > 500 and self._frame_count > 10 and self._frame is not None:
-                # Aggiorna solo l'etichetta del lag senza aggiornare l'immagine
-                self._update_lag_label()
-                return  # Saltiamo questo frame per recuperare il lag
-
-            # Aggiorna l'etichetta del lag e il colore in base al valore
             self._update_lag_label()
         else:
             self.lag_label.setText("Lag: N/A")
             self.lag_label.setStyleSheet("color: gray;")
 
-        # Aggiorna lo stato di salute
+        # Aggiorna stato di salute
         self._healthy = True
 
-        # Salva una copia del frame
-        self._frame = frame.copy()
-
-        # Adatta il frame alle dimensioni del display
-        pixmap = QPixmap.fromImage(frame)
+        # Mostra il frame
+        pixmap = QPixmap.fromImage(self._frame)
         scaled_pixmap = pixmap.scaled(
             self.display_label.size(),
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation
         )
 
-        # Aggiorna il display
         self.display_label.setPixmap(scaled_pixmap)
-        self.display_label.setStyleSheet("")  # Rimuovi stile sfondo nero e testo
+        self.display_label.setStyleSheet("")  # Rimuovi stile sfondo nero
 
-        # Aggiorna l'etichetta informativa
+        # Aggiorna etichetta informativa
         camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
-        size_text = f"{frame.width()}x{frame.height()}"
+        size_text = f"{self._frame.width()}x{self._frame.height()}"
         fps_text = f"{self._fps:.1f} FPS" if self._fps > 0 else ""
 
         self.info_label.setText(f"Camera {camera_name} | {size_text} | {fps_text}")
 
+    def _process_frame(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Elabora un frame applicando le opzioni di visualizzazione.
+
+        Args:
+            frame: Frame da elaborare
+
+        Returns:
+            Frame elaborato
+        """
+        # Converti in scala di grigi se necessario
+        if len(frame.shape) == 3 and frame.shape[2] == 3:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = frame
+
+        # Applica miglioramento del contrasto se abilitato
+        if self._enhance_contrast:
+            # Equalizzazione adattiva dell'istogramma (CLAHE)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            enhanced = clahe.apply(gray)
+
+            # Se il frame originale era a colori, applica miglioramento solo alla luminosità
+            if len(frame.shape) == 3 and frame.shape[2] == 3:
+                # Converti in HSV
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                # Sostituisci canale V (luminosità)
+                hsv[:, :, 2] = enhanced
+                # Torna a BGR
+                frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+            else:
+                frame = enhanced
+
+        # Applica griglia se abilitata
+        if self._show_grid:
+            height, width = frame.shape[:2]
+            grid_size = 50  # Dimensione celle
+
+            # Linee orizzontali
+            for y in range(0, height, grid_size):
+                if len(frame.shape) == 3:
+                    cv2.line(frame, (0, y), (width, y), (0, 255, 0), 1)
+                else:
+                    cv2.line(frame, (0, y), (width, y), 200, 1)
+
+            # Linee verticali
+            for x in range(0, width, grid_size):
+                if len(frame.shape) == 3:
+                    cv2.line(frame, (x, 0), (x, height), (0, 255, 0), 1)
+                else:
+                    cv2.line(frame, (x, 0), (x, height), 200, 1)
+
+        # Rileva e disegna caratteristiche se abilitato
+        if self._show_features:
+            # Crea rilevatore di caratteristiche
+            feature_detector = cv2.FastFeatureDetector_create(threshold=25)
+
+            # Rileva keypoints
+            keypoints = feature_detector.detect(gray, None)
+
+            # Disegna keypoints
+            if len(frame.shape) == 3:
+                frame = cv2.drawKeypoints(
+                    frame, keypoints, None, (0, 0, 255),
+                    cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
+                )
+            else:
+                frame = cv2.drawKeypoints(
+                    cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR), keypoints, None,
+                    (0, 0, 255), cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
+                )
+
+        return frame
+
     def _update_lag_label(self):
         """Aggiorna l'etichetta del lag e imposta il colore appropriato."""
-        # Aggiorna l'etichetta del lag e il colore in base al valore
         if self._lag_ms < 100:
             self.lag_label.setStyleSheet("color: green; font-weight: bold;")
         elif self._lag_ms < 200:
@@ -338,7 +269,7 @@ class StreamView(QWidget):
             logger.warning(f"Lag elevato su camera {self.camera_index}: {self._lag_ms}ms")
 
     def clear(self):
-        """Pulisce il display."""
+        """Pulisce la visualizzazione."""
         self.display_label.clear()
         self.display_label.setStyleSheet("background-color: black; color: white;")
         self.display_label.setText("Camera non attiva")
@@ -353,7 +284,7 @@ class StreamView(QWidget):
         self._lag_ms = 0
 
     def get_current_frame(self) -> Optional[QImage]:
-        """Restituisce il frame corrente."""
+        """Restituisce il frame attuale."""
         return self._frame
 
     def get_stats(self) -> Dict[str, Any]:
@@ -366,21 +297,28 @@ class StreamView(QWidget):
             "last_frame_time": self._last_frame_time
         }
 
+    def set_visualization_options(self, show_grid: bool, show_features: bool, enhance_contrast: bool):
+        """Imposta le opzioni di visualizzazione."""
+        with QMutexLocker(self._mutex):
+            self._show_grid = show_grid
+            self._show_features = show_features
+            self._enhance_contrast = enhance_contrast
+
     def _check_health(self):
-        """Verifica lo stato di salute dello stream."""
+        """Controlla lo stato di salute dello stream."""
         current_time = time.time()
 
-        # Se non abbiamo ricevuto frame negli ultimi 3 secondi, lo stream non è healthy
+        # Se non abbiamo ricevuto frame negli ultimi 3 secondi, lo stream non è sano
         if self._healthy and current_time - self._last_frame_time > 3.0:
             self._healthy = False
             logger.warning(f"Nessun frame ricevuto negli ultimi 3 secondi per camera {self.camera_index}")
 
-            # Aggiungi un indicatore visivo
+            # Indicatore visivo
             if self._frame is None:
-                # Se non abbiamo mai ricevuto un frame, mostra un messaggio
+                # Se non abbiamo mai ricevuto un frame, mostra messaggio
                 self.display_label.setText("Camera non attiva\nNessun frame ricevuto")
             else:
-                # Altrimenti, mostra l'ultimo frame con un indicatore di problemi
+                # Mostra l'ultimo frame con indicatore di problemi
                 pixmap = QPixmap.fromImage(self._frame)
                 scaled_pixmap = pixmap.scaled(
                     self.display_label.size(),
@@ -388,7 +326,7 @@ class StreamView(QWidget):
                     Qt.SmoothTransformation
                 )
 
-                # Aggiungi un bordo rosso
+                # Aggiungi bordo rosso
                 painter = QPainter(scaled_pixmap)
                 pen = QPen(QColor(255, 0, 0))  # Rosso
                 pen.setWidth(4)
@@ -398,14 +336,14 @@ class StreamView(QWidget):
 
                 self.display_label.setPixmap(scaled_pixmap)
 
-            # Aggiorna l'etichetta informativa
+            # Aggiorna etichetta informativa
             camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
             self.info_label.setText(f"Camera {camera_name} | CONNESSIONE PERSA")
             self.lag_label.setText("Lag: N/A")
             self.lag_label.setStyleSheet("color: red; font-weight: bold;")
 
         elif not self._healthy and self._frame_count > 0:
-            # Se abbiamo ricevuto frame ma lo stream non è healthy, aggiorna il display
+            # Se abbiamo ricevuto frame ma lo stream non è sano, aggiorna visualizzazione
             if self._frame:
                 pixmap = QPixmap.fromImage(self._frame)
                 scaled_pixmap = pixmap.scaled(
@@ -418,31 +356,23 @@ class StreamView(QWidget):
 
 class DualStreamView(QWidget):
     """
-    Widget che visualizza lo streaming simultaneo delle due camere dello scanner.
+    Widget che visualizza lo streaming simultaneo delle due camere.
+    Versione ottimizzata per ridurre lag e eliminare code.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._scanner: Optional[Scanner] = None
+        self._scanner = None
         self._streaming = False
         self._stream_receiver = None
-        self._connection_manager = None  # Memorizza il riferimento al connection manager
+        self._connection_manager = None
         self._retry_timer = QTimer()
-        self._retry_timer.setInterval(1000)  # 1 secondo
+        self._retry_timer.setInterval(1000)
         self._retry_timer.timeout.connect(self._check_connection)
         self._retry_count = 0
         self._max_retries = 5
 
-        # Code per i frame
-        self._frame_queues = [ThreadSafeQueue(), ThreadSafeQueue()]
-
-        # Processori di frame
-        self._frame_processors = [
-            FrameProcessor(self._frame_queues[0]),
-            FrameProcessor(self._frame_queues[1])
-        ]
-
-        # Configura l'interfaccia utente
+        # Configura l'interfaccia
         self._setup_ui()
 
         # Collega i segnali
@@ -512,11 +442,16 @@ class DualStreamView(QWidget):
         view_options_group = QGroupBox("Opzioni di visualizzazione")
         view_options_layout = QVBoxLayout(view_options_group)
 
-        # Checkboxes per le opzioni di visualizzazione
+        # Checkbox per le opzioni
         options_layout = QHBoxLayout()
         self.grid_checkbox = QCheckBox("Mostra griglia")
         self.features_checkbox = QCheckBox("Mostra caratteristiche")
         self.enhance_checkbox = QCheckBox("Migliora contrasto")
+
+        # Collega i cambiamenti nelle checkbox
+        self.grid_checkbox.toggled.connect(self._update_visualization_options)
+        self.features_checkbox.toggled.connect(self._update_visualization_options)
+        self.enhance_checkbox.toggled.connect(self._update_visualization_options)
 
         options_layout.addWidget(self.grid_checkbox)
         options_layout.addWidget(self.features_checkbox)
@@ -526,17 +461,17 @@ class DualStreamView(QWidget):
         view_options_layout.addLayout(options_layout)
         camera_layout.addWidget(view_options_group)
 
-        # Gruppo dei parametri del sensore con tab separate per le due camere
+        # Gruppo dei parametri del sensore con tab per le due camere
         self.camera_tabs = QTabWidget()
 
-        # Crea le tab per i controlli delle camere (versione migliorata)
+        # Crea le tab per i controlli delle camere
         left_cam_tab, right_cam_tab = self._setup_camera_controls()
 
-        # Aggiungi le tab al tab widget
+        # Aggiungi le tab al widget
         self.camera_tabs.addTab(left_cam_tab, "Camera Sinistra")
         self.camera_tabs.addTab(right_cam_tab, "Camera Destra")
 
-        # Pulsante per applicare le impostazioni delle camere
+        # Pulsante per applicare le impostazioni
         apply_layout = QHBoxLayout()
         self.apply_settings_button = QPushButton("Applica impostazioni fotocamera")
         self.apply_settings_button.setEnabled(False)
@@ -631,7 +566,7 @@ class DualStreamView(QWidget):
         self.left_mode_color = QRadioButton("Colore")
         self.left_mode_grayscale = QRadioButton("Scala di grigi")
 
-        # Imposta colore come default
+        # Imposta colore come predefinito
         self.left_mode_color.setChecked(True)
 
         self.left_mode_buttongroup = QButtonGroup()
@@ -739,7 +674,7 @@ class DualStreamView(QWidget):
         self.right_mode_color = QRadioButton("Colore")
         self.right_mode_grayscale = QRadioButton("Scala di grigi")
 
-        # Imposta colore come default
+        # Imposta colore come predefinito
         self.right_mode_color.setChecked(True)
 
         self.right_mode_buttongroup = QButtonGroup()
@@ -845,7 +780,7 @@ class DualStreamView(QWidget):
 
         Args:
             visible: True per mostrare, False per nascondere
-            is_left_camera: True per camera sinistra, False per camera destra
+            is_left_camera: True per camera sinistra, False per destra
         """
         if is_left_camera:
             # Trova la riga della saturazione nel layout
@@ -862,11 +797,89 @@ class DualStreamView(QWidget):
                 label.setVisible(visible)
                 saturation_widget.setVisible(visible)
 
+    def _connect_signals(self):
+        """Collega i segnali."""
+        # Segnali delle opzioni di visualizzazione già collegati in _setup_ui
+        pass
+
+    @Slot()
+    def _update_visualization_options(self):
+        """Aggiorna le opzioni di visualizzazione."""
+        show_grid = self.grid_checkbox.isChecked()
+        show_features = self.features_checkbox.isChecked()
+        enhance_contrast = self.enhance_checkbox.isChecked()
+
+        # Configura opzioni negli StreamView
+        for view in self.stream_views:
+            view.set_visualization_options(show_grid, show_features, enhance_contrast)
+
+    def _on_toggle_stream_clicked(self):
+        """Gestisce il clic sul pulsante avvia/ferma streaming."""
+        if self._streaming:
+            # Ferma lo streaming
+            self.stop_streaming()
+            self.toggle_stream_button.setText("Avvia Streaming")
+        else:
+            # Avvia lo streaming
+            if self._scanner:
+                success = self.start_streaming(self._scanner)
+                if success:
+                    self.toggle_stream_button.setText("Ferma Streaming")
+
+    def _on_start_scan_clicked(self):
+        """Gestisce il clic sul pulsante Avvia Scansione."""
+        if not self._scanner or not self._streaming:
+            QMessageBox.warning(
+                self,
+                "Errore",
+                "Per avviare una scansione è necessario essere connessi a uno scanner."
+            )
+            return
+
+        # Ottieni le impostazioni di scansione
+        scan_name = self.scan_name_edit.text()
+        scan_type = "structured_light" if self.scan_type_structured.isChecked() else "tof"
+        resolution = self.resolution_combo.currentData()
+        quality = self.quality_slider.value()
+        color_capture = self.color_checkbox.isChecked()
+
+        # Log informativo
+        logger.info(f"Avvio scansione: {scan_name}, tipo: {scan_type}, risoluzione: {resolution}, qualità: {quality}")
+
+        # Mostra un messaggio che indica che la scansione è in corso
+        QMessageBox.information(
+            self,
+            "Scansione in corso",
+            f"Scansione '{scan_name}' in corso.\nQuesta funzionalità è in fase di sviluppo."
+        )
+
+        # Abilita il pulsante di salvataggio
+        self.save_scan_button.setEnabled(True)
+
+    def _on_save_scan_clicked(self):
+        """Gestisce il clic sul pulsante Salva Scansione."""
+        scan_name = self.scan_name_edit.text()
+        safe_name = ''.join(c if c.isalnum() or c in '._- ' else '_' for c in scan_name)
+
+        # Apri un dialogo per selezionare la posizione di salvataggio
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Salva Scansione",
+            str(Path.home() / "UnLook" / "scans" / f"{safe_name}_{int(time.time())}.ply"),
+            "PLY Files (*.ply);;All Files (*)"
+        )
+
+        if file_path:
+            # Mostra un messaggio che indica che il salvataggio è in corso
+            QMessageBox.information(
+                self,
+                "Salvataggio in corso",
+                f"Il salvataggio della scansione '{scan_name}' è in corso.\n"
+                "Questa funzionalità è in fase di sviluppo."
+            )
+
     def _apply_camera_settings(self):
-        """
-        Applica le impostazioni delle camere e le invia al server.
-        Versione migliorata con supporto per modalità colore/grayscale.
-        """
+        """Applica le impostazioni delle camere."""
         if not self._scanner or not self._connection_manager or not self._connection_manager.is_connected(
                 self._scanner.device_id):
             QMessageBox.warning(
@@ -893,7 +906,7 @@ class DualStreamView(QWidget):
         right_sharpness = self.right_sharpness_slider.value()
         right_saturation = self.right_saturation_slider.value()
 
-        # Crea il payload di configurazione con modalità camera
+        # Crea il payload di configurazione
         config = {
             "camera": {
                 "left": {
@@ -942,16 +955,6 @@ class DualStreamView(QWidget):
                 f"Si è verificato un errore durante l'applicazione delle impostazioni:\n{str(e)}"
             )
 
-    def _connect_signals(self):
-        """Collega i segnali dei processori di frame."""
-        for i, processor in enumerate(self._frame_processors):
-            processor.new_frame_ready.connect(self._on_new_frame)
-
-        # Collega i checkbox di visualizzazione
-        self.grid_checkbox.toggled.connect(self._update_visualization_options)
-        self.features_checkbox.toggled.connect(self._update_visualization_options)
-        self.enhance_checkbox.toggled.connect(self._update_visualization_options)
-
     def _check_connection(self):
         """Controlla lo stato della connessione e riprova se necessario."""
         # Importa qui per evitare problemi di importazione circolare
@@ -997,19 +1000,6 @@ class DualStreamView(QWidget):
                     self._scanner.ip_address,
                     self._scanner.port
                 )
-
-    def _on_toggle_stream_clicked(self):
-        """Gestisce il clic sul pulsante per avviare/fermare lo streaming."""
-        if self._streaming:
-            # Ferma lo streaming
-            self.stop_streaming()
-            self.toggle_stream_button.setText("Avvia Streaming")
-        else:
-            # Avvia lo streaming
-            if self._scanner:
-                success = self.start_streaming(self._scanner)
-                if success:
-                    self.toggle_stream_button.setText("Ferma Streaming")
 
     def _update_ui_buttons(self):
         """Aggiorna lo stato dei pulsanti in base allo stato corrente."""
@@ -1099,10 +1089,6 @@ class DualStreamView(QWidget):
                 self._stream_receiver = None
                 return False
 
-            # Avvia i processori di frame
-            for processor in self._frame_processors:
-                processor.start()
-
             # Cambia lo stato dello scanner
             self._scanner.status = ScannerStatus.STREAMING
 
@@ -1139,10 +1125,6 @@ class DualStreamView(QWidget):
             if self._connection_manager.is_connected(self._scanner.device_id):
                 self._connection_manager.send_message(self._scanner.device_id, "STOP_STREAM")
 
-        # Ferma i processori di frame
-        for processor in self._frame_processors:
-            processor.stop()
-
         # Pulisci le viste
         for view in self.stream_views:
             view.clear()
@@ -1162,41 +1144,22 @@ class DualStreamView(QWidget):
         """Verifica se lo streaming è attivo."""
         return self._streaming
 
-    @Slot(int, QImage, float)  # Aggiunto float per il timestamp
-    def _on_new_frame(self, camera_index: int, frame: QImage, timestamp: float):
-        """Gestisce l'arrivo di un nuovo frame."""
-        # Aggiorna la vista corrispondente
-        if 0 <= camera_index < len(self.stream_views):
-            self.stream_views[camera_index].update_frame(frame, timestamp)  # Passa anche il timestamp
-
-    @Slot()
-    def _update_visualization_options(self):
-        """Aggiorna le opzioni di visualizzazione dei processori di frame."""
-        show_grid = self.grid_checkbox.isChecked()
-        show_features = self.features_checkbox.isChecked()
-        enhance_contrast = self.enhance_checkbox.isChecked()
-
-        for processor in self._frame_processors:
-            processor.set_options(show_grid, show_features, enhance_contrast)
-
-    @Slot(int, np.ndarray, float)  # Aggiunto float per il timestamp
+    @Slot(int, np.ndarray, float)
     def _on_frame_received(self, camera_index: int, frame: np.ndarray, timestamp: float):
-        """Gestisce l'arrivo di un nuovo frame dallo stream."""
+        """Gestisce l'arrivo di un nuovo frame."""
         try:
-            # Stampa debug per capire cosa stiamo ricevendo
             if frame is None:
-                logger.warning(f"Frame ricevuto da StreamReceiver è None per camera {camera_index}")
+                logger.warning(f"Frame nullo ricevuto per camera {camera_index}")
                 return
 
-            logger.debug(
-                f"Frame ricevuto da StreamReceiver: camera={camera_index}, shape={frame.shape}, tipo={frame.dtype}")
+            logger.debug(f"Frame ricevuto: camera={camera_index}, forma={frame.shape}, timestamp={timestamp}")
 
-            # Questo metodo viene chiamato quando il StreamReceiver riceve un frame
-            # Aggiungiamo il frame alla coda del processore appropriato
-            if 0 <= camera_index < len(self._frame_queues):
-                # È importante passare una tupla valida per evitare l'errore nel processore
-                self._frame_queues[camera_index].put((camera_index, frame, timestamp))  # Include il timestamp
-                logger.debug(f"Frame messo in coda per processore: camera={camera_index}")
+            # Aggiorna la vista corrispondente
+            if 0 <= camera_index < len(self.stream_views):
+                # Invia il frame direttamente per l'elaborazione e la visualizzazione
+                # L'elaborazione ora avviene in StreamView.update_frame
+                self.stream_views[camera_index].update_frame(frame, timestamp)
+
         except Exception as e:
             logger.error(f"Errore in _on_frame_received: {e}")
 
@@ -1214,130 +1177,6 @@ class DualStreamView(QWidget):
     def _on_stream_error(self, camera_index: int, error: str):
         """Gestisce gli errori dello stream."""
         logger.error(f"Errore nello stream della camera {camera_index}: {error}")
-
-    def _on_start_scan_clicked(self):
-        """Gestisce il clic sul pulsante Avvia Scansione."""
-        if not self._scanner or not self._streaming:
-            QMessageBox.warning(
-                self,
-                "Errore",
-                "Per avviare una scansione è necessario essere connessi a uno scanner."
-            )
-            return
-
-        # Ottieni le impostazioni di scansione
-        scan_name = self.scan_name_edit.text()
-        scan_type = "structured_light" if self.scan_type_structured.isChecked() else "tof"
-        resolution = self.resolution_combo.currentData()
-        quality = self.quality_slider.value()
-        color_capture = self.color_checkbox.isChecked()
-
-        # Log informativo
-        logger.info(f"Avvio scansione: {scan_name}, tipo: {scan_type}, res: {resolution}, qualità: {quality}")
-
-        # Mostra un messaggio che indica che la scansione è in corso
-        QMessageBox.information(
-            self,
-            "Scansione in corso",
-            f"Scansione '{scan_name}' in corso.\nQuesta funzionalità è in fase di sviluppo."
-        )
-
-        # In futuro, qui implementeremo il codice per avviare la scansione effettiva
-        # ...
-
-        # Abilita il pulsante di salvataggio
-        self.save_scan_button.setEnabled(True)
-
-    def _on_save_scan_clicked(self):
-        """Gestisce il clic sul pulsante Salva Scansione."""
-        scan_name = self.scan_name_edit.text()
-        safe_name = ''.join(c if c.isalnum() or c in '._- ' else '_' for c in scan_name)
-
-        # Apri un dialogo per selezionare la posizione di salvataggio
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Salva Scansione",
-            str(Path.home() / "UnLook" / "scans" / f"{safe_name}_{int(time.time())}.ply"),
-            "PLY Files (*.ply);;All Files (*)"
-        )
-
-        if file_path:
-            # Mostra un messaggio che indica che il salvataggio è in corso
-            QMessageBox.information(
-                self,
-                "Salvataggio in corso",
-                f"Il salvataggio della scansione '{scan_name}' è in corso.\n"
-                "Questa funzionalità è in fase di sviluppo."
-            )
-
-            # In futuro, qui implementeremo il codice per salvare la scansione
-            # ...
-
-    def _apply_camera_settings(self):
-        """Applica le impostazioni delle camere."""
-        if not self._scanner or not self._connection_manager or not self._connection_manager.is_connected(
-                self._scanner.device_id):
-            QMessageBox.warning(
-                self,
-                "Errore",
-                "Per applicare le impostazioni è necessario essere connessi a uno scanner."
-            )
-            return
-
-        # Raccogli le impostazioni
-        left_exposure = self.left_exposure_slider.value()
-        left_gain = self.left_gain_slider.value()
-        left_brightness = self.left_brightness_slider.value()
-        left_contrast = self.left_contrast_slider.value()
-        left_sharpness = self.left_sharpness_slider.value()
-        left_saturation = self.left_saturation_slider.value()
-
-        right_exposure = self.right_exposure_slider.value()
-        right_gain = self.right_gain_slider.value()
-        right_brightness = self.right_brightness_slider.value()
-        right_contrast = self.right_contrast_slider.value()
-        right_sharpness = self.right_sharpness_slider.value()
-        right_saturation = self.right_saturation_slider.value()
-
-        # Crea il payload di configurazione
-        config = {
-            "camera": {
-                "left": {
-                    "exposure": left_exposure,
-                    "gain": left_gain,
-                    "brightness": left_brightness,
-                    "contrast": left_contrast,
-                    "sharpness": left_sharpness,
-                    "saturation": left_saturation
-                },
-                "right": {
-                    "exposure": right_exposure,
-                    "gain": right_gain,
-                    "brightness": right_brightness,
-                    "contrast": right_contrast,
-                    "sharpness": right_sharpness,
-                    "saturation": right_saturation
-                }
-            }
-        }
-
-        # Invia la configurazione al server
-        if self._connection_manager.send_message(
-                self._scanner.device_id,
-                "SET_CONFIG",
-                {"config": config}
-        ):
-            QMessageBox.information(
-                self,
-                "Impostazioni applicate",
-                "Le impostazioni delle camere sono state applicate."
-            )
-        else:
-            QMessageBox.warning(
-                self,
-                "Errore",
-                "Impossibile applicare le impostazioni: errore di comunicazione."
-            )
 
     def capture_frame(self) -> bool:
         """
