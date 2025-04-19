@@ -661,6 +661,7 @@ class UnLookServer:
     def _apply_camera_config(self):
         """
         Applica la configurazione alle camere.
+        Versione migliorata con supporto per modalità colore/scala di grigi.
         """
         # Se lo streaming è attivo, fermalo
         was_streaming = self.state["streaming"]
@@ -679,11 +680,60 @@ class UnLookServer:
                 else:
                     cam_config = self.config["camera"]["right"]
 
+                # Determina il formato in base alla modalità se specificata
+                format_str = cam_config.get("format", "RGB888")
+                if "mode" in cam_config:
+                    if cam_config["mode"] == "grayscale":
+                        format_str = "GREY"
+                        logger.info(f"Camera {cam_info['name']} impostata in modalità scala di grigi")
+                    else:  # color
+                        format_str = "RGB888"
+                        logger.info(f"Camera {cam_info['name']} impostata in modalità colore")
+
+                # Applica i controlli avanzati se presenti
+                controls = {"FrameRate": cam_config.get("framerate", 30)}
+
+                # Controlla se ci sono altre impostazioni da applicare
+                if "exposure" in cam_config:
+                    # Converti da 0-100 a valori appropriati per la camera
+                    # AEC e AGC potrebbero dover essere disabilitati per controllo manuale
+                    controls["AeEnable"] = 0  # Disabilita auto-esposizione
+                    # Mappa da 0-100 a un valore di esposizione appropriato (dipende dall'hardware)
+                    exposure_val = int(cam_config["exposure"] * 10000 / 100)  # esempio mappatura
+                    controls["ExposureTime"] = exposure_val
+                    logger.info(f"Camera {cam_info['name']} esposizione: {exposure_val}")
+
+                if "gain" in cam_config:
+                    controls["AgcEnable"] = 0  # Disabilita auto-gain
+                    gain_val = cam_config["gain"] / 100.0 * 10.0  # Mappa 0-100 a 0-10
+                    controls["AnalogueGain"] = gain_val
+                    logger.info(f"Camera {cam_info['name']} gain: {gain_val}")
+
+                if "brightness" in cam_config:
+                    # Mappa 0-100 a valore appropriato per la camera
+                    brightness_val = (cam_config["brightness"] / 100.0) * 2.0 - 1.0  # -1.0 a 1.0
+                    controls["Brightness"] = brightness_val
+
+                if "contrast" in cam_config:
+                    # Mappa 0-100 a valore appropriato per la camera
+                    contrast_val = cam_config["contrast"] / 50.0  # 0-2.0, 1.0 è neutro
+                    controls["Contrast"] = contrast_val
+
+                if "saturation" in cam_config and format_str != "GREY":
+                    # Mappa 0-100 a valore appropriato per la camera
+                    saturation_val = cam_config["saturation"] / 50.0  # 0-2.0, 1.0 è neutro
+                    controls["Saturation"] = saturation_val
+
+                if "sharpness" in cam_config:
+                    # Mappa 0-100 a valore appropriato per la camera
+                    sharpness_val = cam_config["sharpness"] / 100.0
+                    controls["Sharpness"] = sharpness_val
+
                 # Applica la configurazione
                 camera_config = camera.create_video_configuration(
                     main={"size": tuple(cam_config["resolution"]),
-                          "format": cam_config["format"]},
-                    controls={"FrameRate": cam_config["framerate"]}
+                          "format": format_str},
+                    controls=controls
                 )
                 camera.configure(camera_config)
 
@@ -693,6 +743,7 @@ class UnLookServer:
 
             except Exception as e:
                 logger.error(f"Errore nell'applicazione della configurazione alla camera {cam_info['name']}: {e}")
+                logger.exception(e)  # Log dettagliato per debug
 
         # Riavvia lo streaming se era attivo
         if was_streaming:

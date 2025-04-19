@@ -266,17 +266,46 @@ class MainWindow(QMainWindow):
         settings.setValue("mainwindow/state", self.saveState())
 
     def closeEvent(self, event):
-        """Gestisce l'evento di chiusura della finestra."""
+        """
+        Gestisce l'evento di chiusura della finestra.
+        Versione migliorata con disconnessione esplicita.
+        """
+        logger.info("Chiusura dell'applicazione in corso...")
+
         # Salva le impostazioni
         self._save_settings()
 
         # Ferma la scoperta degli scanner
         self.scanner_controller.stop_discovery()
 
+        # Ferma lo streaming se attivo
+        if hasattr(self, 'streaming_widget') and self.streaming_widget:
+            logger.info("Arresto dello streaming...")
+            self.streaming_widget.stop_streaming()
+
+        # Invia un comando di disconnessione esplicito se connesso
+        selected_scanner = self.scanner_controller.selected_scanner
+        if selected_scanner and self.scanner_controller.is_connected(selected_scanner.device_id):
+            logger.info(f"Invio comando di disconnessione a {selected_scanner.name}...")
+
+            # Importa qui per evitare problemi di importazione circolare
+            from client.network.connection_manager import ConnectionManager
+
+            try:
+                # Invia il comando DISCONNECT
+                ConnectionManager().send_message(selected_scanner.device_id, "DISCONNECT")
+                # Attendiamo un momento per assicurarci che il messaggio venga inviato
+                logger.info("Attesa per invio comando disconnessione...")
+                time.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Errore nell'invio del comando di disconnessione: {e}")
+
         # Disconnetti tutti gli scanner
+        logger.info("Disconnessione da tutti gli scanner...")
         self._disconnect_all()
 
         # Accetta l'evento di chiusura
+        logger.info("Applicazione chiusa con successo")
         event.accept()
 
     @Slot()

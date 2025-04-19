@@ -194,7 +194,7 @@ class FrameProcessor(QThread):
 class StreamView(QWidget):
     """
     Widget che visualizza lo stream di una singola camera.
-    Versione migliorata con diagnostica.
+    Versione migliorata con indicatore di lag e stato di connessione.
     """
 
     def __init__(self, camera_index: int, parent=None):
@@ -206,6 +206,7 @@ class StreamView(QWidget):
         self._frame_count = 0  # Contatore per i frame ricevuti
         self._last_update_time = time.time()
         self._healthy = False  # Stato di salute dello stream
+        self._lag_ms = 0  # Latenza in millisecondi
 
         # Configura l'interfaccia utente
         self._setup_ui()
@@ -240,11 +241,23 @@ class StreamView(QWidget):
         # Etichetta per FPS e informazioni
         self.info_label = QLabel("Camera non attiva")
         self.info_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.info_label)
+
+        # Aggiunta etichetta specifica per latenza
+        self.lag_label = QLabel("Lag: N/A")
+        self.lag_label.setAlignment(Qt.AlignCenter)
+        # Stile condizionale per il lag
+        self.lag_label.setStyleSheet("color: green;")
+
+        # Layout per le informazioni
+        info_layout = QHBoxLayout()
+        info_layout.addWidget(self.info_label)
+        info_layout.addWidget(self.lag_label)
+
+        layout.addLayout(info_layout)
 
     @Slot(QImage)
     def update_frame(self, frame: QImage):
-        """Aggiorna il frame visualizzato."""
+        """Aggiorna il frame visualizzato con calcolo di lag."""
         if not frame:
             logger.warning(f"Frame nullo ricevuto per camera {self.camera_index}")
             return
@@ -252,7 +265,7 @@ class StreamView(QWidget):
         # Incrementa il contatore dei frame
         self._frame_count += 1
 
-        # Calcola FPS
+        # Calcola FPS e latenza
         current_time = time.time()
         if self._last_frame_time > 0:
             time_diff = current_time - self._last_frame_time
@@ -263,6 +276,25 @@ class StreamView(QWidget):
                 self._fps = (1.0 - alpha) * self._fps + alpha * instantaneous_fps
 
         self._last_frame_time = current_time
+
+        # Calcola il lag se il frame ha un timestamp
+        # I frame trasmessi dal server hanno questo attributo aggiunto nel StreamReceiver
+        if hasattr(frame, 'timestamp'):
+            now = time.time()
+            frame_timestamp = frame.timestamp
+            self._lag_ms = int((now - frame_timestamp) * 1000)
+
+            # Aggiorna l'etichetta del lag e il colore in base al valore
+            if self._lag_ms < 100:
+                self.lag_label.setStyleSheet("color: green; font-weight: bold;")
+            elif self._lag_ms < 300:
+                self.lag_label.setStyleSheet("color: orange; font-weight: bold;")
+            else:
+                self.lag_label.setStyleSheet("color: red; font-weight: bold;")
+
+            self.lag_label.setText(f"Lag: {self._lag_ms}ms")
+        else:
+            self.lag_label.setText("Lag: N/A")
 
         # Aggiorna lo stato di salute
         self._healthy = True
@@ -277,11 +309,6 @@ class StreamView(QWidget):
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation
         )
-
-        # Log solo occasionalmente
-        if self._frame_count % 30 == 0:
-            logger.debug(f"Frame #{self._frame_count} aggiornato su StreamView {self.camera_index}, "
-                         f"dimensione: {frame.width()}x{frame.height()}, FPS: {self._fps:.1f}")
 
         # Aggiorna il display
         self.display_label.setPixmap(scaled_pixmap)
@@ -300,15 +327,28 @@ class StreamView(QWidget):
         self.display_label.setStyleSheet("background-color: black; color: white;")
         self.display_label.setText("Camera non attiva")
         self.info_label.setText("Camera non attiva")
+        self.lag_label.setText("Lag: N/A")
+        self.lag_label.setStyleSheet("color: gray;")
         self._frame = None
         self._last_frame_time = 0
         self._fps = 0
         self._frame_count = 0
         self._healthy = False
+        self._lag_ms = 0
 
     def get_current_frame(self) -> Optional[QImage]:
         """Restituisce il frame corrente."""
         return self._frame
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Restituisce le statistiche di questo stream."""
+        return {
+            "fps": self._fps,
+            "frame_count": self._frame_count,
+            "healthy": self._healthy,
+            "lag_ms": self._lag_ms,
+            "last_frame_time": self._last_frame_time
+        }
 
     def _check_health(self):
         """Verifica lo stato di salute dello stream."""
@@ -345,6 +385,8 @@ class StreamView(QWidget):
             # Aggiorna l'etichetta informativa
             camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
             self.info_label.setText(f"Camera {camera_name} | CONNESSIONE PERSA")
+            self.lag_label.setText("Lag: N/A")
+            self.lag_label.setStyleSheet("color: red; font-weight: bold;")
 
         elif not self._healthy and self._frame_count > 0:
             # Se abbiamo ricevuto frame ma lo stream non è healthy, aggiorna il display
@@ -485,145 +527,8 @@ class DualStreamView(QWidget):
         # Gruppo dei parametri del sensore con tab separate per le due camere
         self.camera_tabs = QTabWidget()
 
-        # Tab Camera Sinistra
-        left_cam_tab = QWidget()
-        left_cam_layout = QFormLayout(left_cam_tab)
-
-        # Esposizione camera sinistra
-        left_exposure_layout = QHBoxLayout()
-        self.left_exposure_slider = QSlider(Qt.Horizontal)
-        self.left_exposure_slider.setRange(0, 100)
-        self.left_exposure_slider.setValue(50)
-        self.left_exposure_value = QLabel("50")
-        self.left_exposure_slider.valueChanged.connect(lambda v: self.left_exposure_value.setText(str(v)))
-        left_exposure_layout.addWidget(self.left_exposure_slider)
-        left_exposure_layout.addWidget(self.left_exposure_value)
-        left_cam_layout.addRow("Esposizione:", left_exposure_layout)
-
-        # Guadagno camera sinistra
-        left_gain_layout = QHBoxLayout()
-        self.left_gain_slider = QSlider(Qt.Horizontal)
-        self.left_gain_slider.setRange(0, 100)
-        self.left_gain_slider.setValue(50)
-        self.left_gain_value = QLabel("50")
-        self.left_gain_slider.valueChanged.connect(lambda v: self.left_gain_value.setText(str(v)))
-        left_gain_layout.addWidget(self.left_gain_slider)
-        left_gain_layout.addWidget(self.left_gain_value)
-        left_cam_layout.addRow("Guadagno:", left_gain_layout)
-
-        # Luminosità camera sinistra
-        left_brightness_layout = QHBoxLayout()
-        self.left_brightness_slider = QSlider(Qt.Horizontal)
-        self.left_brightness_slider.setRange(0, 100)
-        self.left_brightness_slider.setValue(50)
-        self.left_brightness_value = QLabel("50")
-        self.left_brightness_slider.valueChanged.connect(lambda v: self.left_brightness_value.setText(str(v)))
-        left_brightness_layout.addWidget(self.left_brightness_slider)
-        left_brightness_layout.addWidget(self.left_brightness_value)
-        left_cam_layout.addRow("Luminosità:", left_brightness_layout)
-
-        # Contrasto camera sinistra
-        left_contrast_layout = QHBoxLayout()
-        self.left_contrast_slider = QSlider(Qt.Horizontal)
-        self.left_contrast_slider.setRange(0, 100)
-        self.left_contrast_slider.setValue(50)
-        self.left_contrast_value = QLabel("50")
-        self.left_contrast_slider.valueChanged.connect(lambda v: self.left_contrast_value.setText(str(v)))
-        left_contrast_layout.addWidget(self.left_contrast_slider)
-        left_contrast_layout.addWidget(self.left_contrast_value)
-        left_cam_layout.addRow("Contrasto:", left_contrast_layout)
-
-        # Nitidezza camera sinistra
-        left_sharpness_layout = QHBoxLayout()
-        self.left_sharpness_slider = QSlider(Qt.Horizontal)
-        self.left_sharpness_slider.setRange(0, 100)
-        self.left_sharpness_slider.setValue(50)
-        self.left_sharpness_value = QLabel("50")
-        self.left_sharpness_slider.valueChanged.connect(lambda v: self.left_sharpness_value.setText(str(v)))
-        left_sharpness_layout.addWidget(self.left_sharpness_slider)
-        left_sharpness_layout.addWidget(self.left_sharpness_value)
-        left_cam_layout.addRow("Nitidezza:", left_sharpness_layout)
-
-        # Saturazione camera sinistra
-        left_saturation_layout = QHBoxLayout()
-        self.left_saturation_slider = QSlider(Qt.Horizontal)
-        self.left_saturation_slider.setRange(0, 100)
-        self.left_saturation_slider.setValue(50)
-        self.left_saturation_value = QLabel("50")
-        self.left_saturation_slider.valueChanged.connect(lambda v: self.left_saturation_value.setText(str(v)))
-        left_saturation_layout.addWidget(self.left_saturation_slider)
-        left_saturation_layout.addWidget(self.left_saturation_value)
-        left_cam_layout.addRow("Saturazione:", left_saturation_layout)
-
-        # Tab Camera Destra
-        right_cam_tab = QWidget()
-        right_cam_layout = QFormLayout(right_cam_tab)
-
-        # Esposizione camera destra
-        right_exposure_layout = QHBoxLayout()
-        self.right_exposure_slider = QSlider(Qt.Horizontal)
-        self.right_exposure_slider.setRange(0, 100)
-        self.right_exposure_slider.setValue(50)
-        self.right_exposure_value = QLabel("50")
-        self.right_exposure_slider.valueChanged.connect(lambda v: self.right_exposure_value.setText(str(v)))
-        right_exposure_layout.addWidget(self.right_exposure_slider)
-        right_exposure_layout.addWidget(self.right_exposure_value)
-        right_cam_layout.addRow("Esposizione:", right_exposure_layout)
-
-        # Guadagno camera destra
-        right_gain_layout = QHBoxLayout()
-        self.right_gain_slider = QSlider(Qt.Horizontal)
-        self.right_gain_slider.setRange(0, 100)
-        self.right_gain_slider.setValue(50)
-        self.right_gain_value = QLabel("50")
-        self.right_gain_slider.valueChanged.connect(lambda v: self.right_gain_value.setText(str(v)))
-        right_gain_layout.addWidget(self.right_gain_slider)
-        right_gain_layout.addWidget(self.right_gain_value)
-        right_cam_layout.addRow("Guadagno:", right_gain_layout)
-
-        # Luminosità camera destra
-        right_brightness_layout = QHBoxLayout()
-        self.right_brightness_slider = QSlider(Qt.Horizontal)
-        self.right_brightness_slider.setRange(0, 100)
-        self.right_brightness_slider.setValue(50)
-        self.right_brightness_value = QLabel("50")
-        self.right_brightness_slider.valueChanged.connect(lambda v: self.right_brightness_value.setText(str(v)))
-        right_brightness_layout.addWidget(self.right_brightness_slider)
-        right_brightness_layout.addWidget(self.right_brightness_value)
-        right_cam_layout.addRow("Luminosità:", right_brightness_layout)
-
-        # Contrasto camera destra
-        right_contrast_layout = QHBoxLayout()
-        self.right_contrast_slider = QSlider(Qt.Horizontal)
-        self.right_contrast_slider.setRange(0, 100)
-        self.right_contrast_slider.setValue(50)
-        self.right_contrast_value = QLabel("50")
-        self.right_contrast_slider.valueChanged.connect(lambda v: self.right_contrast_value.setText(str(v)))
-        right_contrast_layout.addWidget(self.right_contrast_slider)
-        right_contrast_layout.addWidget(self.right_contrast_value)
-        right_cam_layout.addRow("Contrasto:", right_contrast_layout)
-
-        # Nitidezza camera destra
-        right_sharpness_layout = QHBoxLayout()
-        self.right_sharpness_slider = QSlider(Qt.Horizontal)
-        self.right_sharpness_slider.setRange(0, 100)
-        self.right_sharpness_slider.setValue(50)
-        self.right_sharpness_value = QLabel("50")
-        self.right_sharpness_slider.valueChanged.connect(lambda v: self.right_sharpness_value.setText(str(v)))
-        right_sharpness_layout.addWidget(self.right_sharpness_slider)
-        right_sharpness_layout.addWidget(self.right_sharpness_value)
-        right_cam_layout.addRow("Nitidezza:", right_sharpness_layout)
-
-        # Saturazione camera destra
-        right_saturation_layout = QHBoxLayout()
-        self.right_saturation_slider = QSlider(Qt.Horizontal)
-        self.right_saturation_slider.setRange(0, 100)
-        self.right_saturation_slider.setValue(50)
-        self.right_saturation_value = QLabel("50")
-        self.right_saturation_slider.valueChanged.connect(lambda v: self.right_saturation_value.setText(str(v)))
-        right_saturation_layout.addWidget(self.right_saturation_slider)
-        right_saturation_layout.addWidget(self.right_saturation_value)
-        right_cam_layout.addRow("Saturazione:", right_saturation_layout)
+        # Crea le tab per i controlli delle camere (versione migliorata)
+        left_cam_tab, right_cam_tab = self._setup_camera_controls()
 
         # Aggiungi le tab al tab widget
         self.camera_tabs.addTab(left_cam_tab, "Camera Sinistra")
@@ -710,6 +615,330 @@ class DualStreamView(QWidget):
         control_panel.addTab(scan_controls, "Scansione")
 
         main_layout.addWidget(control_panel)
+
+    def _setup_camera_controls(self):
+        """Configura i controlli avanzati della camera."""
+        # Tab Camera Sinistra
+        left_cam_tab = QWidget()
+        left_cam_layout = QFormLayout(left_cam_tab)
+
+        # Sezione modalità camera
+        left_mode_group = QGroupBox("Modalità camera")
+        left_mode_layout = QVBoxLayout(left_mode_group)
+
+        self.left_mode_color = QRadioButton("Colore")
+        self.left_mode_grayscale = QRadioButton("Scala di grigi")
+
+        # Imposta colore come default
+        self.left_mode_color.setChecked(True)
+
+        self.left_mode_buttongroup = QButtonGroup()
+        self.left_mode_buttongroup.addButton(self.left_mode_color, 0)
+        self.left_mode_buttongroup.addButton(self.left_mode_grayscale, 1)
+
+        left_mode_layout.addWidget(self.left_mode_color)
+        left_mode_layout.addWidget(self.left_mode_grayscale)
+
+        left_cam_layout.addRow(left_mode_group)
+
+        # Esposizione camera sinistra
+        left_exposure_layout = QHBoxLayout()
+        self.left_exposure_slider = QSlider(Qt.Horizontal)
+        self.left_exposure_slider.setRange(0, 100)
+        self.left_exposure_slider.setValue(50)
+        self.left_exposure_slider.setTickPosition(QSlider.TicksBelow)
+        self.left_exposure_slider.setTickInterval(10)
+
+        self.left_exposure_value = QLabel("50")
+        self.left_exposure_slider.valueChanged.connect(lambda v: self.left_exposure_value.setText(str(v)))
+
+        left_exposure_layout.addWidget(self.left_exposure_slider)
+        left_exposure_layout.addWidget(self.left_exposure_value)
+        left_cam_layout.addRow("Esposizione:", left_exposure_layout)
+
+        # Guadagno camera sinistra
+        left_gain_layout = QHBoxLayout()
+        self.left_gain_slider = QSlider(Qt.Horizontal)
+        self.left_gain_slider.setRange(0, 100)
+        self.left_gain_slider.setValue(50)
+        self.left_gain_slider.setTickPosition(QSlider.TicksBelow)
+        self.left_gain_slider.setTickInterval(10)
+
+        self.left_gain_value = QLabel("50")
+        self.left_gain_slider.valueChanged.connect(lambda v: self.left_gain_value.setText(str(v)))
+
+        left_gain_layout.addWidget(self.left_gain_slider)
+        left_gain_layout.addWidget(self.left_gain_value)
+        left_cam_layout.addRow("Guadagno:", left_gain_layout)
+
+        # Altri controlli avanzati in un gruppo separato
+        left_advanced_group = QGroupBox("Controlli avanzati")
+        left_advanced_layout = QFormLayout(left_advanced_group)
+
+        # Luminosità camera sinistra
+        left_brightness_layout = QHBoxLayout()
+        self.left_brightness_slider = QSlider(Qt.Horizontal)
+        self.left_brightness_slider.setRange(0, 100)
+        self.left_brightness_slider.setValue(50)
+        self.left_brightness_value = QLabel("50")
+        self.left_brightness_slider.valueChanged.connect(lambda v: self.left_brightness_value.setText(str(v)))
+        left_brightness_layout.addWidget(self.left_brightness_slider)
+        left_brightness_layout.addWidget(self.left_brightness_value)
+        left_advanced_layout.addRow("Luminosità:", left_brightness_layout)
+
+        # Contrasto camera sinistra
+        left_contrast_layout = QHBoxLayout()
+        self.left_contrast_slider = QSlider(Qt.Horizontal)
+        self.left_contrast_slider.setRange(0, 100)
+        self.left_contrast_slider.setValue(50)
+        self.left_contrast_value = QLabel("50")
+        self.left_contrast_slider.valueChanged.connect(lambda v: self.left_contrast_value.setText(str(v)))
+        left_contrast_layout.addWidget(self.left_contrast_slider)
+        left_contrast_layout.addWidget(self.left_contrast_value)
+        left_advanced_layout.addRow("Contrasto:", left_contrast_layout)
+
+        # Nitidezza camera sinistra
+        left_sharpness_layout = QHBoxLayout()
+        self.left_sharpness_slider = QSlider(Qt.Horizontal)
+        self.left_sharpness_slider.setRange(0, 100)
+        self.left_sharpness_slider.setValue(50)
+        self.left_sharpness_value = QLabel("50")
+        self.left_sharpness_slider.valueChanged.connect(lambda v: self.left_sharpness_value.setText(str(v)))
+        left_sharpness_layout.addWidget(self.left_sharpness_slider)
+        left_sharpness_layout.addWidget(self.left_sharpness_value)
+        left_advanced_layout.addRow("Nitidezza:", left_sharpness_layout)
+
+        # Saturazione camera sinistra (solo per modalità colore)
+        left_saturation_layout = QHBoxLayout()
+        self.left_saturation_slider = QSlider(Qt.Horizontal)
+        self.left_saturation_slider.setRange(0, 100)
+        self.left_saturation_slider.setValue(50)
+        self.left_saturation_value = QLabel("50")
+        self.left_saturation_slider.valueChanged.connect(lambda v: self.left_saturation_value.setText(str(v)))
+        left_saturation_layout.addWidget(self.left_saturation_slider)
+        left_saturation_layout.addWidget(self.left_saturation_value)
+        left_advanced_layout.addRow("Saturazione:", left_saturation_layout)
+
+        # Aggiungi il gruppo avanzato
+        left_cam_layout.addRow(left_advanced_group)
+
+        # Collegamento tra modalità e saturazione per camera sinistra
+        self.left_mode_color.toggled.connect(lambda checked: self._update_saturation_visibility(checked, True))
+        self.left_mode_grayscale.toggled.connect(lambda checked: self._update_saturation_visibility(not checked, True))
+
+        # Tab Camera Destra (struttura analoga)
+        right_cam_tab = QWidget()
+        right_cam_layout = QFormLayout(right_cam_tab)
+
+        # Sezione modalità camera
+        right_mode_group = QGroupBox("Modalità camera")
+        right_mode_layout = QVBoxLayout(right_mode_group)
+
+        self.right_mode_color = QRadioButton("Colore")
+        self.right_mode_grayscale = QRadioButton("Scala di grigi")
+
+        # Imposta colore come default
+        self.right_mode_color.setChecked(True)
+
+        self.right_mode_buttongroup = QButtonGroup()
+        self.right_mode_buttongroup.addButton(self.right_mode_color, 0)
+        self.right_mode_buttongroup.addButton(self.right_mode_grayscale, 1)
+
+        right_mode_layout.addWidget(self.right_mode_color)
+        right_mode_layout.addWidget(self.right_mode_grayscale)
+
+        right_cam_layout.addRow(right_mode_group)
+
+        # Esposizione camera destra
+        right_exposure_layout = QHBoxLayout()
+        self.right_exposure_slider = QSlider(Qt.Horizontal)
+        self.right_exposure_slider.setRange(0, 100)
+        self.right_exposure_slider.setValue(50)
+        self.right_exposure_slider.setTickPosition(QSlider.TicksBelow)
+        self.right_exposure_slider.setTickInterval(10)
+
+        self.right_exposure_value = QLabel("50")
+        self.right_exposure_slider.valueChanged.connect(lambda v: self.right_exposure_value.setText(str(v)))
+
+        right_exposure_layout.addWidget(self.right_exposure_slider)
+        right_exposure_layout.addWidget(self.right_exposure_value)
+        right_cam_layout.addRow("Esposizione:", right_exposure_layout)
+
+        # Guadagno camera destra
+        right_gain_layout = QHBoxLayout()
+        self.right_gain_slider = QSlider(Qt.Horizontal)
+        self.right_gain_slider.setRange(0, 100)
+        self.right_gain_slider.setValue(50)
+        self.right_gain_slider.setTickPosition(QSlider.TicksBelow)
+        self.right_gain_slider.setTickInterval(10)
+
+        self.right_gain_value = QLabel("50")
+        self.right_gain_slider.valueChanged.connect(lambda v: self.right_gain_value.setText(str(v)))
+
+        right_gain_layout.addWidget(self.right_gain_slider)
+        right_gain_layout.addWidget(self.right_gain_value)
+        right_cam_layout.addRow("Guadagno:", right_gain_layout)
+
+        # Altri controlli avanzati in un gruppo separato
+        right_advanced_group = QGroupBox("Controlli avanzati")
+        right_advanced_layout = QFormLayout(right_advanced_group)
+
+        # Luminosità camera destra
+        right_brightness_layout = QHBoxLayout()
+        self.right_brightness_slider = QSlider(Qt.Horizontal)
+        self.right_brightness_slider.setRange(0, 100)
+        self.right_brightness_slider.setValue(50)
+        self.right_brightness_value = QLabel("50")
+        self.right_brightness_slider.valueChanged.connect(lambda v: self.right_brightness_value.setText(str(v)))
+        right_brightness_layout.addWidget(self.right_brightness_slider)
+        right_brightness_layout.addWidget(self.right_brightness_value)
+        right_advanced_layout.addRow("Luminosità:", right_brightness_layout)
+
+        # Contrasto camera destra
+        right_contrast_layout = QHBoxLayout()
+        self.right_contrast_slider = QSlider(Qt.Horizontal)
+        self.right_contrast_slider.setRange(0, 100)
+        self.right_contrast_slider.setValue(50)
+        self.right_contrast_value = QLabel("50")
+        self.right_contrast_slider.valueChanged.connect(lambda v: self.right_contrast_value.setText(str(v)))
+        right_contrast_layout.addWidget(self.right_contrast_slider)
+        right_contrast_layout.addWidget(self.right_contrast_value)
+        right_advanced_layout.addRow("Contrasto:", right_contrast_layout)
+
+        # Nitidezza camera destra
+        right_sharpness_layout = QHBoxLayout()
+        self.right_sharpness_slider = QSlider(Qt.Horizontal)
+        self.right_sharpness_slider.setRange(0, 100)
+        self.right_sharpness_slider.setValue(50)
+        self.right_sharpness_value = QLabel("50")
+        self.right_sharpness_slider.valueChanged.connect(lambda v: self.right_sharpness_value.setText(str(v)))
+        right_sharpness_layout.addWidget(self.right_sharpness_slider)
+        right_sharpness_layout.addWidget(self.right_sharpness_value)
+        right_advanced_layout.addRow("Nitidezza:", right_sharpness_layout)
+
+        # Saturazione camera destra (solo per modalità colore)
+        right_saturation_layout = QHBoxLayout()
+        self.right_saturation_slider = QSlider(Qt.Horizontal)
+        self.right_saturation_slider.setRange(0, 100)
+        self.right_saturation_slider.setValue(50)
+        self.right_saturation_value = QLabel("50")
+        self.right_saturation_slider.valueChanged.connect(lambda v: self.right_saturation_value.setText(str(v)))
+        right_saturation_layout.addWidget(self.right_saturation_slider)
+        right_saturation_layout.addWidget(self.right_saturation_value)
+        right_advanced_layout.addRow("Saturazione:", right_saturation_layout)
+
+        # Aggiungi il gruppo avanzato
+        right_cam_layout.addRow(right_advanced_group)
+
+        # Collegamento tra modalità e saturazione per camera destra
+        self.right_mode_color.toggled.connect(lambda checked: self._update_saturation_visibility(checked, False))
+        self.right_mode_grayscale.toggled.connect(
+            lambda checked: self._update_saturation_visibility(not checked, False))
+
+        return left_cam_tab, right_cam_tab
+
+    def _update_saturation_visibility(self, visible: bool, is_left_camera: bool):
+        """
+        Aggiorna la visibilità del controllo saturazione in base alla modalità della camera.
+
+        Args:
+            visible: True per mostrare, False per nascondere
+            is_left_camera: True per camera sinistra, False per camera destra
+        """
+        if is_left_camera:
+            # Trova la riga della saturazione nel layout
+            saturation_widget = self.left_saturation_slider.parent()
+            label = saturation_widget.parent().labelForField(saturation_widget)
+            if label:
+                label.setVisible(visible)
+                saturation_widget.setVisible(visible)
+        else:
+            # Trova la riga della saturazione nel layout
+            saturation_widget = self.right_saturation_slider.parent()
+            label = saturation_widget.parent().labelForField(saturation_widget)
+            if label:
+                label.setVisible(visible)
+                saturation_widget.setVisible(visible)
+
+    def _apply_camera_settings(self):
+        """
+        Applica le impostazioni delle camere e le invia al server.
+        Versione migliorata con supporto per modalità colore/grayscale.
+        """
+        if not self._scanner or not self._connection_manager or not self._connection_manager.is_connected(
+                self._scanner.device_id):
+            QMessageBox.warning(
+                self,
+                "Errore",
+                "Per applicare le impostazioni è necessario essere connessi a uno scanner."
+            )
+            return
+
+        # Raccogli le impostazioni
+        left_mode = "color" if self.left_mode_color.isChecked() else "grayscale"
+        left_exposure = self.left_exposure_slider.value()
+        left_gain = self.left_gain_slider.value()
+        left_brightness = self.left_brightness_slider.value()
+        left_contrast = self.left_contrast_slider.value()
+        left_sharpness = self.left_sharpness_slider.value()
+        left_saturation = self.left_saturation_slider.value()
+
+        right_mode = "color" if self.right_mode_color.isChecked() else "grayscale"
+        right_exposure = self.right_exposure_slider.value()
+        right_gain = self.right_gain_slider.value()
+        right_brightness = self.right_brightness_slider.value()
+        right_contrast = self.right_contrast_slider.value()
+        right_sharpness = self.right_sharpness_slider.value()
+        right_saturation = self.right_saturation_slider.value()
+
+        # Crea il payload di configurazione con modalità camera
+        config = {
+            "camera": {
+                "left": {
+                    "mode": left_mode,
+                    "exposure": left_exposure,
+                    "gain": left_gain,
+                    "brightness": left_brightness,
+                    "contrast": left_contrast,
+                    "sharpness": left_sharpness,
+                    "saturation": left_saturation
+                },
+                "right": {
+                    "mode": right_mode,
+                    "exposure": right_exposure,
+                    "gain": right_gain,
+                    "brightness": right_brightness,
+                    "contrast": right_contrast,
+                    "sharpness": right_sharpness,
+                    "saturation": right_saturation
+                }
+            }
+        }
+
+        # Invia la configurazione al server
+        try:
+            if self._connection_manager.send_message(
+                    self._scanner.device_id,
+                    "SET_CONFIG",
+                    {"config": config}
+            ):
+                QMessageBox.information(
+                    self,
+                    "Impostazioni applicate",
+                    "Le impostazioni delle camere sono state applicate con successo."
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Errore",
+                    "Impossibile applicare le impostazioni: errore di comunicazione."
+                )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Errore",
+                f"Si è verificato un errore durante l'applicazione delle impostazioni:\n{str(e)}"
+            )
 
     def _connect_signals(self):
         """Collega i segnali dei processori di frame."""
