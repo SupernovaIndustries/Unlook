@@ -100,7 +100,7 @@ class UnLookServer:
         self.stream_threads = []
 
         # Controllo di flusso
-        self._frame_interval = 0.01  # Intervallo iniziale tra frame (10ms)
+        self._frame_interval = 1.0 / 30.0  # Intervallo iniziale per 30 FPS
         self._dynamic_interval = True  # Regolazione dinamica dell'intervallo
         self._last_frame_time = 0
         self._streaming_start_time = 0
@@ -110,6 +110,9 @@ class UnLookServer:
         self.client_connected = False
         self.client_ip = None
         self._last_client_activity = 0
+
+        # Parametri di qualità dell'immagine
+        self._jpeg_quality = 90  # Qualità JPEG ottimale per bassa latenza
 
         logger.info(f"Server UnLook inizializzato con ID: {self.device_id}")
 
@@ -157,7 +160,7 @@ class UnLookServer:
                 "command_port": 5680,
                 "stream_port": 5681,
                 "broadcast_interval": 1.0,  # secondi
-                "frame_interval": 0.01,  # 10ms tra frame
+                "frame_interval": 0.033,  # 33ms tra frame (30fps nominali)
                 "dynamic_fps": True  # Regolazione dinamica di FPS
             },
             "camera": {
@@ -209,6 +212,8 @@ class UnLookServer:
                         config["server"]["dynamic_fps"] = default_config["server"]["dynamic_fps"]
 
                 if "stream" in config:
+                    if "quality" not in config["stream"]:
+                        config["stream"]["quality"] = default_config["stream"]["quality"]
                     if "max_fps" not in config["stream"]:
                         config["stream"]["max_fps"] = default_config["stream"]["max_fps"]
                     if "min_fps" not in config["stream"]:
@@ -301,10 +306,12 @@ class UnLookServer:
             stream_port = self.config["server"]["stream_port"]
 
             self.command_socket.bind(f"tcp://*:{command_port}")
-            self.stream_socket.bind(f"tcp://*:{stream_port}")
 
-            # Configura HWM basso per ridurre il buffering sul socket di streaming
-            self.stream_socket.setsockopt(zmq.SNDHWM, 1)
+            # Configurazione ottimizzata del socket di streaming
+            # Imposta un valore di HWM basso ma sicuro per messaggi multipart
+            self.stream_socket.setsockopt(zmq.SNDHWM, 3)
+            # Non impostare CONFLATE per evitare problemi con messaggi multipart
+            self.stream_socket.bind(f"tcp://*:{stream_port}")
 
             logger.info(f"Socket di comando in ascolto su porta {command_port}")
             logger.info(f"Socket di streaming in ascolto su porta {stream_port}")
@@ -325,11 +332,17 @@ class UnLookServer:
             self.state["status"] = "running"
 
             # Carica parametri di controllo di flusso
-            self._frame_interval = self.config["server"].get("frame_interval", 0.01)
+            self._frame_interval = self.config["server"].get("frame_interval", 0.033)
             self._dynamic_interval = self.config["server"].get("dynamic_fps", True)
+            self._jpeg_quality = self.config["stream"].get("quality", 90)
+
+            # Assicurati che il quality sia limitato tra 70 e 95 per un buon rapporto latenza/qualità
+            self._jpeg_quality = max(70, min(95, self._jpeg_quality))
 
             logger.info("Server UnLook avviato con successo")
-            logger.info(f"Controllo di flusso: intervallo={self._frame_interval}s, dinamico={self._dynamic_interval}")
+            logger.info(
+                f"Controllo di flusso: intervallo={self._frame_interval * 1000:.1f}ms, dinamico={self._dynamic_interval}")
+            logger.info(f"Qualità JPEG: {self._jpeg_quality}")
 
         except Exception as e:
             logger.error(f"Errore nell'avvio del server: {e}")
@@ -598,10 +611,17 @@ class UnLookServer:
                     self._streaming_start_time = time.time()
                     self._last_frame_time = 0
 
-                    # Avvia lo streaming con parametri richiesti se presenti
-                    quality = command.get('quality', None)
-                    if quality is not None and isinstance(quality, int):
-                        self.config["stream"]["quality"] = max(10, min(100, quality))
+                    # Imposta il nuovo valore di qualità JPEG se richiesto
+                    if 'quality' in command and isinstance(command['quality'], int):
+                        self._jpeg_quality = max(70, min(95, command['quality']))
+                        logger.info(f"Qualità JPEG impostata a {self._jpeg_quality}")
+
+                    # Imposta il nuovo target FPS se richiesto
+                    if 'target_fps' in command and isinstance(command['target_fps'], int):
+                        target_fps = max(5, min(60, command['target_fps']))
+                        self._frame_interval = 1.0 / target_fps
+                        logger.info(
+                            f"Target FPS impostato a {target_fps} (intervallo={self._frame_interval * 1000:.1f}ms)")
 
                     self.start_streaming()
                     response['streaming'] = True
@@ -650,14 +670,8 @@ class UnLookServer:
                     if 'stream' in command['config']:
                         stream_config = command['config']['stream']
                         if 'quality' in stream_config:
-                            self.config["stream"]["quality"] = max(10, min(100, stream_config["quality"]))
-                            logger.info(f"Qualità streaming aggiornata: {self.config['stream']['quality']}")
-                        if 'max_fps' in stream_config:
-                            self.config["stream"]["max_fps"] = stream_config["max_fps"]
-                            logger.info(f"FPS massimo aggiornato: {self.config['stream']['max_fps']}")
-                        if 'min_fps' in stream_config:
-                            self.config["stream"]["min_fps"] = stream_config["min_fps"]
-                            logger.info(f"FPS minimo aggiornato: {self.config['stream']['min_fps']}")
+                            self._jpeg_quality = max(70, min(95, stream_config["quality"]))
+                            logger.info(f"Qualità streaming aggiornata: {self._jpeg_quality}")
 
                     # Se la configurazione include parametri del server, aggiornali
                     if 'server' in command['config']:
@@ -931,41 +945,41 @@ class UnLookServer:
 
         try:
             # Ottieni parametri di configurazione
-            quality = self.config["stream"]["quality"]
-            if not isinstance(quality, int):
-                quality = 90  # Valore di default
-
-            quality = max(10, min(100, quality))  # Limita tra 10 e 100
-            logger.info(f"Qualità JPEG impostata a {quality}")
-
-            # Ottieni parametri di FPS
-            max_fps = self.config["stream"].get("max_fps", 30)
-            min_fps = self.config["stream"].get("min_fps", 15)
+            quality = self._jpeg_quality
 
             # Configura intervallo iniziale
             current_interval = self._frame_interval
-            min_interval = 1.0 / max_fps
-            max_interval = 1.0 / min_fps
-
-            # Variabili per adattamento di tasso
-            frame_times = []  # Tempi di ultima consegna
-            adaptation_window = 10  # Frame da considerare per adattamento
+            min_interval = 1.0 / 60  # massimo 60 FPS
 
             # Loop principale per lo streaming
             local_frame_count = 0
             start_time = time.time()
             last_stats_time = start_time
             last_frame_time = 0
+            next_frame_time = 0
+
+            # Imposta priorità del thread di streaming
+            try:
+                import os
+                # Cerca di impostare priorità alta su sistemi Linux
+                os.nice(-10)
+            except:
+                pass
 
             while self.state["streaming"] and self.running:
                 try:
-                    # Controllo di tasso - attendi intervallo adeguato
+                    # Controllo di flusso basato su tempo per mantenere FPS stabile
                     current_time = time.time()
-                    if last_frame_time > 0:
-                        # Tempo che dobbiamo attendere per mantenere l'intervallo desiderato
-                        wait_time = current_interval - (current_time - last_frame_time)
-                        if wait_time > 0:
+
+                    # Attendi fino al prossimo frame programmato per rispettare l'intervallo
+                    if current_time < next_frame_time:
+                        wait_time = next_frame_time - current_time
+                        if wait_time > 0.001:  # Attendi solo se il tempo è significativo
                             time.sleep(wait_time)
+                        continue
+
+                    # Programma il prossimo frame
+                    next_frame_time = current_time + current_interval
 
                     # Cattura il frame
                     frame = camera.capture_array()
@@ -975,14 +989,15 @@ class UnLookServer:
                         time.sleep(0.01)
                         continue
 
-                    # Converti in BGR se necessario
+                    # Converti in BGR se necessario (per OpenCV)
                     if len(frame.shape) == 3 and frame.shape[2] == 4:  # RGBA
                         frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
                     elif len(frame.shape) == 2:  # Grayscale
                         frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
 
-                    # Comprimi in JPEG con qualità configurata
-                    success, encoded_data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+                    # Comprimi in JPEG con qualità ottimizzata
+                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, quality]
+                    success, encoded_data = cv2.imencode('.jpg', frame, encode_params)
 
                     if not success or encoded_data is None or encoded_data.size == 0:
                         logger.error(f"Errore nella codifica JPEG, camera {camera_index}")
@@ -1002,37 +1017,12 @@ class UnLookServer:
                     # Invia l'header e poi i dati
                     try:
                         self.stream_socket.send_json(header, zmq.SNDMORE)
-                        self.stream_socket.send(encoded_data.tobytes())
+                        self.stream_socket.send(encoded_data.tobytes(), copy=False)
 
                         # Aggiorna contatori
                         local_frame_count += 1
                         self._frame_count += 1  # Contatore globale
                         last_frame_time = current_time  # Per controllo di intervallo
-
-                        # Mantieni storico tempi per adattamento dinamico
-                        if self._dynamic_interval:
-                            now = time.time()
-                            frame_times.append(now)
-                            if len(frame_times) > adaptation_window:
-                                frame_times.pop(0)  # Mantieni finestra scorrevole
-
-                                # Regola intervallo basato su tendenza di lag
-                                if len(frame_times) >= 5:  # Necessitano sufficienti campioni
-                                    # Calcola delta medio tra invii successivi
-                                    deltas = [frame_times[i] - frame_times[i - 1] for i in range(1, len(frame_times))]
-                                    avg_delta = sum(deltas) / len(deltas)
-
-                                    # Se delta medio è significativamente maggiore di intervallo desiderato,
-                                    # il sistema è sotto carico. Incrementa intervallo.
-                                    if avg_delta > current_interval * 1.5:
-                                        current_interval = min(current_interval * 1.1, max_interval)
-                                        logger.debug(f"Incremento intervallo a {current_interval:.3f}s "
-                                                     f"({1 / current_interval:.1f} FPS)")
-                                    # Se delta è vicino all'intervallo, possiamo provare a ridurre
-                                    elif avg_delta < current_interval * 0.8 and avg_delta > 0:
-                                        current_interval = max(current_interval * 0.95, min_interval)
-                                        logger.debug(f"Riduzione intervallo a {current_interval:.3f}s "
-                                                     f"({1 / current_interval:.1f} FPS)")
 
                     except Exception as e:
                         logger.error(f"Errore nell'invio del frame: {e}")
@@ -1107,6 +1097,8 @@ def main():
     parser = argparse.ArgumentParser(description='UnLook Scanner Server')
     parser.add_argument('-c', '--config', type=str, help='Percorso del file di configurazione')
     parser.add_argument('-p', '--port', type=int, help='Porta per i comandi (default dal config)')
+    parser.add_argument('--quality', type=int, help='Qualità JPEG (5-95, default 90)', default=90)
+    parser.add_argument('--fps', type=int, help='FPS target (5-60, default 30)', default=30)
     parser.add_argument('--debug', action='store_true', help='Abilita il livello di log DEBUG')
     args = parser.parse_args()
 
@@ -1117,9 +1109,14 @@ def main():
     # Crea e avvia il server
     server = UnLookServer(config_path=args.config)
 
-    # Override della porta se specificata
+    # Override delle impostazioni se specificate
     if args.port:
         server.config["server"]["command_port"] = args.port
+
+    # Imposta qualità JPEG e FPS target
+    server._jpeg_quality = max(70, min(95, args.quality))
+    fps = max(5, min(60, args.fps))
+    server._frame_interval = 1.0 / fps
 
     # Gestione dei segnali per un arresto pulito
     def signal_handler(sig, frame):
