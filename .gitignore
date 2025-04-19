@@ -139,4 +139,5 @@ cython_debug/
 
 # PyCharm / JetBrains IDEs
 .idea/
+.idea\
 

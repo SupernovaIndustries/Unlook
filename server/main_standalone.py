@@ -456,16 +456,28 @@ class UnLookServer:
         """
         Avvia il gestore dei comandi in un thread separato.
         """
+        # Assicurati che running sia True prima di avviare il thread
+        self.running = True
+
+        # Crea e avvia il thread
         self.command_thread = threading.Thread(target=self._command_loop)
         self.command_thread.daemon = True
         self.command_thread.start()
-        logger.info("Handler dei comandi avviato")
+
+        # Verifica che il thread sia stato avviato correttamente
+        if self.command_thread.is_alive():
+            logger.info("Handler dei comandi avviato")
+        else:
+            logger.error("Impossibile avviare l'handler dei comandi!")
 
     def _command_loop(self):
         """
         Loop principale per la gestione dei comandi dai client.
         """
         logger.info("Command loop avviato")
+
+        # Debug log per verificare lo stato del flag running
+        logger.debug(f"Stato flag running all'avvio del command loop: {self.running}")
 
         try:
             while self.running:
@@ -474,10 +486,12 @@ class UnLookServer:
                     poller = zmq.Poller()
                     poller.register(self.command_socket, zmq.POLLIN)
 
+                    logger.debug("In attesa di comandi...")
                     socks = dict(poller.poll(1000))  # 1 secondo di timeout
 
                     if self.command_socket in socks and socks[self.command_socket] == zmq.POLLIN:
                         # Ricezione del messaggio
+                        logger.debug("Comando rilevato, ricezione in corso...")
                         message_data = self.command_socket.recv()
 
                         # Decodifica il messaggio
@@ -491,8 +505,12 @@ class UnLookServer:
                         # Invia la risposta
                         try:
                             self.command_socket.send_json(response)
+                            logger.debug(f"Risposta al comando {command_type} inviata")
                         except Exception as e:
                             logger.error(f"Errore nell'invio della risposta: {e}")
+                    else:
+                        # Nessun comando ricevuto in questo intervallo
+                        pass
 
                 except zmq.ZMQError as e:
                     if e.errno == zmq.ETERM:
@@ -502,13 +520,13 @@ class UnLookServer:
                     logger.error(f"Errore ZMQ nel command loop: {e}")
                 except Exception as e:
                     logger.error(f"Errore nel command loop: {e}")
+                    logger.exception(e)  # Aggiunge il traceback dell'errore
 
-                # Breve pausa per evitare di sovraccaricare la CPU in caso di errori continui
-                if not self.running:
-                    break
+                # Non aggiungere pause qui che potrebbero rallentare la risposta ai comandi
 
         except Exception as e:
             logger.error(f"Errore fatale nel command loop: {e}")
+            logger.exception(e)  # Aggiunge il traceback dell'errore
         finally:
             logger.info("Command loop terminato")
 
@@ -548,7 +566,9 @@ class UnLookServer:
 
             elif command_type == 'START_STREAM':
                 # Avvia lo streaming
+                logger.debug(f"Ricevuto comando START_STREAM con parametri: {command}")
                 self.start_streaming()
+                logger.debug(f"Stato streaming dopo comando START_STREAM: {self.state['streaming']}")
                 response['streaming'] = True
                 response['message'] = "Streaming avviato"
 
@@ -732,7 +752,7 @@ class UnLookServer:
             camera_index: Indice della camera (0=sinistra, 1=destra)
         """
         logger.info(f"Thread di streaming camera {camera_index} avviato")
-
+        logger.debug(f"Thread di streaming camera {camera_index} avviato")
         try:
             # Ottieni parametri di configurazione
             quality = self.config["stream"]["quality"]
@@ -834,6 +854,7 @@ class UnLookServer:
                     # Limita il logging degli errori a una volta al secondo
                     if current_time - last_error_time > 1.0:
                         logger.error(f"Errore nello streaming della camera {camera_index}: {e}")
+                        logger.debug(f"Errore nello streaming della camera {camera_index}: {e}")
                         last_error_time = current_time
 
                     if not self.state["streaming"] or not self.running:
@@ -843,6 +864,7 @@ class UnLookServer:
 
         except Exception as e:
             logger.error(f"Errore fatale nello streaming della camera {camera_index}: {e}")
+            logger.debug(f"Errore fatale nello streaming della camera {camera_index}: {e}")
 
         logger.info(f"Thread di streaming camera {camera_index} terminato")
 
