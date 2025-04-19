@@ -99,6 +99,7 @@ class UnLookServer:
         # Flag e informazioni sul client
         self.client_connected = False
         self.client_ip = None
+        self._last_client_activity = 0
 
         logger.info(f"Server UnLook inizializzato con ID: {self.device_id}")
 
@@ -256,7 +257,7 @@ class UnLookServer:
 
     def start(self):
         """
-        Avvia il server.
+        Avvia il server con monitoraggio dell'attività client.
         """
         if self.running:
             logger.warning("Il server è già in esecuzione")
@@ -265,6 +266,11 @@ class UnLookServer:
         logger.info("Avvio del server UnLook")
 
         try:
+            # Inizializza il timestamp dell'ultima attività client
+            self._last_client_activity = 0
+            self.client_connected = False
+            self.client_ip = None
+
             # Avvia le camere
             for cam_info in self.cameras:
                 cam_info["camera"].start()
@@ -274,7 +280,6 @@ class UnLookServer:
             command_port = self.config["server"]["command_port"]
             stream_port = self.config["server"]["stream_port"]
 
-            # Non impostiamo timeout sul socket REP
             self.command_socket.bind(f"tcp://*:{command_port}")
             self.stream_socket.bind(f"tcp://*:{stream_port}")
 
@@ -286,6 +291,11 @@ class UnLookServer:
 
             # Avvia il loop di ricezione comandi
             self._start_command_handler()
+
+            # Avvia il timer di controllo attività client
+            self._activity_check_timer = threading.Timer(5.0, self._check_client_activity_loop)
+            self._activity_check_timer.daemon = True
+            self._activity_check_timer.start()
 
             # Imposta lo stato in esecuzione
             self.running = True
@@ -301,6 +311,9 @@ class UnLookServer:
         """
         Ferma il server.
         """
+        if not self.running:
+            return
+
         logger.info("Arresto del server UnLook")
 
         # Imposta lo stato di arresto
@@ -308,7 +321,8 @@ class UnLookServer:
         self.state["status"] = "stopping"
 
         # Ferma lo streaming
-        self.stop_streaming()
+        if self.state["streaming"]:
+            self.stop_streaming()
 
         # Ferma il servizio di broadcast
         if self.broadcast_thread and self.broadcast_thread.is_alive():
@@ -325,16 +339,16 @@ class UnLookServer:
             self.command_socket.close()
             self.stream_socket.close()
             self.context.term()
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Errore nella chiusura dei socket: {e}")
 
         # Ferma le camere
         for cam_info in self.cameras:
             logger.info(f"Arresto della camera {cam_info['name']}...")
             try:
                 cam_info["camera"].stop()
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Errore nell'arresto della camera {cam_info['name']}: {e}")
 
         logger.info("Server UnLook arrestato")
 
@@ -533,15 +547,19 @@ class UnLookServer:
     def _process_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
         """
         Processa un comando ricevuto da un client.
-
-        Args:
-            command: Dizionario rappresentante il comando
-
-        Returns:
-            Dizionario di risposta
+        Versione migliorata con gestione della disconnessione e tracciamento dell'attività.
         """
         command_type = command.get('type', '')
         logger.info(f"Elaborazione comando: {command_type}")
+
+        # Aggiorna il timestamp dell'ultima attività del client
+        self._last_client_activity = time.time()
+
+        # Ottieni l'indirizzo IP del client se disponibile
+        client_ip = command.get('client_ip', None)
+        if client_ip and client_ip != self.client_ip:
+            self.client_ip = client_ip
+            logger.info(f"Aggiornato indirizzo IP client: {client_ip}")
 
         # Prepara una risposta base
         response = {
@@ -555,7 +573,6 @@ class UnLookServer:
                 response['timestamp'] = time.time()
                 # Considera il client connesso
                 self.client_connected = True
-                self.client_ip = command.get('ip_address', "unknown")
                 self.state["clients_connected"] = 1
 
             elif command_type == 'GET_STATUS':
@@ -566,17 +583,44 @@ class UnLookServer:
 
             elif command_type == 'START_STREAM':
                 # Avvia lo streaming
-                logger.debug(f"Ricevuto comando START_STREAM con parametri: {command}")
-                self.start_streaming()
-                logger.debug(f"Stato streaming dopo comando START_STREAM: {self.state['streaming']}")
-                response['streaming'] = True
-                response['message'] = "Streaming avviato"
+                if not self.state["streaming"]:
+                    logger.info(f"Avvio streaming richiesto da client {self.client_ip}")
+                    self.start_streaming()
+                    response['streaming'] = True
+                    response['message'] = "Streaming avviato"
+                else:
+                    logger.info("Lo streaming è già attivo, ignorata richiesta di avvio")
+                    response['streaming'] = True
+                    response['message'] = "Streaming già attivo"
 
             elif command_type == 'STOP_STREAM':
                 # Ferma lo streaming
-                self.stop_streaming()
-                response['streaming'] = False
-                response['message'] = "Streaming arrestato"
+                if self.state["streaming"]:
+                    logger.info(f"Arresto streaming richiesto da client {self.client_ip}")
+                    self.stop_streaming()
+                    response['streaming'] = False
+                    response['message'] = "Streaming arrestato"
+                else:
+                    logger.info("Lo streaming non è attivo, ignorata richiesta di arresto")
+                    response['streaming'] = False
+                    response['message'] = "Streaming non attivo"
+
+            elif command_type == 'DISCONNECT':
+                # Il client si disconnette esplicitamente
+                logger.info(f"Il client {self.client_ip} ha richiesto la disconnessione esplicita")
+
+                # Ferma lo streaming se attivo
+                if self.state["streaming"]:
+                    logger.info("Arresto dello streaming per disconnessione client")
+                    self.stop_streaming()
+
+                # Aggiorna lo stato
+                self.client_connected = False
+                self.client_ip = None
+                self.state["clients_connected"] = 0
+
+                response['disconnected'] = True
+                response['message'] = "Disconnessione completata"
 
             elif command_type == 'SET_CONFIG':
                 # Aggiorna la configurazione
@@ -601,13 +645,6 @@ class UnLookServer:
                     response['status'] = 'error'
                     response['error'] = 'Errore nella cattura dei frame'
 
-            elif command_type == 'DISCONNECT':
-                # Il client si disconnette esplicitamente
-                self.client_connected = False
-                self.client_ip = None
-                self.state["clients_connected"] = 0
-                response['disconnected'] = True
-
             else:
                 # Comando sconosciuto
                 response['status'] = 'error'
@@ -619,6 +656,47 @@ class UnLookServer:
             response['error'] = str(e)
 
         return response
+
+    def _check_client_activity(self):
+        """
+        Verifica se il client è ancora attivo e, in caso contrario, rilascia le risorse.
+        Da chiamare periodicamente nel loop principale.
+        """
+        if not self.client_connected:
+            return
+
+        current_time = time.time()
+        time_since_last_activity = current_time - self._last_client_activity
+
+        # Se non si hanno notizie dal client per più di 10 secondi, considerarlo disconnesso
+        if time_since_last_activity > 10.0:
+            logger.info(
+                f"Il client {self.client_ip} risulta inattivo da {time_since_last_activity:.1f} secondi, considerato disconnesso.")
+
+            # Ferma lo streaming se attivo
+            if self.state["streaming"]:
+                logger.info("Arresto automatico dello streaming per client inattivo")
+                self.stop_streaming()
+
+            # Aggiorna lo stato
+            self.client_connected = False
+            self.client_ip = None
+            self.state["clients_connected"] = 0
+
+            # Log per facilitare il debug
+            logger.info("Risorse rilasciate per client inattivo")
+
+    def _check_client_activity_loop(self):
+        """
+        Loop di controllo per il monitoraggio dell'attività client.
+        """
+        while self.running:
+            try:
+                self._check_client_activity()
+                time.sleep(5.0)  # Controlla ogni 5 secondi
+            except Exception as e:
+                logger.error(f"Errore nel controllo attività client: {e}")
+                time.sleep(5.0)  # Continua comunque
 
     def _update_config(self, new_config: Dict[str, Any]):
         """
@@ -796,21 +874,18 @@ class UnLookServer:
 
     def _stream_camera(self, camera: "Picamera2", camera_index: int):
         """
-        Funzione che gestisce lo streaming di una camera.
-
-        Args:
-            camera: Oggetto camera
-            camera_index: Indice della camera (0=sinistra, 1=destra)
+        Funzione ottimizzata che gestisce lo streaming di una camera.
+        Versione con latenza ridotta.
         """
         logger.info(f"Thread di streaming camera {camera_index} avviato")
-        logger.debug(f"Thread di streaming camera {camera_index} avviato")
+
         try:
             # Ottieni parametri di configurazione
             quality = self.config["stream"]["quality"]
             if not isinstance(quality, int):
-                quality = 90  # Valore di default se non è un intero
+                quality = 90  # Valore di default
 
-            quality = max(10, min(100, quality))  # Assicura che la qualità sia tra 10 e 100
+            quality = max(10, min(100, quality))  # Limita tra 10 e 100
             logger.info(f"Qualità JPEG impostata a {quality}")
 
             # Loop principale per lo streaming
@@ -821,42 +896,27 @@ class UnLookServer:
 
             while self.state["streaming"] and self.running:
                 try:
-                    # Ottieni il frame raw
+                    # Ottieni il frame
                     frame = camera.capture_array()
 
                     if frame is None or frame.size == 0:
                         logger.error(f"Frame vuoto dalla camera {camera_index}")
-                        time.sleep(0.1)
+                        time.sleep(0.01)
                         continue
-
-                    # Log delle dimensioni del frame ogni 100 frame
-                    if frame_count % 100 == 0:
-                        logger.debug(f"Camera {camera_index} frame shape: {frame.shape}, "
-                                     f"dtype: {frame.dtype}, min: {frame.min()}, max: {frame.max()}")
 
                     # Converti in BGR se necessario
-                    if len(frame.shape) == 3 and frame.shape[2] == 4:  # Formato RGBA
+                    if len(frame.shape) == 3 and frame.shape[2] == 4:  # RGBA
                         frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
-                    elif len(frame.shape) == 2:  # Formato grayscale
+                    elif len(frame.shape) == 2:  # Grayscale
                         frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
 
-                    # Converti in JPEG per ridurre la dimensione
+                    # Converti in JPEG
                     success, encoded_data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
 
-                    if not success:
-                        logger.error(f"Errore nell'encoding JPEG del frame della camera {camera_index}")
-                        time.sleep(0.1)  # Breve pausa prima di riprovare
+                    if not success or encoded_data is None or encoded_data.size == 0:
+                        logger.error(f"Errore nell'encoding JPEG, camera {camera_index}")
+                        time.sleep(0.01)
                         continue
-
-                    # Verifica che i dati codificati non siano vuoti
-                    if encoded_data is None or encoded_data.size == 0:
-                        logger.error(f"Dati JPEG vuoti dalla camera {camera_index}")
-                        time.sleep(0.1)
-                        continue
-
-                    # Log occasionale sulla dimensione dell'immagine compressa
-                    if frame_count % 100 == 0:
-                        logger.debug(f"Camera {camera_index} dimensione JPEG: {encoded_data.size} bytes")
 
                     # Crea l'header del messaggio
                     header = {
@@ -864,58 +924,44 @@ class UnLookServer:
                         "frame": frame_count,
                         "timestamp": time.time(),
                         "format": "jpeg",
-                        "resolution": [frame.shape[1], frame.shape[0]]  # larghezza, altezza
+                        "resolution": [frame.shape[1], frame.shape[0]]
                     }
 
-                    # Invia l'header e poi i dati del frame
+                    # Invia l'header e poi i dati
                     try:
                         self.stream_socket.send_json(header, zmq.SNDMORE)
                         self.stream_socket.send(encoded_data.tobytes())
                         frame_count += 1
-
-                        # Log occasionale sul numero di frame inviati
-                        if frame_count % 100 == 0:
-                            logger.debug(f"Camera {camera_index} frame inviati: {frame_count}")
-
                     except Exception as e:
                         current_time = time.time()
-                        # Limita il logging degli errori a una volta al secondo
                         if current_time - last_error_time > 1.0:
                             logger.error(f"Errore nell'invio del frame: {e}")
                             last_error_time = current_time
-                        time.sleep(0.1)  # Pausa breve in caso di errore
+                        time.sleep(0.01)
                         continue
 
                     # Calcola FPS periodicamente
                     if frame_count % fps_calc_interval == 0:
                         current_time = time.time()
                         elapsed = current_time - start_time
-
                         if elapsed > 0:
                             fps = fps_calc_interval / elapsed
                             logger.debug(f"Camera {camera_index} streaming a {fps:.1f} FPS")
-
                         start_time = current_time
 
-                    # Aggiungi una breve pausa per non saturare la CPU e la rete
-                    time.sleep(0.01)  # 10ms di pausa
+                    # Pausa minima tra i frame per non sovraccaricare il sistema
+                    # ma abbastanza piccola da non introdurre latenza
+                    time.sleep(0.001)  # 1ms invece di 10ms
 
                 except Exception as e:
                     current_time = time.time()
-                    # Limita il logging degli errori a una volta al secondo
                     if current_time - last_error_time > 1.0:
-                        logger.error(f"Errore nello streaming della camera {camera_index}: {e}")
-                        logger.debug(f"Errore nello streaming della camera {camera_index}: {e}")
+                        logger.error(f"Errore nello streaming camera {camera_index}: {e}")
                         last_error_time = current_time
-
-                    if not self.state["streaming"] or not self.running:
-                        break
-
-                    time.sleep(0.1)  # Pausa più lunga in caso di errore
+                    time.sleep(0.01)
 
         except Exception as e:
-            logger.error(f"Errore fatale nello streaming della camera {camera_index}: {e}")
-            logger.debug(f"Errore fatale nello streaming della camera {camera_index}: {e}")
+            logger.error(f"Errore fatale nello streaming camera {camera_index}: {e}")
 
         logger.info(f"Thread di streaming camera {camera_index} terminato")
 
