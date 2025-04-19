@@ -360,8 +360,8 @@ class MainWindow(QMainWindow):
         # Cambia il testo del pulsante di connessione
         self.action_toggle_connection.setText("Connetti")
 
-        # Disabilita il pulsante di acquisizione
-        self.action_capture.setEnabled(False)
+        """# Disabilita il pulsante di acquisizione
+        self.action_capture.setEnabled(False)"""
 
         # Ferma lo streaming se attivo
         self.streaming_widget.stop_streaming()

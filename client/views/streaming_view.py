@@ -194,6 +194,7 @@ class FrameProcessor(QThread):
 class StreamView(QWidget):
     """
     Widget che visualizza lo stream di una singola camera.
+    Versione migliorata con diagnostica.
     """
 
     def __init__(self, camera_index: int, parent=None):
@@ -202,9 +203,18 @@ class StreamView(QWidget):
         self._frame = None
         self._last_frame_time = 0
         self._fps = 0
+        self._frame_count = 0  # Contatore per i frame ricevuti
+        self._last_update_time = time.time()
+        self._healthy = False  # Stato di salute dello stream
 
         # Configura l'interfaccia utente
         self._setup_ui()
+
+        # Avvia un timer per l'aggiornamento dello stato di salute
+        from PySide6.QtCore import QTimer
+        self._health_timer = QTimer(self)
+        self._health_timer.timeout.connect(self._check_health)
+        self._health_timer.start(1000)  # Controlla ogni secondo
 
     def _setup_ui(self):
         """Configura l'interfaccia utente."""
@@ -217,6 +227,14 @@ class StreamView(QWidget):
         self.display_label.setAlignment(Qt.AlignCenter)
         self.display_label.setMinimumSize(320, 240)
         self.display_label.setStyleSheet("background-color: black;")
+
+        # Aggiungi un messaggio a video
+        font = self.display_label.font()
+        font.setPointSize(12)
+        self.display_label.setFont(font)
+        self.display_label.setText("Camera non attiva\nIn attesa dei frame...")
+        self.display_label.setStyleSheet("background-color: black; color: white;")
+
         layout.addWidget(self.display_label)
 
         # Etichetta per FPS e informazioni
@@ -228,7 +246,11 @@ class StreamView(QWidget):
     def update_frame(self, frame: QImage):
         """Aggiorna il frame visualizzato."""
         if not frame:
+            logger.warning(f"Frame nullo ricevuto per camera {self.camera_index}")
             return
+
+        # Incrementa il contatore dei frame
+        self._frame_count += 1
 
         # Calcola FPS
         current_time = time.time()
@@ -242,6 +264,9 @@ class StreamView(QWidget):
 
         self._last_frame_time = current_time
 
+        # Aggiorna lo stato di salute
+        self._healthy = True
+
         # Salva una copia del frame
         self._frame = frame.copy()
 
@@ -253,8 +278,14 @@ class StreamView(QWidget):
             Qt.SmoothTransformation
         )
 
+        # Log solo occasionalmente
+        if self._frame_count % 30 == 0:
+            logger.debug(f"Frame #{self._frame_count} aggiornato su StreamView {self.camera_index}, "
+                         f"dimensione: {frame.width()}x{frame.height()}, FPS: {self._fps:.1f}")
+
         # Aggiorna il display
         self.display_label.setPixmap(scaled_pixmap)
+        self.display_label.setStyleSheet("")  # Rimuovi stile sfondo nero e testo
 
         # Aggiorna l'etichetta informativa
         camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
@@ -266,15 +297,65 @@ class StreamView(QWidget):
     def clear(self):
         """Pulisce il display."""
         self.display_label.clear()
-        self.display_label.setStyleSheet("background-color: black;")
+        self.display_label.setStyleSheet("background-color: black; color: white;")
+        self.display_label.setText("Camera non attiva")
         self.info_label.setText("Camera non attiva")
         self._frame = None
         self._last_frame_time = 0
         self._fps = 0
+        self._frame_count = 0
+        self._healthy = False
 
     def get_current_frame(self) -> Optional[QImage]:
         """Restituisce il frame corrente."""
         return self._frame
+
+    def _check_health(self):
+        """Verifica lo stato di salute dello stream."""
+        current_time = time.time()
+
+        # Se non abbiamo ricevuto frame negli ultimi 3 secondi, lo stream non è healthy
+        if self._healthy and current_time - self._last_frame_time > 3.0:
+            self._healthy = False
+            logger.warning(f"Nessun frame ricevuto negli ultimi 3 secondi per camera {self.camera_index}")
+
+            # Aggiungi un indicatore visivo
+            if self._frame is None:
+                # Se non abbiamo mai ricevuto un frame, mostra un messaggio
+                self.display_label.setText("Camera non attiva\nNessun frame ricevuto")
+            else:
+                # Altrimenti, mostra l'ultimo frame con un indicatore di problemi
+                pixmap = QPixmap.fromImage(self._frame)
+                scaled_pixmap = pixmap.scaled(
+                    self.display_label.size(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+
+                # Aggiungi un bordo rosso
+                painter = QPainter(scaled_pixmap)
+                pen = QPen(QColor(255, 0, 0))  # Rosso
+                pen.setWidth(4)
+                painter.setPen(pen)
+                painter.drawRect(0, 0, scaled_pixmap.width() - 1, scaled_pixmap.height() - 1)
+                painter.end()
+
+                self.display_label.setPixmap(scaled_pixmap)
+
+            # Aggiorna l'etichetta informativa
+            camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
+            self.info_label.setText(f"Camera {camera_name} | CONNESSIONE PERSA")
+
+        elif not self._healthy and self._frame_count > 0:
+            # Se abbiamo ricevuto frame ma lo stream non è healthy, aggiorna il display
+            if self._frame:
+                pixmap = QPixmap.fromImage(self._frame)
+                scaled_pixmap = pixmap.scaled(
+                    self.display_label.size(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+                self.display_label.setPixmap(scaled_pixmap)
 
     def resizeEvent(self, event):
         """Gestisce il ridimensionamento del widget."""

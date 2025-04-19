@@ -723,7 +723,7 @@ class UnLookServer:
         self.stream_threads = []
         logger.info("Streaming video arrestato")
 
-    def _stream_camera(self, camera: Picamera2, camera_index: int):
+    def _stream_camera(self, camera: "Picamera2", camera_index: int):
         """
         Funzione che gestisce lo streaming di una camera.
 
@@ -736,16 +736,38 @@ class UnLookServer:
         try:
             # Ottieni parametri di configurazione
             quality = self.config["stream"]["quality"]
+            if not isinstance(quality, int):
+                quality = 90  # Valore di default se non è un intero
+
+            quality = max(10, min(100, quality))  # Assicura che la qualità sia tra 10 e 100
+            logger.info(f"Qualità JPEG impostata a {quality}")
 
             # Loop principale per lo streaming
             frame_count = 0
             start_time = time.time()
             fps_calc_interval = 30  # Calcola FPS ogni 30 frames
+            last_error_time = 0
 
             while self.state["streaming"] and self.running:
                 try:
                     # Ottieni il frame raw
                     frame = camera.capture_array()
+
+                    if frame is None or frame.size == 0:
+                        logger.error(f"Frame vuoto dalla camera {camera_index}")
+                        time.sleep(0.1)
+                        continue
+
+                    # Log delle dimensioni del frame ogni 100 frame
+                    if frame_count % 100 == 0:
+                        logger.debug(f"Camera {camera_index} frame shape: {frame.shape}, "
+                                     f"dtype: {frame.dtype}, min: {frame.min()}, max: {frame.max()}")
+
+                    # Converti in BGR se necessario
+                    if len(frame.shape) == 3 and frame.shape[2] == 4:  # Formato RGBA
+                        frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                    elif len(frame.shape) == 2:  # Formato grayscale
+                        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
 
                     # Converti in JPEG per ridurre la dimensione
                     success, encoded_data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
@@ -755,22 +777,41 @@ class UnLookServer:
                         time.sleep(0.1)  # Breve pausa prima di riprovare
                         continue
 
+                    # Verifica che i dati codificati non siano vuoti
+                    if encoded_data is None or encoded_data.size == 0:
+                        logger.error(f"Dati JPEG vuoti dalla camera {camera_index}")
+                        time.sleep(0.1)
+                        continue
+
+                    # Log occasionale sulla dimensione dell'immagine compressa
+                    if frame_count % 100 == 0:
+                        logger.debug(f"Camera {camera_index} dimensione JPEG: {encoded_data.size} bytes")
+
                     # Crea l'header del messaggio
                     header = {
                         "camera": camera_index,
                         "frame": frame_count,
                         "timestamp": time.time(),
                         "format": "jpeg",
-                        "resolution": list(camera.camera_properties["PixelArraySize"])
+                        "resolution": [frame.shape[1], frame.shape[0]]  # larghezza, altezza
                     }
 
                     # Invia l'header e poi i dati del frame
                     try:
                         self.stream_socket.send_json(header, zmq.SNDMORE)
-                        self.stream_socket.send(encoded_data.tobytes(), copy=False)
+                        self.stream_socket.send(encoded_data.tobytes())
                         frame_count += 1
+
+                        # Log occasionale sul numero di frame inviati
+                        if frame_count % 100 == 0:
+                            logger.debug(f"Camera {camera_index} frame inviati: {frame_count}")
+
                     except Exception as e:
-                        logger.error(f"Errore nell'invio del frame: {e}")
+                        current_time = time.time()
+                        # Limita il logging degli errori a una volta al secondo
+                        if current_time - last_error_time > 1.0:
+                            logger.error(f"Errore nell'invio del frame: {e}")
+                            last_error_time = current_time
                         time.sleep(0.1)  # Pausa breve in caso di errore
                         continue
 
@@ -785,11 +826,20 @@ class UnLookServer:
 
                         start_time = current_time
 
+                    # Aggiungi una breve pausa per non saturare la CPU e la rete
+                    time.sleep(0.01)  # 10ms di pausa
+
                 except Exception as e:
-                    logger.error(f"Errore nello streaming della camera {camera_index}: {e}")
+                    current_time = time.time()
+                    # Limita il logging degli errori a una volta al secondo
+                    if current_time - last_error_time > 1.0:
+                        logger.error(f"Errore nello streaming della camera {camera_index}: {e}")
+                        last_error_time = current_time
+
                     if not self.state["streaming"] or not self.running:
                         break
-                    time.sleep(0.1)  # Pausa breve in caso di errore
+
+                    time.sleep(0.1)  # Pausa più lunga in caso di errore
 
         except Exception as e:
             logger.error(f"Errore fatale nello streaming della camera {camera_index}: {e}")
