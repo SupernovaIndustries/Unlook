@@ -55,6 +55,7 @@
     "Python.receiver_launcher.executor": "Run",
     "Python.start_unlook.executor": "Run",
     "Python.stream_control.executor": "Run",
+    "Python.stream_receiver.executor": "Run",
     "Python.test_import.executor": "Run",
     "Python.test_struct.executor": "Run",
     "RunOnceActivity.OpenProjectViewOnStart": "true",

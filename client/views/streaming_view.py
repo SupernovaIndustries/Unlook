@@ -98,6 +98,98 @@ class FrameProcessor(QThread):
                     logger.error(f"Errore nel frame processor: {str(e)}")
                     time.sleep(0.1)  # Evita di sovraccaricare il sistema in caso di errori ripetuti
 
+    def _process_frame(self, frame):
+        """
+        Elabora un frame applicando le opzioni di visualizzazione.
+
+        Args:
+            frame: Frame OpenCV da elaborare
+
+        Returns:
+            Frame elaborato
+        """
+        with QMutexLocker(self._mutex):
+            # Crea una copia del frame per l'elaborazione
+            processed = frame.copy()
+
+            # Converti in scala di grigi se necessario
+            if len(processed.shape) == 3 and processed.shape[2] == 3:
+                gray = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = processed
+
+            # Applica miglioramento del contrasto se abilitato
+            if self._enhance_contrast:
+                # Equalizzazione dell'istogramma adattiva (CLAHE)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                enhanced = clahe.apply(gray)
+
+                # Se il frame originale era a colori, applica il miglioramento solo alla luminosità
+                if len(processed.shape) == 3 and processed.shape[2] == 3:
+                    # Converti in HSV
+                    hsv = cv2.cvtColor(processed, cv2.COLOR_BGR2HSV)
+                    # Sostituisci il canale V (luminosità)
+                    hsv[:, :, 2] = enhanced
+                    # Torna in BGR
+                    processed = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+                else:
+                    processed = enhanced
+
+            # Applica una griglia se abilitata
+            if self._show_grid:
+                height, width = processed.shape[:2]
+                grid_size = 50  # Dimensione delle celle della griglia
+
+                # Disegna linee orizzontali
+                for y in range(0, height, grid_size):
+                    if len(processed.shape) == 3:
+                        cv2.line(processed, (0, y), (width, y), (0, 255, 0), 1)
+                    else:
+                        cv2.line(processed, (0, y), (width, y), 200, 1)
+
+                # Disegna linee verticali
+                for x in range(0, width, grid_size):
+                    if len(processed.shape) == 3:
+                        cv2.line(processed, (x, 0), (x, height), (0, 255, 0), 1)
+                    else:
+                        cv2.line(processed, (x, 0), (x, height), 200, 1)
+
+            # Rileva e disegna caratteristiche se abilitato
+            if self._show_features:
+                # Crea un rilevatore di feature
+                feature_detector = cv2.FastFeatureDetector_create(threshold=25)
+
+                # Rileva keypoints
+                keypoints = feature_detector.detect(gray, None)
+
+                # Disegna keypoints sul frame
+                if len(processed.shape) == 3:
+                    processed = cv2.drawKeypoints(
+                        processed, keypoints, None, (0, 0, 255),
+                        cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
+                    )
+                else:
+                    processed = cv2.drawKeypoints(
+                        cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR), keypoints, None,
+                        (0, 0, 255), cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
+                    )
+
+            return processed
+
+    def set_options(self, show_grid: bool, show_features: bool, enhance_contrast: bool):
+        """Imposta le opzioni di visualizzazione."""
+        with QMutexLocker(self._mutex):
+            self._show_grid = show_grid
+            self._show_features = show_features
+            self._enhance_contrast = enhance_contrast
+
+    def stop(self):
+        """Ferma il thread di elaborazione."""
+        self._running = False
+        # Attendi la terminazione
+        self.wait(1000)  # timeout di 1 secondo
+        logger.info("Frame processor fermato")
+
 
 class StreamView(QWidget):
     """
