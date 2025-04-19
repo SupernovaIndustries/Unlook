@@ -3,8 +3,10 @@
 
 """
 Gestore per la ricezione degli stream video dal server UnLook.
+Versione migliorata con gestione degli errori e robustezza aumentata.
 """
 
+import json
 import logging
 import time
 import threading
@@ -13,7 +15,7 @@ import numpy as np
 from typing import Dict, Any, Optional, Callable, Tuple, List
 
 import zmq
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, Signal, Slot, QTimer, QMutex, QMutexLocker
 
 try:
     from client.utils.thread_safe_queue import ThreadSafeQueue
@@ -27,7 +29,7 @@ logger = logging.getLogger(__name__)
 class StreamReceiver(QObject):
     """
     Riceve e gestisce gli stream video dal server UnLook.
-    Supporta streaming JPEG.
+    Supporta streaming JPEG con riconnessione automatica.
     """
 
     # Segnali
@@ -46,22 +48,28 @@ class StreamReceiver(QObject):
         self._running = False
         self._paused = False
         self._cameras_receiving = set()
+        self._connected = False
+        self._reconnect_timer = QTimer(self)
+        self._reconnect_timer.timeout.connect(self._attempt_reconnect)
+        self._reconnect_attempts = 0
+        self._max_reconnect_attempts = 5
+        self._last_frame_time = 0
+        self._frame_timeout = 5.0  # secondi
 
         # Socket ZeroMQ
-        self._context = zmq.Context()
+        self._context = None
         self._socket = None
+        self._socket_mutex = QMutex()
 
         # Thread di ricezione
         self._receiver_thread = None
+        self._processor_threads = {}
 
         # Code di frame
         self._frame_queues = {
             0: ThreadSafeQueue(maxsize=queue_size),  # Camera sinistra
             1: ThreadSafeQueue(maxsize=queue_size)  # Camera destra
         }
-
-        # Thread di processamento
-        self._processor_threads = {}
 
         # Statistiche
         self._stats = {
@@ -90,30 +98,97 @@ class StreamReceiver(QObject):
         logger.info(f"Avvio dello StreamReceiver {self.host}:{self.port}")
 
         try:
-            # Crea il socket ZeroMQ
-            self._socket = self._context.socket(zmq.SUB)
-
-            # Configura il socket
-            self._socket.setsockopt(zmq.LINGER, 0)  # Non aspettare alla chiusura
-            self._socket.connect(f"tcp://{self.host}:{self.port}")
-            self._socket.setsockopt(zmq.SUBSCRIBE, b"")  # Sottoscrivi a tutti i messaggi
-
             # Imposta lo stato
             self._running = True
             self._paused = False
+            self._reconnect_attempts = 0
+
+            # Crea il contesto ZeroMQ (se non esiste già)
+            if not self._context:
+                self._context = zmq.Context()
+
+            # Inizializza la connessione
+            self._initialize_connection()
 
             # Avvia il thread di ricezione
             self._receiver_thread = threading.Thread(target=self._receive_loop)
             self._receiver_thread.daemon = True
             self._receiver_thread.start()
 
-            logger.info(f"StreamReceiver avviato su {self.host}:{self.port}")
             return True
 
         except Exception as e:
             logger.error(f"Errore nell'avvio dello StreamReceiver: {e}")
             self._cleanup()
             return False
+
+    def _initialize_connection(self):
+        """Inizializza la connessione ZeroMQ."""
+        with QMutexLocker(self._socket_mutex):
+            try:
+                # Chiudi il socket esistente se presente
+                if self._socket:
+                    try:
+                        self._socket.close()
+                    except:
+                        pass
+                    self._socket = None
+
+                # Crea un nuovo socket
+                self._socket = self._context.socket(zmq.SUB)
+
+                # Configura il socket
+                self._socket.setsockopt(zmq.LINGER, 100)  # Non aspettare troppo alla chiusura
+                self._socket.setsockopt(zmq.RCVHWM, 10)  # Limita la coda di ricezione hardware
+                self._socket.setsockopt(zmq.RCVTIMEO, 1000)  # Timeout di ricezione di 1 secondo
+                self._socket.setsockopt(zmq.RECONNECT_IVL, 100)  # 100ms tra tentativi di riconnessione
+                self._socket.setsockopt(zmq.RECONNECT_IVL_MAX, 5000)  # Max 5 secondi tra tentativi
+
+                # Sottoscrivi a tutti i messaggi
+                self._socket.setsockopt(zmq.SUBSCRIBE, b"")
+
+                # Connetti al server
+                endpoint = f"tcp://{self.host}:{self.port}"
+                self._socket.connect(endpoint)
+
+                logger.info(f"Connessione ZeroMQ stabilita con {endpoint}")
+                self._connected = True
+
+            except Exception as e:
+                logger.error(f"Errore nell'inizializzazione della connessione: {e}")
+                self._connected = False
+                raise
+
+    def _attempt_reconnect(self):
+        """Tenta di riconnettersi al server."""
+        if not self._running or self._connected:
+            self._reconnect_timer.stop()
+            return
+
+        self._reconnect_attempts += 1
+        logger.info(f"Tentativo di riconnessione {self._reconnect_attempts}/{self._max_reconnect_attempts}")
+
+        if self._reconnect_attempts > self._max_reconnect_attempts:
+            logger.error("Numero massimo di tentativi di riconnessione raggiunto")
+            self._reconnect_timer.stop()
+
+            # Emetti errori per tutte le camere attive
+            for camera_index in self._cameras_receiving:
+                self.stream_error.emit(camera_index, "Connessione persa, impossibile riconnettersi")
+
+            # Ferma lo streaming
+            self.stop()
+            return
+
+        try:
+            self._initialize_connection()
+            logger.info("Riconnessione riuscita")
+            self._reconnect_timer.stop()
+            self._connected = True
+        except Exception as e:
+            logger.error(f"Errore nella riconnessione: {e}")
+            # Aumenta progressivamente il tempo tra i tentativi
+            self._reconnect_timer.setInterval(1000 * self._reconnect_attempts)
 
     def stop(self):
         """Ferma la ricezione dello stream."""
@@ -124,6 +199,10 @@ class StreamReceiver(QObject):
 
         # Imposta lo stato
         self._running = False
+
+        # Ferma il timer di riconnessione
+        if self._reconnect_timer.isActive():
+            self._reconnect_timer.stop()
 
         # Attendi la terminazione del thread di ricezione
         if self._receiver_thread and self._receiver_thread.is_alive():
@@ -179,40 +258,61 @@ class StreamReceiver(QObject):
         logger.info("Thread di ricezione avviato")
 
         try:
-            # Setup poller per timeout più preciso
-            poller = zmq.Poller()
-            poller.register(self._socket, zmq.POLLIN)
-
             while self._running:
                 try:
-                    # Usa il poller con timeout
-                    socks = dict(poller.poll(500))  # 500ms di timeout
+                    if not self._connected:
+                        # Se non siamo connessi, attendi un po' e riprova
+                        if not self._reconnect_timer.isActive():
+                            # Avvia il timer di riconnessione solo se non è già attivo
+                            self._reconnect_timer.start(1000)  # 1 secondo
+                        time.sleep(0.1)
+                        continue
 
-                    # Se non ci sono messaggi, continua
-                    if self._socket not in socks:
+                    # Verifica timeout dei frame
+                    if self._last_frame_time > 0 and time.time() - self._last_frame_time > self._frame_timeout:
+                        logger.warning(f"Nessun frame ricevuto negli ultimi {self._frame_timeout} secondi")
+                        self._connected = False
+                        if not self._reconnect_timer.isActive():
+                            self._reconnect_timer.start(1000)
                         continue
 
                     # Ricevi il messaggio (header JSON e dati binari)
-                    try:
-                        # Ricevi l'header
-                        header_data = self._socket.recv()
+                    with QMutexLocker(self._socket_mutex):
+                        try:
+                            # Ricevi l'header
+                            header_data = self._socket.recv()
 
-                        # Assicurati che ci siano altri dati da ricevere
-                        if not self._socket.get(zmq.RCVMORE):
-                            logger.warning("Ricevuto header senza dati del frame")
+                            # Aggiorna il timestamp dell'ultimo frame
+                            self._last_frame_time = time.time()
+
+                            # Assicurati che ci siano altri dati da ricevere
+                            if not self._socket.get(zmq.RCVMORE):
+                                logger.warning("Ricevuto header senza dati del frame")
+                                continue
+
+                            # Ricevi i dati del frame
+                            frame_data = self._socket.recv()
+
+                            # Decodifica l'header
+                            header = json.loads(header_data.decode('utf-8'))
+
+                            # Reset del contatore di tentativi di riconnessione
+                            self._reconnect_attempts = 0
+
+                        except zmq.ZMQError as e:
+                            if e.errno == zmq.EAGAIN:
+                                # Timeout di ricezione, continua
+                                continue
+                            logger.error(f"Errore ZMQ nella ricezione: {e}")
+                            if e.errno in (zmq.ETERM, zmq.ENOTSOCK, zmq.ENOTSUP):
+                                # Errori fatali
+                                self._connected = False
+                                if not self._reconnect_timer.isActive():
+                                    self._reconnect_timer.start(1000)
                             continue
-
-                        # Ricevi i dati del frame
-                        frame_data = self._socket.recv()
-
-                        # Decodifica l'header
-                        header = json.loads(header_data.decode('utf-8'))
-                    except zmq.ZMQError as e:
-                        logger.error(f"Errore ZMQ nella ricezione: {e}")
-                        continue
-                    except Exception as e:
-                        logger.error(f"Errore nella decodifica dell'header: {e}")
-                        continue
+                        except Exception as e:
+                            logger.error(f"Errore nella decodifica dell'header: {e}")
+                            continue
 
                     # Salta i frame se in pausa
                     if self._paused:
@@ -258,7 +358,7 @@ class StreamReceiver(QObject):
                 self._start_processor(camera_index, format_str, resolution)
                 self.stream_started.emit(camera_index)
 
-            # Aggiungi il frame alla coda
+            # Aggiungi il frame alla coda (non bloccare se la coda è piena)
             self._frame_queues[camera_index].put((
                 frame_number, timestamp, format_str, resolution, data
             ), block=False)
@@ -366,6 +466,10 @@ class StreamReceiver(QObject):
                         except Exception as e:
                             logger.error(f"Errore nella decodifica JPEG: {e}")
                             continue
+                    elif format_str.lower() == "h264":
+                        # Per ora, saltiamo i frame H.264 (richiederebbe un decoder specifico)
+                        logger.warning("Formato H264 ricevuto ma non supportato dal StreamReceiver")
+                        continue
                     else:
                         # Formato non supportato
                         logger.warning(f"Formato frame non supportato: {format_str}")
@@ -401,12 +505,13 @@ class StreamReceiver(QObject):
     def _cleanup(self):
         """Pulisce le risorse."""
         # Chiudi il socket
-        if self._socket:
-            try:
-                self._socket.close()
-            except:
-                pass
-            self._socket = None
+        with QMutexLocker(self._socket_mutex):
+            if self._socket:
+                try:
+                    self._socket.close()
+                except:
+                    pass
+                self._socket = None
 
         # Termina il context ZMQ
         if self._context:
@@ -423,7 +528,4 @@ class StreamReceiver(QObject):
         # Reimposta lo stato
         self._cameras_receiving = set()
         self._processor_threads = {}
-
-
-# Import json qui per evitare errori di circularità
-import json
+        self._connected = False

@@ -4,7 +4,7 @@
 """
 UnLook Scanner Server - Applicazione server per il Raspberry Pi
 Gestisce le camere e lo streaming video verso il client.
-Versione semplificata con meno controlli e timeout.
+Versione migliorata con maggiore stabilità e robustezza.
 """
 
 import os
@@ -41,10 +41,15 @@ logging.basicConfig(
 logger = logging.getLogger("UnLookServer")
 
 # Importazioni necessarie
-import zmq
-import numpy as np
-from picamera2 import Picamera2
-import cv2
+try:
+    import zmq
+    import numpy as np
+    from picamera2 import Picamera2
+    import cv2
+except ImportError as e:
+    logger.error(f"Dipendenza mancante: {e}")
+    logger.error("Installa le dipendenze necessarie con: pip install pyzmq numpy picamera2 opencv-python")
+    sys.exit(1)
 
 
 class UnLookServer:
@@ -181,6 +186,17 @@ class UnLookServer:
             with open(config_path, 'r') as f:
                 config = json.load(f)
                 logger.info(f"Configurazione caricata da: {config_path}")
+
+                # Assicura che broadcast_interval sia presente
+                if "server" in config and "broadcast_interval" not in config["server"]:
+                    config["server"]["broadcast_interval"] = default_config["server"]["broadcast_interval"]
+                    logger.info(
+                        f"Aggiunto broadcast_interval mancante: {default_config['server']['broadcast_interval']}")
+
+                # Salva la configurazione aggiornata
+                with open(config_path, 'w') as f:
+                    json.dump(config, f, indent=2)
+
                 return config
         except Exception as e:
             logger.error(f"Errore nel caricamento della configurazione: {e}")
@@ -368,6 +384,12 @@ class UnLookServer:
         Loop principale per il servizio di broadcast.
         """
         discovery_port = self.config["server"]["discovery_port"]
+
+        # Assicura che broadcast_interval sia presente
+        if "broadcast_interval" not in self.config["server"]:
+            self.config["server"]["broadcast_interval"] = 1.0
+            logger.warning("broadcast_interval mancante, impostato a 1.0")
+
         broadcast_interval = self.config["server"]["broadcast_interval"]
         broadcast_address = "255.255.255.255"  # Indirizzo di broadcast
 
@@ -377,6 +399,7 @@ class UnLookServer:
         logger.info(f"Broadcast loop avviato (indirizzo: {broadcast_address})")
         logger.info(f"Inviando sulla porta discovery: {discovery_port}")
         logger.info(f"Indirizzo IP locale: {local_ip}")
+        logger.info(f"Intervallo di broadcast: {broadcast_interval} secondi")
 
         msg_count = 0
         try:
@@ -447,35 +470,47 @@ class UnLookServer:
         try:
             while self.running:
                 try:
-                    # Attendi un comando - questo blocca finché non arriva un messaggio
-                    # Non utilizziamo timeout qui per far sì che la comunicazione sia più stabile
-                    message_data = self.command_socket.recv()
+                    # Attendi un comando - questo blocca finché non arriva un messaggio o il server si ferma
+                    poller = zmq.Poller()
+                    poller.register(self.command_socket, zmq.POLLIN)
 
-                    # Decodifica il messaggio
-                    message = json.loads(message_data.decode('utf-8'))
-                    command_type = message.get('type', '')
-                    logger.info(f"Comando ricevuto: {command_type}")
+                    socks = dict(poller.poll(1000))  # 1 secondo di timeout
 
-                    # Processa il comando
-                    response = self._process_command(message)
+                    if self.command_socket in socks and socks[self.command_socket] == zmq.POLLIN:
+                        # Ricezione del messaggio
+                        message_data = self.command_socket.recv()
 
-                    # Invia la risposta
-                    try:
-                        self.command_socket.send_json(response)
-                    except Exception as e:
-                        logger.error(f"Errore nell'invio della risposta: {e}")
+                        # Decodifica il messaggio
+                        message = json.loads(message_data.decode('utf-8'))
+                        command_type = message.get('type', '')
+                        logger.info(f"Comando ricevuto: {command_type}")
+
+                        # Processa il comando
+                        response = self._process_command(message)
+
+                        # Invia la risposta
+                        try:
+                            self.command_socket.send_json(response)
+                        except Exception as e:
+                            logger.error(f"Errore nell'invio della risposta: {e}")
 
                 except zmq.ZMQError as e:
+                    if e.errno == zmq.ETERM:
+                        # Il contesto è stato terminato
+                        logger.info("Contesto ZMQ terminato, uscita dal command loop")
+                        break
                     logger.error(f"Errore ZMQ nel command loop: {e}")
-                    time.sleep(0.1)  # Breve pausa in caso di errore
                 except Exception as e:
                     logger.error(f"Errore nel command loop: {e}")
-                    time.sleep(0.1)  # Breve pausa in caso di errore
+
+                # Breve pausa per evitare di sovraccaricare la CPU in caso di errori continui
+                if not self.running:
+                    break
 
         except Exception as e:
             logger.error(f"Errore fatale nel command loop: {e}")
-
-        logger.info("Command loop terminato")
+        finally:
+            logger.info("Command loop terminato")
 
     def _process_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
         """

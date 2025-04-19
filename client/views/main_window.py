@@ -3,6 +3,7 @@
 
 """
 Finestra principale dell'applicazione UnLook Client.
+Versione migliorata con supporto configurazione integrato.
 """
 
 import logging
@@ -11,12 +12,10 @@ from typing import Optional, List
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QComboBox, QStatusBar, QToolBar,
-    QDockWidget, QSplitter, QFrame, QTabWidget, QMessageBox,
-    QMenu, QFileDialog, QDialog
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QComboBox, QStatusBar, QToolBar, QDockWidget, QSplitter, QFrame,
+    QTabWidget, QMessageBox, QMenu, QFileDialog, QDialog, QAction
 )
-from PySide6.QtGui import QAction  # Importa QAction per le azioni del menu
 from PySide6.QtCore import Qt, Slot, QSettings, QSize, QPoint
 from PySide6.QtGui import QIcon, QPixmap, QFont
 
@@ -24,7 +23,6 @@ from client.controllers.scanner_controller import ScannerController
 from client.models.scanner_model import Scanner, ScannerStatus
 from client.views.scanner_view import ScannerDiscoveryWidget
 from client.views.streaming_view import DualStreamView
-from client.views.config_view import ApplicationConfigWidget
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +46,8 @@ class AppSettingsDialog(QDialog):
         config_manager = ConfigManager()
         config_controller = ConfigController(config_manager)
 
+        # Importa qui per evitare importazioni circolari
+        from client.views.config_view import ApplicationConfigWidget
         self.app_config_widget = ApplicationConfigWidget(config_controller)
         layout.addWidget(self.app_config_widget)
 
@@ -174,6 +174,7 @@ class MainWindow(QMainWindow):
         # Azione Impostazioni Applicazione
         settings_action = QAction("&Impostazioni applicazione", self)
         settings_action.triggered.connect(self._show_app_settings)
+        settings_action.setShortcut("Ctrl+,")
         file_menu.addAction(settings_action)
 
         # Azione Imposta directory output
@@ -421,8 +422,21 @@ class MainWindow(QMainWindow):
         """Gestisce il cambio di scheda."""
         # Aggiorna l'interfaccia in base alla scheda selezionata
         if index == self.TabIndex.STREAMING.value:
-            # Scheda di streaming
-            pass
+            # Verifica se lo streaming è attivo
+            selected_scanner = self.scanner_controller.selected_scanner
+            if selected_scanner and selected_scanner.status == ScannerStatus.CONNECTED:
+                # Se il dispositivo è connesso ma lo streaming non è attivo, chiede all'utente
+                # se vuole avviarlo
+                if not self.streaming_widget.is_streaming():
+                    response = QMessageBox.question(
+                        self,
+                        "Avvio streaming",
+                        f"Vuoi avviare lo streaming dal dispositivo {selected_scanner.name}?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.Yes
+                    )
+                    if response == QMessageBox.Yes:
+                        self._toggle_streaming()
 
     @Slot()
     def _toggle_discovery(self):
@@ -473,9 +487,8 @@ class MainWindow(QMainWindow):
             # Avvia lo streaming
             success = self.streaming_widget.start_streaming(selected_scanner)
             if success:
-                self.action_toggle_streaming.setText("Ferma streaming")
-                self.action_capture.setEnabled(True)
-                self.status_bar.showMessage("Streaming avviato", 3000)
+                self.status_bar.showMessage("Avvio streaming in corso...", 3000)
+                # Il pulsante verrà aggiornato quando lo streaming sarà effettivamente avviato
         else:
             # Ferma lo streaming
             self.streaming_widget.stop_streaming()

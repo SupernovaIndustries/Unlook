@@ -3,6 +3,7 @@
 
 """
 Widget per la visualizzazione dello streaming video dual-camera degli scanner UnLook.
+Versione migliorata con configurazioni integrate e gestione delle connessioni più robusta.
 """
 
 import logging
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QFormLayout, QComboBox, QSlider, QCheckBox,
     QSpinBox, QDoubleSpinBox, QFrame, QSplitter, QFileDialog,
-    QMessageBox, QTabWidget
+    QMessageBox, QTabWidget, QRadioButton, QButtonGroup, QLineEdit
 )
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QMutex, QMutexLocker
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
@@ -51,31 +52,36 @@ class FrameProcessor(QThread):
         logger.info("Frame processor avviato")
 
         while self._running:
-            # Attendi un nuovo frame dalla coda
-            camera_index, frame = self._frame_queue.get(block=True, timeout=0.1)
+            try:
+                # Attendi un nuovo frame dalla coda
+                camera_index, frame = self._frame_queue.get(block=True, timeout=0.1)
 
-            # Se la coda è vuota, continua
-            if frame is None:
-                continue
+                # Se la coda è vuota, continua
+                if frame is None:
+                    continue
 
-            # Elabora il frame
-            processed_frame = self._process_frame(frame)
+                # Elabora il frame
+                processed_frame = self._process_frame(frame)
 
-            # Converti in QImage
-            height, width = processed_frame.shape[:2]
-            bytes_per_line = 3 * width
+                # Converti in QImage
+                height, width = processed_frame.shape[:2]
+                bytes_per_line = 3 * width
 
-            # OpenCV usa BGR, Qt usa RGB
-            if len(processed_frame.shape) == 3 and processed_frame.shape[2] == 3:
-                # Immagine a colori
-                rgb_image = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-                qimage = QImage(rgb_image.data, width, height, bytes_per_line, QImage.Format_RGB888)
-            else:
-                # Immagine in scala di grigi
-                qimage = QImage(processed_frame.data, width, height, width, QImage.Format_Grayscale8)
+                # OpenCV usa BGR, Qt usa RGB
+                if len(processed_frame.shape) == 3 and processed_frame.shape[2] == 3:
+                    # Immagine a colori
+                    rgb_image = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+                    qimage = QImage(rgb_image.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                else:
+                    # Immagine in scala di grigi
+                    qimage = QImage(processed_frame.data, width, height, width, QImage.Format_Grayscale8)
 
-            # Emetti il segnale con il frame elaborato
-            self.new_frame_ready.emit(camera_index, qimage)
+                # Emetti il segnale con il frame elaborato
+                self.new_frame_ready.emit(camera_index, qimage)
+            except Exception as e:
+                if self._running:  # Solo se il thread è ancora attivo
+                    logger.error(f"Errore nel frame processor: {str(e)}")
+                    time.sleep(0.1)  # Evita di sovraccaricare il sistema in caso di errori ripetuti
 
     def _process_frame(self, frame):
         """
@@ -280,6 +286,12 @@ class DualStreamView(QWidget):
         self._scanner: Optional[Scanner] = None
         self._streaming = False
         self._stream_receiver = None
+        self._connection_manager = None  # Memorizza il riferimento al connection manager
+        self._retry_timer = QTimer()
+        self._retry_timer.setInterval(1000)  # 1 secondo
+        self._retry_timer.timeout.connect(self._check_connection)
+        self._retry_count = 0
+        self._max_retries = 5
 
         # Code per i frame
         self._frame_queues = [ThreadSafeQueue(), ThreadSafeQueue()]
@@ -324,48 +336,97 @@ class DualStreamView(QWidget):
         streams_layout.addWidget(splitter)
         main_layout.addWidget(streams_container)
 
-        # Pannello di controllo - Aggiungiamo un TabWidget per separare i controlli
+        # Pannello di controllo
         control_panel = QTabWidget()
 
-        # Tab per i controlli di visualizzazione
-        view_controls = QWidget()
-        view_layout = QVBoxLayout(view_controls)
+        # Tab per i controlli di visualizzazione e fotocamera
+        camera_controls = QWidget()
+        camera_layout = QVBoxLayout(camera_controls)
 
         # Opzioni di visualizzazione
-        view_options_layout = QHBoxLayout()
+        view_options_group = QGroupBox("Opzioni di visualizzazione")
+        view_options_layout = QVBoxLayout(view_options_group)
 
+        # Checkboxes per le opzioni di visualizzazione
+        options_layout = QHBoxLayout()
         self.grid_checkbox = QCheckBox("Mostra griglia")
         self.features_checkbox = QCheckBox("Mostra caratteristiche")
         self.enhance_checkbox = QCheckBox("Migliora contrasto")
 
-        view_options_layout.addWidget(self.grid_checkbox)
-        view_options_layout.addWidget(self.features_checkbox)
-        view_options_layout.addWidget(self.enhance_checkbox)
-        view_options_layout.addStretch(1)
+        options_layout.addWidget(self.grid_checkbox)
+        options_layout.addWidget(self.features_checkbox)
+        options_layout.addWidget(self.enhance_checkbox)
+        options_layout.addStretch(1)
 
-        view_layout.addLayout(view_options_layout)
+        view_options_layout.addLayout(options_layout)
+        camera_layout.addWidget(view_options_group)
+
+        # Gruppo dei parametri del sensore
+        sensor_group = QGroupBox("Parametri fotocamera")
+        sensor_layout = QFormLayout(sensor_group)
+
+        # Layout esposizione camera sinistra
+        left_exposure_layout = QHBoxLayout()
+        self.left_exposure_slider = QSlider(Qt.Horizontal)
+        self.left_exposure_slider.setRange(0, 100)
+        self.left_exposure_slider.setValue(50)
+        self.left_exposure_value = QLabel("50")
+        self.left_exposure_slider.valueChanged.connect(lambda v: self.left_exposure_value.setText(str(v)))
+        left_exposure_layout.addWidget(self.left_exposure_slider)
+        left_exposure_layout.addWidget(self.left_exposure_value)
+        sensor_layout.addRow("Esposizione Camera SX:", left_exposure_layout)
+
+        # Layout esposizione camera destra
+        right_exposure_layout = QHBoxLayout()
+        self.right_exposure_slider = QSlider(Qt.Horizontal)
+        self.right_exposure_slider.setRange(0, 100)
+        self.right_exposure_slider.setValue(50)
+        self.right_exposure_value = QLabel("50")
+        self.right_exposure_slider.valueChanged.connect(lambda v: self.right_exposure_value.setText(str(v)))
+        right_exposure_layout.addWidget(self.right_exposure_slider)
+        right_exposure_layout.addWidget(self.right_exposure_value)
+        sensor_layout.addRow("Esposizione Camera DX:", right_exposure_layout)
+
+        # Pulsante per applicare le impostazioni
+        self.apply_settings_button = QPushButton("Applica impostazioni")
+        self.apply_settings_button.setEnabled(False)
+        self.apply_settings_button.clicked.connect(self._apply_camera_settings)
+        sensor_layout.addRow("", self.apply_settings_button)
+
+        camera_layout.addWidget(sensor_group)
+
+        # Pulsante per la cattura
+        capture_layout = QHBoxLayout()
+        self.capture_button = QPushButton("Acquisisci Frame")
+        self.capture_button.setEnabled(False)
+        self.capture_button.clicked.connect(self.capture_frame)
+        capture_layout.addStretch(1)
+        capture_layout.addWidget(self.capture_button)
+        camera_layout.addLayout(capture_layout)
 
         # Tab per i controlli di scansione
         scan_controls = QWidget()
         scan_layout = QVBoxLayout(scan_controls)
 
-        # Intestazione
-        scan_header = QLabel("Controlli di Scansione")
-        scan_header.setAlignment(Qt.AlignCenter)
-        font = scan_header.font()
-        font.setBold(True)
-        scan_header.setFont(font)
-        scan_layout.addWidget(scan_header)
-
         # Gruppo di controlli per la scansione
         scan_group = QGroupBox("Parametri di Scansione")
         scan_form = QFormLayout(scan_group)
 
+        # Nome scansione
+        self.scan_name_edit = QLineEdit("Nuova scansione")
+        scan_form.addRow("Nome scansione:", self.scan_name_edit)
+
         # Tipo di scansione
-        self.scan_type_combo = QComboBox()
-        self.scan_type_combo.addItem("Luce strutturata", "structured_light")
-        self.scan_type_combo.addItem("Time-of-Flight", "tof")
-        scan_form.addRow("Tipo di scansione:", self.scan_type_combo)
+        scan_type_layout = QHBoxLayout()
+        self.scan_type_group = QButtonGroup(self)
+        self.scan_type_structured = QRadioButton("Luce strutturata")
+        self.scan_type_tof = QRadioButton("Time-of-Flight")
+        self.scan_type_structured.setChecked(True)
+        self.scan_type_group.addButton(self.scan_type_structured)
+        self.scan_type_group.addButton(self.scan_type_tof)
+        scan_type_layout.addWidget(self.scan_type_structured)
+        scan_type_layout.addWidget(self.scan_type_tof)
+        scan_form.addRow("Tipo di scansione:", scan_type_layout)
 
         # Risoluzione
         self.resolution_combo = QComboBox()
@@ -399,135 +460,75 @@ class DualStreamView(QWidget):
         scan_buttons_layout = QHBoxLayout()
 
         self.start_scan_button = QPushButton("Avvia Scansione")
-        self.start_scan_button.setEnabled(False)  # Disabilitato fino a quando non si è connessi
+        self.start_scan_button.setEnabled(False)
+        self.start_scan_button.clicked.connect(self._on_start_scan_clicked)
 
         self.save_scan_button = QPushButton("Salva Scansione")
-        self.save_scan_button.setEnabled(False)  # Disabilitato fino a quando non c'è una scansione
+        self.save_scan_button.setEnabled(False)
+        self.save_scan_button.clicked.connect(self._on_save_scan_clicked)
 
         scan_buttons_layout.addWidget(self.start_scan_button)
         scan_buttons_layout.addWidget(self.save_scan_button)
 
         scan_layout.addLayout(scan_buttons_layout)
-        scan_layout.addStretch(1)
-
-        # Tab per i controlli delle camere
-        camera_controls = QWidget()
-        camera_layout = QVBoxLayout(camera_controls)
-
-        # Intestazione
-        camera_header = QLabel("Controlli Fotocamere")
-        camera_header.setAlignment(Qt.AlignCenter)
-        font = camera_header.font()
-        font.setBold(True)
-        camera_header.setFont(font)
-        camera_layout.addWidget(camera_header)
-
-        # Gruppo di controlli per la camera sinistra
-        left_camera_group = QGroupBox("Camera Sinistra")
-        left_camera_form = QFormLayout(left_camera_group)
-
-        # Esposizione
-        left_exposure_layout = QHBoxLayout()
-        self.left_exposure_slider = QSlider(Qt.Horizontal)
-        self.left_exposure_slider.setRange(0, 100)
-        self.left_exposure_slider.setValue(50)
-
-        self.left_exposure_label = QLabel("50")
-        self.left_exposure_slider.valueChanged.connect(lambda v: self.left_exposure_label.setText(str(v)))
-
-        left_exposure_layout.addWidget(self.left_exposure_slider)
-        left_exposure_layout.addWidget(self.left_exposure_label)
-        left_camera_form.addRow("Esposizione:", left_exposure_layout)
-
-        # Guadagno
-        left_gain_layout = QHBoxLayout()
-        self.left_gain_slider = QSlider(Qt.Horizontal)
-        self.left_gain_slider.setRange(0, 100)
-        self.left_gain_slider.setValue(50)
-
-        self.left_gain_label = QLabel("50")
-        self.left_gain_slider.valueChanged.connect(lambda v: self.left_gain_label.setText(str(v)))
-
-        left_gain_layout.addWidget(self.left_gain_slider)
-        left_gain_layout.addWidget(self.left_gain_label)
-        left_camera_form.addRow("Guadagno:", left_gain_layout)
-
-        camera_layout.addWidget(left_camera_group)
-
-        # Gruppo di controlli per la camera destra
-        right_camera_group = QGroupBox("Camera Destra")
-        right_camera_form = QFormLayout(right_camera_group)
-
-        # Esposizione
-        right_exposure_layout = QHBoxLayout()
-        self.right_exposure_slider = QSlider(Qt.Horizontal)
-        self.right_exposure_slider.setRange(0, 100)
-        self.right_exposure_slider.setValue(50)
-
-        self.right_exposure_label = QLabel("50")
-        self.right_exposure_slider.valueChanged.connect(lambda v: self.right_exposure_label.setText(str(v)))
-
-        right_exposure_layout.addWidget(self.right_exposure_slider)
-        right_exposure_layout.addWidget(self.right_exposure_label)
-        right_camera_form.addRow("Esposizione:", right_exposure_layout)
-
-        # Guadagno
-        right_gain_layout = QHBoxLayout()
-        self.right_gain_slider = QSlider(Qt.Horizontal)
-        self.right_gain_slider.setRange(0, 100)
-        self.right_gain_slider.setValue(50)
-
-        self.right_gain_label = QLabel("50")
-        self.right_gain_slider.valueChanged.connect(lambda v: self.right_gain_label.setText(str(v)))
-
-        right_gain_layout.addWidget(self.right_gain_slider)
-        right_gain_layout.addWidget(self.right_gain_label)
-        right_camera_form.addRow("Guadagno:", right_gain_layout)
-
-        camera_layout.addWidget(right_camera_group)
-
-        # Pulsanti per la cattura
-        capture_layout = QHBoxLayout()
-
-        self.capture_button = QPushButton("Acquisisci Frame")
-        self.capture_button.setEnabled(False)
-        self.capture_button.clicked.connect(self.capture_frame)
-
-        self.apply_camera_settings_button = QPushButton("Applica Impostazioni")
-        self.apply_camera_settings_button.setEnabled(False)
-
-        capture_layout.addWidget(self.capture_button)
-        capture_layout.addWidget(self.apply_camera_settings_button)
-
-        camera_layout.addLayout(capture_layout)
-        camera_layout.addStretch(1)
 
         # Aggiungi le schede al pannello di controllo
-        control_panel.addTab(view_controls, "Visualizzazione")
+        control_panel.addTab(camera_controls, "Fotocamera")
         control_panel.addTab(scan_controls, "Scansione")
-        control_panel.addTab(camera_controls, "Fotocamere")
 
         main_layout.addWidget(control_panel)
-
-        # Configura i segnali delle opzioni di visualizzazione
-        self.grid_checkbox.toggled.connect(self._update_visualization_options)
-        self.features_checkbox.toggled.connect(self._update_visualization_options)
-        self.enhance_checkbox.toggled.connect(self._update_visualization_options)
 
     def _connect_signals(self):
         """Collega i segnali dei processori di frame."""
         for i, processor in enumerate(self._frame_processors):
             processor.new_frame_ready.connect(self._on_new_frame)
 
-        # Collega anche i pulsanti di azione
-        if hasattr(self, 'start_scan_button'):
-            self.start_scan_button.clicked.connect(self._on_start_scan_clicked)
+        # Collega i checkbox di visualizzazione
+        self.grid_checkbox.toggled.connect(self._update_visualization_options)
+        self.features_checkbox.toggled.connect(self._update_visualization_options)
+        self.enhance_checkbox.toggled.connect(self._update_visualization_options)
 
-        if hasattr(self, 'save_scan_button'):
-            self.save_scan_button.clicked.connect(self._on_save_scan_clicked)
+    def _check_connection(self):
+        """Controlla lo stato della connessione e riprova se necessario."""
+        # Importa qui per evitare problemi di importazione circolare
+        from client.network.connection_manager import ConnectionManager
 
-        if hasattr(self, 'apply_camera_settings_button'):
-            self.apply_camera_settings_button.clicked.connect(self._on_apply_camera_settings_clicked)
+        if not self._connection_manager:
+            self._connection_manager = ConnectionManager()
+
+        if not self._scanner:
+            self._retry_timer.stop()
+            return
+
+        # Verifica se lo scanner è connesso
+        if self._connection_manager.is_connected(self._scanner.device_id):
+            logger.info(f"Connessione stabilita con {self._scanner.name}")
+
+            # Connessione stabilita, prova ad avviare lo streaming
+            self._retry_timer.stop()
+
+            # Avvia il vero streaming - ora che la connessione è confermata
+            self._start_actual_streaming()
+        else:
+            self._retry_count += 1
+            logger.info(f"Tentativo di connessione {self._retry_count}/{self._max_retries}")
+
+            if self._retry_count >= self._max_retries:
+                logger.error(f"Impossibile connettersi a {self._scanner.name} dopo {self._max_retries} tentativi")
+                self._retry_timer.stop()
+                QMessageBox.warning(
+                    self,
+                    "Errore di connessione",
+                    f"Impossibile connettersi a {self._scanner.name} dopo {self._max_retries} tentativi.\n"
+                    "Assicurati che lo scanner sia acceso e correttamente configurato."
+                )
+            else:
+                # Riprova a connettersi
+                self._connection_manager.connect(
+                    self._scanner.device_id,
+                    self._scanner.ip_address,
+                    self._scanner.port
+                )
 
     def start_streaming(self, scanner: Scanner) -> bool:
         """
@@ -537,7 +538,7 @@ class DualStreamView(QWidget):
             scanner: Scanner da cui ricevere lo streaming
 
         Returns:
-            True se lo streaming è stato avviato, False altrimenti
+            True se il processo di streaming è stato avviato, False altrimenti
         """
         if self._streaming:
             logger.warning("Streaming già attivo")
@@ -546,12 +547,41 @@ class DualStreamView(QWidget):
         # Memorizza lo scanner
         self._scanner = scanner
 
+        # Importa qui per evitare problemi di importazione circolare
+        from client.network.connection_manager import ConnectionManager
+
+        self._connection_manager = ConnectionManager()
+
+        # Verifica che lo scanner sia connesso prima di avviare lo streaming
+        if not self._connection_manager.is_connected(scanner.device_id):
+            logger.warning(f"Scanner {scanner.name} non connesso, tentativo di connessione")
+
+            # Connetti allo scanner
+            self._connection_manager.connect(scanner.device_id, scanner.ip_address, scanner.port)
+
+            # Imposta il timer per controllare se la connessione viene stabilita
+            self._retry_count = 0
+            self._retry_timer.start()
+
+            # Ritorna True per indicare che il processo è iniziato (anche se lo streaming non è ancora attivo)
+            return True
+        else:
+            # Scanner già connesso, avvia subito lo streaming
+            return self._start_actual_streaming()
+
+    def _start_actual_streaming(self) -> bool:
+        """
+        Avvia effettivamente lo streaming dopo che la connessione è stata stabilita.
+
+        Returns:
+            True se lo streaming è stato avviato con successo, False altrimenti
+        """
         try:
             # Crea un ricevitore di stream per questo scanner
             from client.network.stream_receiver import StreamReceiver
             stream_receiver = StreamReceiver(
-                host=scanner.ip_address,
-                port=scanner.port + 1  # La porta di streaming è command_port + 1
+                host=self._scanner.ip_address,
+                port=self._scanner.port + 1  # La porta di streaming è command_port + 1
             )
 
             # Collega i segnali del ricevitore
@@ -569,12 +599,10 @@ class DualStreamView(QWidget):
             self._stream_receiver = stream_receiver
 
             # Invia un messaggio al server per avviare lo streaming
-            from client.network.connection_manager import ConnectionManager
-            connection_manager = ConnectionManager()
-            if connection_manager.is_connected(scanner.device_id):
-                connection_manager.send_message(scanner.device_id, "START_STREAM")
-            else:
-                logger.error(f"Scanner {scanner.name} non connesso")
+            if not self._connection_manager.send_message(self._scanner.device_id, "START_STREAM"):
+                logger.error(f"Errore nell'invio del comando START_STREAM a {self._scanner.name}")
+                stream_receiver.stop()
+                self._stream_receiver = None
                 return False
 
             # Avvia i processori di frame
@@ -582,16 +610,16 @@ class DualStreamView(QWidget):
                 processor.start()
 
             # Cambia lo stato dello scanner
-            scanner.status = ScannerStatus.STREAMING
+            self._scanner.status = ScannerStatus.STREAMING
 
             # Imposta lo stato di streaming
             self._streaming = True
-            logger.info(f"Streaming avviato da {scanner.name}")
+            logger.info(f"Streaming avviato da {self._scanner.name}")
 
             # Abilita i pulsanti appropriati
             self.capture_button.setEnabled(True)
             self.start_scan_button.setEnabled(True)
-            self.apply_camera_settings_button.setEnabled(True)
+            self.apply_settings_button.setEnabled(True)
 
             return True
         except Exception as e:
@@ -605,17 +633,19 @@ class DualStreamView(QWidget):
 
         logger.info("Arresto dello streaming video...")
 
+        # Ferma il timer di retry se attivo
+        if self._retry_timer.isActive():
+            self._retry_timer.stop()
+
         # Ferma il ricevitore di stream
-        if hasattr(self, '_stream_receiver') and self._stream_receiver:
+        if self._stream_receiver:
             self._stream_receiver.stop()
             self._stream_receiver = None
 
         # Invia un messaggio al server per fermare lo streaming
-        if self._scanner:
-            from client.network.connection_manager import ConnectionManager
-            connection_manager = ConnectionManager()
-            if connection_manager.is_connected(self._scanner.device_id):
-                connection_manager.send_message(self._scanner.device_id, "STOP_STREAM")
+        if self._scanner and self._connection_manager:
+            if self._connection_manager.is_connected(self._scanner.device_id):
+                self._connection_manager.send_message(self._scanner.device_id, "STOP_STREAM")
 
         # Ferma i processori di frame
         for processor in self._frame_processors:
@@ -636,7 +666,8 @@ class DualStreamView(QWidget):
         # Disabilita i pulsanti
         self.capture_button.setEnabled(False)
         self.start_scan_button.setEnabled(False)
-        self.apply_camera_settings_button.setEnabled(False)
+        self.save_scan_button.setEnabled(False)
+        self.apply_settings_button.setEnabled(False)
 
     def is_streaming(self) -> bool:
         """Verifica se lo streaming è attivo."""
@@ -659,7 +690,6 @@ class DualStreamView(QWidget):
         for processor in self._frame_processors:
             processor.set_options(show_grid, show_features, enhance_contrast)
 
-    # Nuovo metodo per gestire i frame ricevuti dallo StreamReceiver
     @Slot(int, np.ndarray)
     def _on_frame_received(self, camera_index: int, frame: np.ndarray):
         """Gestisce l'arrivo di un nuovo frame dallo stream."""
@@ -693,11 +723,21 @@ class DualStreamView(QWidget):
             )
             return
 
+        # Ottieni le impostazioni di scansione
+        scan_name = self.scan_name_edit.text()
+        scan_type = "structured_light" if self.scan_type_structured.isChecked() else "tof"
+        resolution = self.resolution_combo.currentData()
+        quality = self.quality_slider.value()
+        color_capture = self.color_checkbox.isChecked()
+
+        # Log informativo
+        logger.info(f"Avvio scansione: {scan_name}, tipo: {scan_type}, res: {resolution}, qualità: {quality}")
+
         # Mostra un messaggio che indica che la scansione è in corso
         QMessageBox.information(
             self,
             "Scansione in corso",
-            "La scansione è in corso.\nQuesta funzionalità è in fase di sviluppo."
+            f"Scansione '{scan_name}' in corso.\nQuesta funzionalità è in fase di sviluppo."
         )
 
         # In futuro, qui implementeremo il codice per avviare la scansione effettiva
@@ -708,11 +748,14 @@ class DualStreamView(QWidget):
 
     def _on_save_scan_clicked(self):
         """Gestisce il clic sul pulsante Salva Scansione."""
+        scan_name = self.scan_name_edit.text()
+        safe_name = ''.join(c if c.isalnum() or c in '._- ' else '_' for c in scan_name)
+
         # Apri un dialogo per selezionare la posizione di salvataggio
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Salva Scansione",
-            str(Path.home() / "UnLook" / "scans" / f"scan_{int(time.time())}.ply"),
+            str(Path.home() / "UnLook" / "scans" / f"{safe_name}_{int(time.time())}.ply"),
             "PLY Files (*.ply);;All Files (*)"
         )
 
@@ -721,15 +764,17 @@ class DualStreamView(QWidget):
             QMessageBox.information(
                 self,
                 "Salvataggio in corso",
-                "Il salvataggio della scansione è in corso.\nQuesta funzionalità è in fase di sviluppo."
+                f"Il salvataggio della scansione '{scan_name}' è in corso.\n"
+                "Questa funzionalità è in fase di sviluppo."
             )
 
             # In futuro, qui implementeremo il codice per salvare la scansione
             # ...
 
-    def _on_apply_camera_settings_clicked(self):
-        """Gestisce il clic sul pulsante Applica Impostazioni."""
-        if not self._scanner or not self._streaming:
+    def _apply_camera_settings(self):
+        """Applica le impostazioni delle camere."""
+        if not self._scanner or not self._connection_manager or not self._connection_manager.is_connected(
+                self._scanner.device_id):
             QMessageBox.warning(
                 self,
                 "Errore",
@@ -737,41 +782,38 @@ class DualStreamView(QWidget):
             )
             return
 
-        # Raccoglie i valori dai controlli
+        # Raccogli le impostazioni
         left_exposure = self.left_exposure_slider.value()
-        left_gain = self.left_gain_slider.value()
         right_exposure = self.right_exposure_slider.value()
-        right_gain = self.right_gain_slider.value()
 
-        # Prepara la configurazione da inviare
+        # Crea il payload di configurazione
         config = {
             "camera": {
                 "left": {
-                    "exposure": left_exposure,
-                    "gain": left_gain
+                    "exposure": left_exposure
                 },
                 "right": {
-                    "exposure": right_exposure,
-                    "gain": right_gain
+                    "exposure": right_exposure
                 }
             }
         }
 
         # Invia la configurazione al server
-        from client.network.connection_manager import ConnectionManager
-        connection_manager = ConnectionManager()
-        if connection_manager.is_connected(self._scanner.device_id):
-            connection_manager.send_message(self._scanner.device_id, "SET_CONFIG", {"config": config})
+        if self._connection_manager.send_message(
+                self._scanner.device_id,
+                "SET_CONFIG",
+                {"config": config}
+        ):
             QMessageBox.information(
                 self,
-                "Impostazioni Applicate",
+                "Impostazioni applicate",
                 "Le impostazioni delle camere sono state applicate."
             )
         else:
             QMessageBox.warning(
                 self,
                 "Errore",
-                "Impossibile applicare le impostazioni: scanner non connesso."
+                "Impossibile applicare le impostazioni: errore di comunicazione."
             )
 
     def capture_frame(self) -> bool:
@@ -804,12 +846,14 @@ class DualStreamView(QWidget):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Salva i frame
+        saved_files = []
         for i, frame in frames:
             camera_name = "left" if i == 0 else "right"
             file_path = save_dir / f"unlook_{timestamp}_{camera_name}.png"
 
             # Salva l'immagine
             frame.save(str(file_path), "PNG")
+            saved_files.append(str(file_path))
             logger.info(f"Frame acquisito: {file_path}")
 
         # Chiedi all'utente se vuole aprire la directory
