@@ -567,19 +567,16 @@ class UnLookServer:
     def _process_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
         """
         Processa un comando ricevuto da un client.
-        Versione migliorata con gestione della disconnessione e tracciamento dell'attività.
+        Versione migliorata con supporto parametri di streaming avanzati.
+
+        Args:
+            command: Dizionario rappresentante il comando
+
+        Returns:
+            Dizionario di risposta
         """
         command_type = command.get('type', '')
-        logger.info(f"Elaborazione comando: {command_type}")
-
-        # Aggiorna il timestamp dell'ultima attività del client
-        self._last_client_activity = time.time()
-
-        # Ottieni l'indirizzo IP del client se disponibile
-        client_ip = command.get('client_ip', None)
-        if client_ip and client_ip != self.client_ip:
-            self.client_ip = client_ip
-            logger.info(f"Aggiornato indirizzo IP client: {client_ip}")
+        logger.info(f"Comando ricevuto: {command_type}")
 
         # Prepara una risposta base
         response = {
@@ -589,99 +586,61 @@ class UnLookServer:
 
         try:
             if command_type == 'PING':
-                # Comando ping/heartbeat
+                # Comando ping
                 response['timestamp'] = time.time()
-                # Considera il client connesso
-                self.client_connected = True
-                self.state["clients_connected"] = 1
 
             elif command_type == 'GET_STATUS':
                 # Aggiorna lo stato
                 self.state['uptime'] = time.time() - self.state['start_time']
+
                 # Aggiungi lo stato alla risposta
                 response['state'] = self.state
 
             elif command_type == 'START_STREAM':
-                # Avvia lo streaming
+                # Avvia lo streaming con supporto parametri avanzati
                 if not self.state["streaming"]:
-                    logger.info(f"Avvio streaming richiesto da client {self.client_ip}")
-
-                    # Reset delle statistiche di streaming
-                    self._frame_count = 0
-                    self._streaming_start_time = time.time()
-                    self._last_frame_time = 0
-
-                    # Imposta il nuovo valore di qualità JPEG se richiesto
+                    # Opzioni opzionali per lo streaming
                     if 'quality' in command and isinstance(command['quality'], int):
+                        # Limita qualità a un intervallo sicuro
                         self._jpeg_quality = max(70, min(95, command['quality']))
                         logger.info(f"Qualità JPEG impostata a {self._jpeg_quality}")
 
-                    # Imposta il nuovo target FPS se richiesto
                     if 'target_fps' in command and isinstance(command['target_fps'], int):
-                        target_fps = max(5, min(60, command['target_fps']))
-                        self._frame_interval = 1.0 / target_fps
-                        logger.info(
-                            f"Target FPS impostato a {target_fps} (intervallo={self._frame_interval * 1000:.1f}ms)")
+                        # Calcola intervallo target FPS e limita a un intervallo sicuro
+                        fps = max(5, min(60, command['target_fps']))
+                        self._frame_interval = 1.0 / fps
+                        logger.info(f"Target FPS impostato a {fps} (intervallo={self._frame_interval * 1000:.1f}ms)")
 
+                    # Flag per uso di dual camera
+                    dual_camera = command.get('dual_camera', True)
+
+                    # Avvia lo streaming
                     self.start_streaming()
+
+                    # Informazioni per il client
                     response['streaming'] = True
-                    response['message'] = "Streaming avviato"
+                    response['cameras'] = len(self.cameras)
+                    response['quality'] = self._jpeg_quality
+                    response['target_fps'] = int(1.0 / self._frame_interval)
+                    response['dual_camera'] = dual_camera and len(self.cameras) > 1
                 else:
-                    logger.info("Lo streaming è già attivo, ignorata richiesta di avvio")
                     response['streaming'] = True
                     response['message'] = "Streaming già attivo"
 
             elif command_type == 'STOP_STREAM':
                 # Ferma lo streaming
                 if self.state["streaming"]:
-                    logger.info(f"Arresto streaming richiesto da client {self.client_ip}")
                     self.stop_streaming()
                     response['streaming'] = False
-                    response['message'] = "Streaming arrestato"
                 else:
-                    logger.info("Lo streaming non è attivo, ignorata richiesta di arresto")
                     response['streaming'] = False
                     response['message'] = "Streaming non attivo"
-
-            elif command_type == 'DISCONNECT':
-                # Il client si disconnette esplicitamente
-                logger.info(f"Il client {self.client_ip} ha richiesto la disconnessione esplicita")
-
-                # Ferma lo streaming se attivo
-                if self.state["streaming"]:
-                    logger.info("Arresto dello streaming per disconnessione client")
-                    self.stop_streaming()
-
-                # Aggiorna lo stato
-                self.client_connected = False
-                self.client_ip = None
-                self.state["clients_connected"] = 0
-
-                response['disconnected'] = True
-                response['message'] = "Disconnessione completata"
 
             elif command_type == 'SET_CONFIG':
                 # Aggiorna la configurazione
                 if 'config' in command:
                     self._update_config(command['config'])
                     response['config_updated'] = True
-
-                    # Se la configurazione include parametri di streaming, aggiornali
-                    if 'stream' in command['config']:
-                        stream_config = command['config']['stream']
-                        if 'quality' in stream_config:
-                            self._jpeg_quality = max(70, min(95, stream_config["quality"]))
-                            logger.info(f"Qualità streaming aggiornata: {self._jpeg_quality}")
-
-                    # Se la configurazione include parametri del server, aggiornali
-                    if 'server' in command['config']:
-                        server_config = command['config']['server']
-                        if 'frame_interval' in server_config:
-                            self._frame_interval = server_config["frame_interval"]
-                            logger.info(f"Intervallo frame aggiornato: {self._frame_interval}")
-                        if 'dynamic_fps' in server_config:
-                            self._dynamic_interval = server_config["dynamic_fps"]
-                            logger.info(f"FPS dinamico: {self._dynamic_interval}")
                 else:
                     response['status'] = 'error'
                     response['error'] = 'Configurazione mancante'
@@ -939,33 +898,46 @@ class UnLookServer:
     def _stream_camera(self, camera: "Picamera2", camera_index: int):
         """
         Funzione ottimizzata che gestisce lo streaming di una camera.
-        Versione con latenza ridotta e controllo di flusso adattivo.
+        Versione con latenza ridotta e priorità di thread.
+
+        Args:
+            camera: Oggetto camera
+            camera_index: Indice della camera (0=sinistra, 1=destra)
         """
         logger.info(f"Thread di streaming camera {camera_index} avviato")
 
         try:
-            # Ottieni parametri di configurazione
-            quality = self._jpeg_quality
+            # Imposta priorità del thread
+            try:
+                # Aumenta la priorità del thread - funziona solo su sistemi Linux/Unix
+                import os
+                os.nice(-10)  # Imposta una priorità più alta (-20 è max, 19 è min)
+                logger.info(f"Priorità aumentata per thread di streaming camera {camera_index}")
+            except Exception as e:
+                logger.debug(f"Impossibile impostare priorità thread: {e}")
 
-            # Configura intervallo iniziale
+            # Ottieni qualità JPEG ottimale per bilanciare qualità/performance
+            quality = self._jpeg_quality
+            logger.info(f"Camera {camera_index} - qualità JPEG: {quality}")
+
+            # Configura intervallo iniziale per il target FPS
             current_interval = self._frame_interval
-            min_interval = 1.0 / 60  # massimo 60 FPS
+            min_interval = 1.0 / self.config["stream"].get("max_fps", 60)  # Default max 60 FPS
+            logger.info(
+                f"Camera {camera_index} - intervallo iniziale: {current_interval * 1000:.1f}ms (teorici {1 / current_interval:.1f} FPS)")
+
+            # Prepara il bufferizzatore di frame ottimizzato
+            # Questo evita allocazioni di memoria ripetute
+            frame_buffer = None
+
+            # Crea un timer per limitare i log
+            last_stats_time = time.time()
+            frame_count = 0
+
+            # Imposta tempo del prossimo frame
+            next_frame_time = time.time()
 
             # Loop principale per lo streaming
-            local_frame_count = 0
-            start_time = time.time()
-            last_stats_time = start_time
-            last_frame_time = 0
-            next_frame_time = 0
-
-            # Imposta priorità del thread di streaming
-            try:
-                import os
-                # Cerca di impostare priorità alta su sistemi Linux
-                os.nice(-10)
-            except:
-                pass
-
             while self.state["streaming"] and self.running:
                 try:
                     # Controllo di flusso basato su tempo per mantenere FPS stabile
@@ -973,12 +945,13 @@ class UnLookServer:
 
                     # Attendi fino al prossimo frame programmato per rispettare l'intervallo
                     if current_time < next_frame_time:
+                        # Calcola tempo di attesa
                         wait_time = next_frame_time - current_time
                         if wait_time > 0.001:  # Attendi solo se il tempo è significativo
                             time.sleep(wait_time)
                         continue
 
-                    # Programma il prossimo frame
+                    # Calcola il prossimo tempo di acquisizione
                     next_frame_time = current_time + current_interval
 
                     # Cattura il frame
@@ -986,7 +959,7 @@ class UnLookServer:
 
                     if frame is None or frame.size == 0:
                         logger.error(f"Frame vuoto dalla camera {camera_index}")
-                        time.sleep(0.01)
+                        time.sleep(0.005)  # Breve pausa
                         continue
 
                     # Converti in BGR se necessario (per OpenCV)
@@ -1001,15 +974,15 @@ class UnLookServer:
 
                     if not success or encoded_data is None or encoded_data.size == 0:
                         logger.error(f"Errore nella codifica JPEG, camera {camera_index}")
-                        time.sleep(0.01)
+                        time.sleep(0.005)  # Breve pausa
                         continue
 
-                    # Crea l'header del messaggio
-                    current_time = time.time()  # Aggiorna per timestamp preciso
+                    # Crea l'header del messaggio con timestamp preciso
+                    timestamp = time.time()  # Per misurare il lag con precisione
                     header = {
                         "camera": camera_index,
-                        "frame": local_frame_count,
-                        "timestamp": current_time,
+                        "frame": frame_count,
+                        "timestamp": timestamp,
                         "format": "jpeg",
                         "resolution": [frame.shape[1], frame.shape[0]]
                     }
@@ -1018,37 +991,58 @@ class UnLookServer:
                     try:
                         self.stream_socket.send_json(header, zmq.SNDMORE)
                         self.stream_socket.send(encoded_data.tobytes(), copy=False)
-
-                        # Aggiorna contatori
-                        local_frame_count += 1
-                        self._frame_count += 1  # Contatore globale
-                        last_frame_time = current_time  # Per controllo di intervallo
-
-                    except Exception as e:
-                        logger.error(f"Errore nell'invio del frame: {e}")
+                        frame_count += 1
+                    except zmq.ZMQError as e:
+                        if e.errno == zmq.EAGAIN:
+                            # Socket temporaneamente non disponibile, salta questo frame
+                            logger.debug(f"Socket occupato, frame saltato - camera {camera_index}")
+                            continue
+                        logger.error(f"Errore ZMQ nell'invio: {e}")
                         time.sleep(0.01)
                         continue
 
-                    # Calcola FPS ogni 30 frame
-                    if local_frame_count % 30 == 0:
+                    # Calcola e mostra FPS ogni 100 frame
+                    if frame_count % 100 == 0:
                         current_time = time.time()
                         elapsed = current_time - last_stats_time
                         if elapsed > 0:
-                            current_fps = 30 / elapsed
-                            effective_interval = elapsed / 30
-                            logger.info(f"Camera {camera_index}: {current_fps:.1f} FPS "
-                                        f"(intervallo={effective_interval * 1000:.1f}ms, "
-                                        f"frames: {local_frame_count})")
-                        last_stats_time = current_time
+                            current_fps = 100 / elapsed
+                            encode_size = len(encoded_data.tobytes()) / 1024  # KB
+                            logger.info(f"Camera {camera_index}: {current_fps:.1f} FPS, "
+                                        f"{encode_size:.1f} KB/frame")
+
+                            # Aggiorna tempo per prossima statistica
+                            last_stats_time = current_time
+
+                            # Regola dinamicamente l'intervallo se abilitato
+                            if self._dynamic_interval:
+                                # Se il FPS è troppo alto o troppo basso, regola l'intervallo
+                                target_fps = 1.0 / current_interval
+                                min_fps = self.config["stream"].get("min_fps", 15)
+                                max_fps = self.config["stream"].get("max_fps", 30)
+
+                                if current_fps < min_fps and current_interval > min_interval:
+                                    # FPS troppo basso, riduci l'intervallo
+                                    current_interval = max(min_interval, current_interval * 0.9)
+                                    logger.info(
+                                        f"Camera {camera_index}: FPS troppo basso, intervallo ridotto a {current_interval * 1000:.1f}ms")
+                                elif current_fps > max_fps * 1.2:
+                                    # FPS troppo alto, aumenta l'intervallo
+                                    current_interval = current_interval * 1.1
+                                    logger.info(
+                                        f"Camera {camera_index}: FPS troppo alto, intervallo aumentato a {current_interval * 1000:.1f}ms")
 
                 except Exception as e:
                     logger.error(f"Errore nello streaming camera {camera_index}: {e}")
                     time.sleep(0.1)  # Pausa più lunga in caso di errore
 
+                    # Reset del timestamp per evitare loop rapidi
+                    next_frame_time = time.time() + current_interval
+
         except Exception as e:
             logger.error(f"Errore fatale nello streaming camera {camera_index}: {e}")
-
-        logger.info(f"Thread di streaming camera {camera_index} terminato")
+        finally:
+            logger.info(f"Thread di streaming camera {camera_index} terminato dopo {frame_count} frame")
 
     def _capture_frames(self) -> bool:
         """

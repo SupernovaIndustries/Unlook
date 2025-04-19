@@ -7,6 +7,7 @@ Versione migliorata con supporto configurazione integrato.
 """
 
 import logging
+import time  # Aggiunto l'import mancante
 from enum import Enum
 from typing import Optional, List
 from pathlib import Path
@@ -153,12 +154,6 @@ class MainWindow(QMainWindow):
         self.toolbar.addAction(self.action_toggle_connection)
 
         self.toolbar.addSeparator()
-
-        """# Pulsante per acquisire un'immagine
-        self.action_capture = QAction("Acquisizione", self)
-        self.action_capture.setEnabled(False)
-        self.action_capture.triggered.connect(self._capture_frame)
-        self.toolbar.addAction(self.action_capture)"""
 
     def _setup_menu(self):
         """Configura il menu dell'applicazione."""
@@ -389,9 +384,6 @@ class MainWindow(QMainWindow):
         # Cambia il testo del pulsante di connessione
         self.action_toggle_connection.setText("Connetti")
 
-        """# Disabilita il pulsante di acquisizione
-        self.action_capture.setEnabled(False)"""
-
         # Ferma lo streaming se attivo
         self.streaming_widget.stop_streaming()
 
@@ -484,18 +476,6 @@ class MainWindow(QMainWindow):
             self.scanner_controller.disconnect_from_scanner(device_id)
             self.status_bar.showMessage(f"Disconnessione in corso...", 3000)
 
-    @Slot()
-    def _capture_frame(self):
-        """Acquisisce un frame dallo streaming."""
-        # Verifica se lo streaming è attivo
-        if not self.streaming_widget.is_streaming():
-            return
-
-        # Acquisisce il frame
-        success = self.streaming_widget.capture_frame()
-        if success:
-            self.status_bar.showMessage("Frame acquisito", 3000)
-
     def _disconnect_all(self):
         """Disconnette tutti gli scanner connessi."""
         for scanner in self.scanner_controller.scanners:
@@ -517,10 +497,6 @@ class MainWindow(QMainWindow):
         is_connected = selected_scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
         self.action_toggle_connection.setText("Disconnetti" if is_connected else "Connetti")
         self.action_toggle_connection.setEnabled(True)
-
-        """# Aggiorna il pulsante di acquisizione
-        is_streaming = selected_scanner.status == ScannerStatus.STREAMING
-        self.action_capture.setEnabled(is_streaming)"""
 
     def _show_about_dialog(self):
         """Mostra la finestra di dialogo Informazioni su."""

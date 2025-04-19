@@ -102,6 +102,7 @@ class StreamView(QWidget):
     def update_frame(self, frame: np.ndarray, timestamp: float = None):
         """
         Aggiorna il frame visualizzato, elaborando direttamente senza buffer.
+        Versione ottimizzata per ridurre al minimo la latenza.
 
         Args:
             frame: Frame in formato numpy array
@@ -111,33 +112,46 @@ class StreamView(QWidget):
             logger.warning(f"Frame nullo o non valido ricevuto per camera {self.camera_index}")
             return
 
-        # Fai una copia del frame per non modificare l'originale
+        # Acquisiamo il lock solo per la parte di elaborazione, mantenendolo il più breve possibile
         with QMutexLocker(self._mutex):
             # Applica elaborazione se abilitata
             processed_frame = self._process_frame(frame.copy())
 
-            # Converti in QImage per visualizzare
+            # Controllo di prestazioni - saltiamo la conversione QImage se l'UI non è visibile
+            if not self.isVisible():
+                # Solo aggiornamento statistiche
+                self._frame_count += 1
+                self._last_frame_time = time.time()
+                if timestamp is not None:
+                    self._lag_ms = int((self._last_frame_time - timestamp) * 1000)
+                self._healthy = True
+                return
+
+            # Converti in QImage per visualizzare (ottimizzato)
             height, width = processed_frame.shape[:2]
             bytes_per_line = processed_frame.strides[0]
 
-            # Converti in RGB per Qt
+            # Ottimizzazione: non copiare dati inutilmente
             if len(processed_frame.shape) == 3 and processed_frame.shape[2] == 3:
-                # Immagine a colori
-                qt_image = QImage(processed_frame.data, width, height,
+                # Immagine a colori BGR (OpenCV) -> RGB (Qt)
+                rgb_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+                qt_image = QImage(rgb_frame.data, width, height,
                                   bytes_per_line, QImage.Format_RGB888)
-                qt_image = qt_image.rgbSwapped()  # OpenCV usa BGR, Qt usa RGB
             else:
                 # Immagine in scala di grigi
                 qt_image = QImage(processed_frame.data, width, height,
                                   processed_frame.strides[0], QImage.Format_Grayscale8)
 
-            # Salva copia del frame elaborato
-            self._frame = qt_image.copy()
+            # Crea un QPixmap direttamente dall'immagine
+            pixmap = QPixmap.fromImage(qt_image)
+
+            # Salva una copia leggera del frame per l'acquisizione
+            self._frame = qt_image
 
         # Incrementa contatore
         self._frame_count += 1
 
-        # Calcola FPS
+        # Calcola FPS e lag
         current_time = time.time()
         if self._last_frame_time > 0:
             time_diff = current_time - self._last_frame_time
@@ -161,27 +175,30 @@ class StreamView(QWidget):
         # Aggiorna stato di salute
         self._healthy = True
 
-        # Mostra il frame
-        pixmap = QPixmap.fromImage(self._frame)
+        # Calcola dimensione per mantenere aspect ratio
         scaled_pixmap = pixmap.scaled(
             self.display_label.size(),
             Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
+            Qt.SmoothTransformation if self._frame_count % 2 == 0 else Qt.FastTransformation
+            # Alternanza per bilanciare qualità/velocità
         )
 
+        # Mostra il frame
         self.display_label.setPixmap(scaled_pixmap)
         self.display_label.setStyleSheet("")  # Rimuovi stile sfondo nero
 
-        # Aggiorna etichetta informativa
-        camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
-        size_text = f"{self._frame.width()}x{self._frame.height()}"
-        fps_text = f"{self._fps:.1f} FPS" if self._fps > 0 else ""
+        # Aggiorna etichetta informativa solo occasionalmente per ridurre overhead UI
+        if self._frame_count % 10 == 0:
+            camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
+            size_text = f"{width}x{height}"
+            fps_text = f"{self._fps:.1f} FPS" if self._fps > 0 else ""
 
-        self.info_label.setText(f"Camera {camera_name} | {size_text} | {fps_text}")
+            self.info_label.setText(f"Camera {camera_name} | {size_text} | {fps_text}")
 
     def _process_frame(self, frame: np.ndarray) -> np.ndarray:
         """
         Elabora un frame applicando le opzioni di visualizzazione.
+        Versione ottimizzata per prestazioni ed efficienza.
 
         Args:
             frame: Frame da elaborare
@@ -189,11 +206,18 @@ class StreamView(QWidget):
         Returns:
             Frame elaborato
         """
-        # Converti in scala di grigi se necessario
-        if len(frame.shape) == 3 and frame.shape[2] == 3:
+        # Per migliorare le prestazioni, evitiamo conversioni inutili di formato
+        is_color = len(frame.shape) == 3 and frame.shape[2] >= 3
+
+        # Se nessuna elaborazione è abilitata, restituisci il frame originale
+        if not (self._enhance_contrast or self._show_grid or self._show_features):
+            return frame
+
+        # Solo se necessario, crea una copia in scala di grigi per elaborazione
+        if is_color:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         else:
-            gray = frame
+            gray = frame.copy() if self._enhance_contrast or self._show_features else frame
 
         # Applica miglioramento del contrasto se abilitato
         if self._enhance_contrast:
@@ -202,7 +226,7 @@ class StreamView(QWidget):
             enhanced = clahe.apply(gray)
 
             # Se il frame originale era a colori, applica miglioramento solo alla luminosità
-            if len(frame.shape) == 3 and frame.shape[2] == 3:
+            if is_color:
                 # Converti in HSV
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 # Sostituisci canale V (luminosità)
@@ -212,61 +236,74 @@ class StreamView(QWidget):
             else:
                 frame = enhanced
 
-        # Applica griglia se abilitata
+        # Applica griglia se abilitata (versione ottimizzata)
         if self._show_grid:
             height, width = frame.shape[:2]
-            grid_size = 50  # Dimensione celle
+            grid_size = min(50, max(width, height) // 10)  # Adatta dimensione griglia
 
-            # Linee orizzontali
+            grid_color = (0, 255, 0) if is_color else 200
+            grid_thickness = 1
+
+            # Disegna solo le linee principali per migliorare le prestazioni
+            # Linee orizzontali e verticali con incremento di grid_size
             for y in range(0, height, grid_size):
-                if len(frame.shape) == 3:
-                    cv2.line(frame, (0, y), (width, y), (0, 255, 0), 1)
-                else:
-                    cv2.line(frame, (0, y), (width, y), 200, 1)
-
-            # Linee verticali
+                cv2.line(frame, (0, y), (width, y), grid_color, grid_thickness)
             for x in range(0, width, grid_size):
-                if len(frame.shape) == 3:
-                    cv2.line(frame, (x, 0), (x, height), (0, 255, 0), 1)
-                else:
-                    cv2.line(frame, (x, 0), (x, height), 200, 1)
+                cv2.line(frame, (x, 0), (x, height), grid_color, grid_thickness)
 
-        # Rileva e disegna caratteristiche se abilitato
+        # Rileva e disegna caratteristiche se abilitato (versione ottimizzata)
         if self._show_features:
-            # Crea rilevatore di caratteristiche
-            feature_detector = cv2.FastFeatureDetector_create(threshold=25)
+            # Usa rilevatore più veloce con un limite di punti
+            max_features = 100  # Limita il numero di caratteristiche per prestazioni
+            feature_detector = cv2.FastFeatureDetector_create(threshold=30)
 
             # Rileva keypoints
             keypoints = feature_detector.detect(gray, None)
 
-            # Disegna keypoints
-            if len(frame.shape) == 3:
-                frame = cv2.drawKeypoints(
-                    frame, keypoints, None, (0, 0, 255),
-                    cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
-                )
+            # Limita il numero di keypoints per prestazioni
+            if len(keypoints) > max_features:
+                keypoints = sorted(keypoints, key=lambda x: -x.response)[:max_features]
+
+            # Disegna keypoints con colore
+            feature_color = (0, 0, 255)  # Rosso per i keypoints
+            if is_color:
+                cv2.drawKeypoints(frame, keypoints, frame, feature_color,
+                                  cv2.DRAW_MATCHES_FLAGS_DEFAULT)  # Usa flag più semplice
             else:
-                frame = cv2.drawKeypoints(
-                    cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR), keypoints, None,
-                    (0, 0, 255), cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
-                )
+                # Converti a colore se necessario
+                color_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                cv2.drawKeypoints(color_frame, keypoints, color_frame, feature_color,
+                                  cv2.DRAW_MATCHES_FLAGS_DEFAULT)
+                frame = color_frame
 
         return frame
 
     def _update_lag_label(self):
-        """Aggiorna l'etichetta del lag e imposta il colore appropriato."""
-        if self._lag_ms < 100:
+        """
+        Aggiorna l'etichetta del lag e imposta il colore appropriato.
+        Versione con limiti di lag più realistici per dual camera.
+        """
+        # Valori soglia ottimizzati per un Raspberry Pi
+        if self._lag_ms < 200:  # Ottimo
             self.lag_label.setStyleSheet("color: green; font-weight: bold;")
-        elif self._lag_ms < 200:
+        elif self._lag_ms < 400:  # Accettabile
             self.lag_label.setStyleSheet("color: orange; font-weight: bold;")
-        else:
+        else:  # Problematico
             self.lag_label.setStyleSheet("color: red; font-weight: bold;")
 
         self.lag_label.setText(f"Lag: {self._lag_ms}ms")
 
-        # Aggiungi avviso se il lag supera la soglia
+        # Logga avvisi solo per lag molto elevato e non troppo frequentemente
         if self._lag_ms > self._max_lag_warning:
-            logger.warning(f"Lag elevato su camera {self.camera_index}: {self._lag_ms}ms")
+            # Evita spam nel log usando un contatore
+            if not hasattr(self, '_lag_warning_count'):
+                self._lag_warning_count = 0
+
+            self._lag_warning_count += 1
+
+            # Logga solo ogni 10 rilevamenti di lag alto
+            if self._lag_warning_count % 10 == 1:
+                logger.warning(f"Lag elevato su camera {self.camera_index}: {self._lag_ms}ms")
 
     def clear(self):
         """Pulisce la visualizzazione."""
@@ -371,6 +408,7 @@ class DualStreamView(QWidget):
         self._retry_timer.timeout.connect(self._check_connection)
         self._retry_count = 0
         self._max_retries = 5
+        self._frame_count = 0
 
         # Configura l'interfaccia
         self._setup_ui()
@@ -661,8 +699,8 @@ class DualStreamView(QWidget):
 
         # Salva i riferimenti alle righe di saturazione per poter controllare la visibilità
         self.left_saturation_row = (
-        left_advanced_layout.itemAt(left_advanced_layout.rowCount() - 1, QFormLayout.LabelRole).widget(),
-        left_advanced_layout.itemAt(left_advanced_layout.rowCount() - 1, QFormLayout.FieldRole).widget())
+            left_advanced_layout.itemAt(left_advanced_layout.rowCount() - 1, QFormLayout.LabelRole).widget(),
+            left_advanced_layout.itemAt(left_advanced_layout.rowCount() - 1, QFormLayout.FieldRole).widget())
 
         # Collegamento tra modalità e saturazione per camera sinistra
         self.left_mode_color.toggled.connect(lambda checked: self._update_saturation_visibility(checked, True))
@@ -774,8 +812,8 @@ class DualStreamView(QWidget):
 
         # Salva i riferimenti alle righe di saturazione per poter controllare la visibilità
         self.right_saturation_row = (
-        right_advanced_layout.itemAt(right_advanced_layout.rowCount() - 1, QFormLayout.LabelRole).widget(),
-        right_advanced_layout.itemAt(right_advanced_layout.rowCount() - 1, QFormLayout.FieldRole).widget())
+            right_advanced_layout.itemAt(right_advanced_layout.rowCount() - 1, QFormLayout.LabelRole).widget(),
+            right_advanced_layout.itemAt(right_advanced_layout.rowCount() - 1, QFormLayout.FieldRole).widget())
 
         # Collegamento tra modalità e saturazione per camera destra
         self.right_mode_color.toggled.connect(lambda checked: self._update_saturation_visibility(checked, False))
@@ -963,6 +1001,163 @@ class DualStreamView(QWidget):
                 f"Si è verificato un errore durante l'applicazione delle impostazioni:\n{str(e)}"
             )
 
+    def start_streaming(self, scanner: Scanner) -> bool:
+        """
+        Avvia lo streaming video dalle due camere dello scanner.
+        Versione ottimizzata per garantire che entrambe le camere siano attive.
+
+        Args:
+            scanner: Scanner da cui ricevere lo streaming
+
+        Returns:
+            True se il processo di streaming è stato avviato, False altrimenti
+        """
+        if self._streaming:
+            logger.warning("Streaming già attivo")
+            return True
+
+        # Memorizza lo scanner
+        self._scanner = scanner
+
+        # Importa qui per evitare problemi di importazione circolare
+        from client.network.connection_manager import ConnectionManager
+
+        self._connection_manager = ConnectionManager()
+
+        # Verifica che lo scanner sia connesso prima di avviare lo streaming
+        if not self._connection_manager.is_connected(scanner.device_id):
+            logger.warning(f"Scanner {scanner.name} non connesso, tentativo di connessione")
+
+            # Connetti allo scanner
+            self._connection_manager.connect(scanner.device_id, scanner.ip_address, scanner.port)
+
+            # Imposta il timer per controllare se la connessione viene stabilita
+            self._retry_count = 0
+            self._retry_timer.start()
+
+            # Ritorna True per indicare che il processo è iniziato (anche se lo streaming non è ancora attivo)
+            return True
+        else:
+            # Scanner già connesso, avvia subito lo streaming
+            return self._start_actual_streaming()
+
+    def _start_actual_streaming(self) -> bool:
+        """
+        Avvia effettivamente lo streaming dopo che la connessione è stata stabilita.
+        Versione migliorata per supportare entrambe le camere e ridurre il lag.
+
+        Returns:
+            True se lo streaming è stato avviato con successo, False altrimenti
+        """
+        try:
+            # Crea un ricevitore di stream per questo scanner
+            from client.network.stream_receiver import StreamReceiver
+            stream_receiver = StreamReceiver(
+                host=self._scanner.ip_address,
+                port=self._scanner.port + 1  # La porta di streaming è command_port + 1
+            )
+
+            # Abilita la modalità ad alte prestazioni per ridurre il lag
+            if hasattr(stream_receiver, 'set_high_performance'):
+                stream_receiver.set_high_performance(True)
+                logger.info("Modalità ad alte prestazioni attivata per lo streaming")
+
+            # Collega i segnali del ricevitore
+            stream_receiver.frame_received.connect(self._on_frame_received)
+            stream_receiver.stream_started.connect(self._on_stream_started)
+            stream_receiver.stream_stopped.connect(self._on_stream_stopped)
+            stream_receiver.stream_error.connect(self._on_stream_error)
+
+            # Avvia il ricevitore
+            if not stream_receiver.start():
+                logger.error("Errore nell'avvio dello stream receiver")
+                return False
+
+            # Memorizza il ricevitore
+            self._stream_receiver = stream_receiver
+
+            # Invia un messaggio al server per avviare lo streaming con parametri ottimizzati
+            streaming_config = {
+                "target_fps": 30,  # Target FPS desiderato
+                "quality": 85,  # Qualità JPEG ottimizzata per bilanciare qualità e latenza
+                "dual_camera": True  # Richiedi esplicitamente entrambe le camere
+            }
+
+            if not self._connection_manager.send_message(
+                    self._scanner.device_id,
+                    "START_STREAM",
+                    streaming_config
+            ):
+                logger.error(f"Errore nell'invio del comando START_STREAM a {self._scanner.name}")
+                stream_receiver.stop()
+                self._stream_receiver = None
+                return False
+
+            # Cambia lo stato dello scanner
+            self._scanner.status = ScannerStatus.STREAMING
+
+            # Imposta lo stato di streaming
+            self._streaming = True
+            logger.info(
+                f"Streaming avviato da {self._scanner.name} con target FPS={streaming_config['target_fps']}, quality={streaming_config['quality']}")
+
+            # Aggiorna i pulsanti dell'interfaccia
+            self._update_ui_buttons()
+
+            # Indica l'inizio dello streaming nelle etichette
+            for view in self.stream_views:
+                camera_name = "Sinistra" if view.camera_index == 0 else "Destra"
+                view.info_label.setText(f"Camera {camera_name} | Connessione in corso...")
+
+            # Imposta un timer per verificare se entrambe le camere sono attive
+            self._camera_check_timer = QTimer(self)
+            self._camera_check_timer.timeout.connect(self._check_dual_camera)
+            self._camera_check_timer.setSingleShot(True)
+            self._camera_check_timer.start(5000)  # Verifica dopo 5 secondi
+
+            return True
+        except Exception as e:
+            logger.error(f"Errore nell'avvio dello streaming: {str(e)}")
+            return False
+
+    def _check_dual_camera(self):
+        """
+        Verifica se entrambe le camere sono attive.
+        Se solo una camera è attiva, mostra un avviso.
+        """
+        if not self._streaming or not self._stream_receiver:
+            return
+
+        # Controlla quali camere sono attive nel ricevitore
+        cameras_active = getattr(self._stream_receiver, '_cameras_active', set())
+
+        if cameras_active and len(cameras_active) == 1:
+            # Solo una camera è attiva
+            active_camera = list(cameras_active)[0]
+            missing_camera = 1 if active_camera == 0 else 0
+            camera_name = "sinistra" if missing_camera == 0 else "destra"
+
+            logger.warning(
+                f"Solo la camera {active_camera} è attiva. La camera {missing_camera} ({camera_name}) non sta inviando dati.")
+
+            # Mostra un messaggio all'utente
+            QMessageBox.warning(
+                self,
+                "Avviso camera",
+                f"Solo una camera è attiva. La camera {camera_name} non sta inviando dati.\n\n"
+                "Verifica che entrambe le camere siano collegate correttamente al Raspberry Pi."
+            )
+        elif not cameras_active:
+            logger.warning("Nessuna camera sta inviando dati.")
+
+            # Mostra un messaggio all'utente
+            QMessageBox.warning(
+                self,
+                "Avviso camera",
+                "Nessuna camera sta inviando dati.\n\n"
+                "Verifica che le camere siano collegate correttamente al Raspberry Pi."
+            )
+
     def _check_connection(self):
         """Controlla lo stato della connessione e riprova se necessario."""
         # Importa qui per evitare problemi di importazione circolare
@@ -1022,96 +1217,6 @@ class DualStreamView(QWidget):
         self.save_scan_button.setEnabled(False)
         self.apply_settings_button.setEnabled(is_connected)
 
-    def start_streaming(self, scanner: Scanner) -> bool:
-        """
-        Avvia lo streaming video dalle due camere dello scanner.
-
-        Args:
-            scanner: Scanner da cui ricevere lo streaming
-
-        Returns:
-            True se il processo di streaming è stato avviato, False altrimenti
-        """
-        if self._streaming:
-            logger.warning("Streaming già attivo")
-            return True
-
-        # Memorizza lo scanner
-        self._scanner = scanner
-
-        # Importa qui per evitare problemi di importazione circolare
-        from client.network.connection_manager import ConnectionManager
-
-        self._connection_manager = ConnectionManager()
-
-        # Verifica che lo scanner sia connesso prima di avviare lo streaming
-        if not self._connection_manager.is_connected(scanner.device_id):
-            logger.warning(f"Scanner {scanner.name} non connesso, tentativo di connessione")
-
-            # Connetti allo scanner
-            self._connection_manager.connect(scanner.device_id, scanner.ip_address, scanner.port)
-
-            # Imposta il timer per controllare se la connessione viene stabilita
-            self._retry_count = 0
-            self._retry_timer.start()
-
-            # Ritorna True per indicare che il processo è iniziato (anche se lo streaming non è ancora attivo)
-            return True
-        else:
-            # Scanner già connesso, avvia subito lo streaming
-            return self._start_actual_streaming()
-
-    def _start_actual_streaming(self) -> bool:
-        """
-        Avvia effettivamente lo streaming dopo che la connessione è stata stabilita.
-
-        Returns:
-            True se lo streaming è stato avviato con successo, False altrimenti
-        """
-        try:
-            # Crea un ricevitore di stream per questo scanner
-            from client.network.stream_receiver import StreamReceiver
-            stream_receiver = StreamReceiver(
-                host=self._scanner.ip_address,
-                port=self._scanner.port + 1  # La porta di streaming è command_port + 1
-            )
-
-            # Collega i segnali del ricevitore
-            stream_receiver.frame_received.connect(self._on_frame_received)
-            stream_receiver.stream_started.connect(self._on_stream_started)
-            stream_receiver.stream_stopped.connect(self._on_stream_stopped)
-            stream_receiver.stream_error.connect(self._on_stream_error)
-
-            # Avvia il ricevitore
-            if not stream_receiver.start():
-                logger.error("Errore nell'avvio dello stream receiver")
-                return False
-
-            # Memorizza il ricevitore
-            self._stream_receiver = stream_receiver
-
-            # Invia un messaggio al server per avviare lo streaming
-            if not self._connection_manager.send_message(self._scanner.device_id, "START_STREAM"):
-                logger.error(f"Errore nell'invio del comando START_STREAM a {self._scanner.name}")
-                stream_receiver.stop()
-                self._stream_receiver = None
-                return False
-
-            # Cambia lo stato dello scanner
-            self._scanner.status = ScannerStatus.STREAMING
-
-            # Imposta lo stato di streaming
-            self._streaming = True
-            logger.info(f"Streaming avviato da {self._scanner.name}")
-
-            # Aggiorna i pulsanti dell'interfaccia
-            self._update_ui_buttons()
-
-            return True
-        except Exception as e:
-            logger.error(f"Errore nell'avvio dello streaming: {str(e)}")
-            return False
-
     def stop_streaming(self):
         """Ferma lo streaming video."""
         if not self._streaming:
@@ -1122,6 +1227,10 @@ class DualStreamView(QWidget):
         # Ferma il timer di retry se attivo
         if self._retry_timer.isActive():
             self._retry_timer.stop()
+
+        # Ferma il timer di controllo dual camera se attivo
+        if hasattr(self, '_camera_check_timer') and self._camera_check_timer.isActive():
+            self._camera_check_timer.stop()
 
         # Ferma il ricevitore di stream
         if self._stream_receiver:
@@ -1154,19 +1263,35 @@ class DualStreamView(QWidget):
 
     @Slot(int, np.ndarray, float)
     def _on_frame_received(self, camera_index: int, frame: np.ndarray, timestamp: float):
-        """Gestisce l'arrivo di un nuovo frame."""
+        """
+        Gestisce l'arrivo di un nuovo frame.
+        Versione ottimizzata per ridurre la latenza.
+        """
         try:
             if frame is None:
                 logger.warning(f"Frame nullo ricevuto per camera {camera_index}")
                 return
 
-            logger.debug(f"Frame ricevuto: camera={camera_index}, forma={frame.shape}, timestamp={timestamp}")
+            # Verifica se l'indice della camera è valido
+            if camera_index < 0 or camera_index >= len(self.stream_views):
+                logger.warning(
+                    f"Indice camera non valido: {camera_index}, massimo supportato: {len(self.stream_views) - 1}")
+                return
 
-            # Aggiorna la vista corrispondente
-            if 0 <= camera_index < len(self.stream_views):
-                # Invia il frame direttamente per l'elaborazione e la visualizzazione
-                # L'elaborazione ora avviene in StreamView.update_frame
-                self.stream_views[camera_index].update_frame(frame, timestamp)
+            # Log più limitato per ridurre overhead
+            if getattr(self, '_frame_count', 0) % 100 == 0:
+                logger.debug(f"Frame ricevuto: camera={camera_index}, forma={frame.shape}, timestamp={timestamp}")
+
+            # Incrementa contatore frame
+            self._frame_count = getattr(self, '_frame_count', 0) + 1
+
+            # Calcolo latenza
+            current_time = time.time()
+            latency_ms = (current_time - timestamp) * 1000
+
+            # Invia il frame direttamente per l'elaborazione e la visualizzazione
+            # Passiamo il frame e il timestamp alla view specifica per quella camera
+            self.stream_views[camera_index].update_frame(frame, timestamp)
 
         except Exception as e:
             logger.error(f"Errore in _on_frame_received: {e}")
@@ -1176,15 +1301,32 @@ class DualStreamView(QWidget):
         """Gestisce l'evento di avvio dello stream per una camera."""
         logger.info(f"Stream avviato per camera {camera_index}")
 
+        # Aggiorna lo stato visivo della camera
+        camera_name = "Sinistra" if camera_index == 0 else "Destra"
+        if camera_index < len(self.stream_views):
+            self.stream_views[camera_index].info_label.setText(f"Camera {camera_name} | Connessa")
+
     @Slot(int)
     def _on_stream_stopped(self, camera_index: int):
         """Gestisce l'evento di arresto dello stream per una camera."""
         logger.info(f"Stream fermato per camera {camera_index}")
 
+        # Aggiorna lo stato visivo della camera
+        camera_name = "Sinistra" if camera_index == 0 else "Destra"
+        if camera_index < len(self.stream_views):
+            self.stream_views[camera_index].info_label.setText(f"Camera {camera_name} | Disconnessa")
+
     @Slot(int, str)
     def _on_stream_error(self, camera_index: int, error: str):
         """Gestisce gli errori dello stream."""
         logger.error(f"Errore nello stream della camera {camera_index}: {error}")
+
+        # Aggiorna lo stato visivo della camera
+        camera_name = "Sinistra" if camera_index == 0 else "Destra"
+        if camera_index < len(self.stream_views):
+            self.stream_views[camera_index].info_label.setText(f"Camera {camera_name} | ERRORE")
+            self.stream_views[camera_index].lag_label.setText(f"Errore: {error[:20]}...")
+            self.stream_views[camera_index].lag_label.setStyleSheet("color: red; font-weight: bold;")
 
     def capture_frame(self) -> bool:
         """

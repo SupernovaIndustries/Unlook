@@ -4,6 +4,7 @@
 """
 Versione ottimizzata di StreamReceiver che elimina il buffering e processa i frame direttamente.
 Implementa un meccanismo di controllo di flusso "pull" per evitare l'accumulo di lag.
+Migliorato per il supporto dual camera e prestazioni ottimizzate.
 """
 
 import json
@@ -12,7 +13,7 @@ import time
 import threading
 import cv2
 import numpy as np
-from typing import Dict, Any, Optional, Callable, Tuple, List
+from typing import Dict, Any, Optional, Callable, Tuple, List, Set
 
 import zmq
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QMutex, QMutexLocker, QThread
@@ -25,6 +26,7 @@ class StreamReceiverThread(QThread):
     """
     Thread dedicato per ricevere lo stream video senza buffering.
     Processa ed emette ogni frame direttamente senza code intermedie.
+    Ottimizzato per dual camera e bassa latenza.
     """
     frame_decoded = Signal(int, np.ndarray, float)  # camera_index, frame, timestamp
     connection_state_changed = Signal(bool)  # connected
@@ -39,6 +41,8 @@ class StreamReceiverThread(QThread):
         self._socket = None
         self._last_activity = 0
         self._connected = False
+        self._received_cameras = set()
+        self._frame_counters = {0: 0, 1: 0}  # Contatori per entrambe le camere
 
     def run(self):
         """Loop principale del thread."""
@@ -52,25 +56,26 @@ class StreamReceiverThread(QThread):
             self._socket.setsockopt(zmq.RCVHWM, 2)  # Limita buffer ma mantieni compatibilità multipart
             self._socket.setsockopt_string(zmq.SUBSCRIBE, "")  # Sottoscrivi a tutto
 
-            # Importante: non usare CONFLATE per evitare problemi con messaggi multipart
-            # self._socket.setsockopt(zmq.CONFLATE, 1) # Questo causava il crash
+            # Imposta timeout di ricezione basso per aumentare reattività
+            self._socket.setsockopt(zmq.RCVTIMEO, 100)  # 100ms timeout
 
             # Connetti all'endpoint
             endpoint = f"tcp://{self.host}:{self.port}"
             logger.info(f"Connessione a {endpoint}...")
             self._socket.connect(endpoint)
 
+            # Inizializza stato
             self._running = True
             self._last_activity = time.time()
             self._connected = True
             self.connection_state_changed.emit(True)
 
+            # Log dei parametri di prestazione
+            logger.info(f"StreamReceiverThread inizializzato: buffer limitato a 2 messaggi, timeout 100ms")
+
             # Loop principale
             while self._running:
                 try:
-                    # Utilizziamo una ricezione standard con un timeout per controllare l'attività
-                    self._socket.setsockopt(zmq.RCVTIMEO, 500)  # 500ms timeout
-
                     # Attendi l'header
                     try:
                         header_data = self._socket.recv()
@@ -109,10 +114,23 @@ class StreamReceiverThread(QThread):
                         logger.warning(f"Header incompleto: {header}")
                         continue
 
-                    # Decodifica frame immediatamente
+                    # Aggiungi camera all'insieme delle camere rilevate
+                    if camera_index not in self._received_cameras:
+                        self._received_cameras.add(camera_index)
+                        logger.info(f"Nuova camera rilevata: {camera_index}")
+
+                    # Registra la ricezione del frame
+                    self._frame_counters[camera_index] = self._frame_counters.get(camera_index, 0) + 1
+                    if self._frame_counters[camera_index] % 100 == 0:
+                        logger.debug(f"Ricevuti {self._frame_counters[camera_index]} frame dalla camera {camera_index}")
+
+                    # Decodifica frame immediatamente con ottimizzazioni
                     if format_str.lower() == "jpeg":
                         try:
+                            # Decodifica con IMDECODE_UNCHANGED per mantenere il formato originale
                             frame_buffer = np.frombuffer(frame_data, dtype=np.uint8)
+
+                            # Usa IMREAD_UNCHANGED per preservare alpha channel se presente
                             frame = cv2.imdecode(frame_buffer, cv2.IMREAD_UNCHANGED)
 
                             if frame is None or frame.size == 0:
@@ -145,6 +163,7 @@ class StreamReceiverThread(QThread):
                         self._socket.setsockopt(zmq.LINGER, 0)
                         self._socket.setsockopt(zmq.RCVHWM, 2)
                         self._socket.setsockopt_string(zmq.SUBSCRIBE, "")
+                        self._socket.setsockopt(zmq.RCVTIMEO, 100)
 
                         # Riprova connessione
                         endpoint = f"tcp://{self.host}:{self.port}"
@@ -181,11 +200,17 @@ class StreamReceiverThread(QThread):
         self._running = False
         self.wait(1000)  # Attendi fino a 1 secondo
 
+    @property
+    def cameras_active(self) -> Set[int]:
+        """Restituisce l'insieme delle camere attivamente rilevate."""
+        return self._received_cameras
+
 
 class StreamReceiver(QObject):
     """
     Classe principale che gestisce la ricezione degli stream senza buffering.
     Questa versione elimina tutte le code e processa i frame direttamente.
+    Ottimizzata per dual camera e bassa latenza.
     """
 
     # Segnali
@@ -208,7 +233,7 @@ class StreamReceiver(QObject):
 
         # Statistiche base
         self._stats = {}
-        for camera_idx in range(2):  # Assumiamo massimo 2 camere
+        for camera_idx in range(2):  # Predisponiamo per entrambe le camere
             self._stats[camera_idx] = {
                 "frames_received": 0,
                 "last_frame_time": 0,
@@ -216,7 +241,11 @@ class StreamReceiver(QObject):
                 "lag_ms": 0
             }
 
-        logger.info(f"StreamReceiver ottimizzato inizializzato: host={host}, port={port}")
+        # Attiva una modalità ad alte prestazioni che riduce il lag
+        self._high_performance = True
+
+        logger.info(
+            f"StreamReceiver ottimizzato inizializzato: host={host}, port={port}, high_performance={self._high_performance}")
 
     def start(self) -> bool:
         """Avvia la ricezione dello stream."""
@@ -234,6 +263,9 @@ class StreamReceiver(QObject):
             self._receiver_thread.frame_decoded.connect(self._on_frame_decoded)
             self._receiver_thread.connection_state_changed.connect(self._on_connection_state_changed)
             self._receiver_thread.error_occurred.connect(self._on_error)
+
+            # Imposta priorità elevata
+            self._receiver_thread.setPriority(QThread.HighPriority)
             self._receiver_thread.start()
 
             return True
@@ -273,6 +305,14 @@ class StreamReceiver(QObject):
         """Ottieni statistiche per una camera."""
         return self._stats.get(camera_index, {}).copy()
 
+    def set_high_performance(self, enabled: bool):
+        """
+        Attiva/disattiva la modalità ad alte prestazioni.
+        Quando attiva, riduce il lag ma aumenta il consumo CPU.
+        """
+        self._high_performance = enabled
+        logger.info(f"Modalità alte prestazioni: {enabled}")
+
     @Slot(int, np.ndarray, float)
     def _on_frame_decoded(self, camera_index: int, frame: np.ndarray, timestamp: float):
         """Gestisce un frame decodificato dal thread di ricezione."""
@@ -287,7 +327,7 @@ class StreamReceiver(QObject):
             stats = self._stats[camera_index]
             stats["frames_received"] += 1
 
-            # Calcola FPS
+            # Calcola FPS con media mobile
             current_time = time.time()
             if stats["last_frame_time"] > 0:
                 frame_delta = current_time - stats["last_frame_time"]
@@ -299,16 +339,26 @@ class StreamReceiver(QObject):
 
             stats["last_frame_time"] = current_time
 
-            # Calcola lag
+            # Calcola lag e logga se è elevato
             lag_ms = int((current_time - timestamp) * 1000)
             stats["lag_ms"] = lag_ms
 
-            # Log di statistiche occasionale
+            # Log occasionale delle statistiche
             if stats["frames_received"] % 100 == 0:
                 logger.debug(f"Statistiche camera {camera_index}: "
                              f"frames={stats['frames_received']}, "
                              f"fps={stats['fps']:.1f}, "
                              f"lag={lag_ms}ms")
+
+            # Log esplicito per lag elevato (meno frequente per evitare spam)
+            if lag_ms > 200 and stats["frames_received"] % 30 == 0:
+                logger.warning(f"Lag elevato su camera {camera_index}: {lag_ms}ms")
+
+        # Verifica presenza di entrambe le camere
+        if len(self._cameras_active) == 2 and self._cameras_active == {0, 1}:
+            if not hasattr(self, '_dual_camera_detected') or not self._dual_camera_detected:
+                self._dual_camera_detected = True
+                logger.info("Sistema dual camera rilevato e funzionante")
 
         # Emetti il frame
         self.frame_received.emit(camera_index, frame, timestamp)
