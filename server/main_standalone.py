@@ -1718,29 +1718,29 @@ class UnLookServer:
                                         logger.info(f"Camera {camera_index}: Lag basso ({avg_lag:.0f}ms), " +
                                                     f"qualità aumentata a {quality}")
 
-            except Exception as e:
-            if self.running and self.state["streaming"]:  # Solo log se ancora in esecuzione
-                logger.error(f"Errore nello streaming camera {camera_index}: {e}")
-            time.sleep(0.01)  # Pausa più lunga in caso di errore
+                except Exception as e:
+                if self.running and self.state["streaming"]:  # Solo log se ancora in esecuzione
+                    logger.error(f"Errore nello streaming camera {camera_index}: {e}")
+                time.sleep(0.01)  # Pausa più lunga in caso di errore
 
-            # Reset del timing
-            next_frame_time = time.time() + current_interval
+                # Reset del timing
+                next_frame_time = time.time() + current_interval
 
-    except Exception as e:
-    if self.running:  # Solo log se ancora in esecuzione
-        logger.error(f"Errore fatale nello streaming camera {camera_index}: {e}")
+        except Exception as e:
+            if self.running:  # Solo log se ancora in esecuzione
+                logger.error(f"Errore fatale nello streaming camera {camera_index}: {e}")
 
-finally:
-# Statistiche finali per questa camera
-total_frames = self._frame_count.get(camera_index, 0)
-streaming_duration = time.time() - self._streaming_start_time
+        finally:
+            # Statistiche finali per questa camera
+            total_frames = self._frame_count.get(camera_index, 0)
+            streaming_duration = time.time() - self._streaming_start_time
 
-if streaming_duration > 0 and total_frames > 0:
-    camera_fps = total_frames / streaming_duration
-    logger.info(f"Thread streaming camera {camera_index} terminato: {total_frames} frame, " +
-                f"{camera_fps:.1f} FPS medi")
-else:
-    logger.info(f"Thread di streaming camera {camera_index} terminato")
+            if streaming_duration > 0 and total_frames > 0:
+                camera_fps = total_frames / streaming_duration
+                logger.info(f"Thread streaming camera {camera_index} terminato: {total_frames} frame, " +
+                            f"{camera_fps:.1f} FPS medi")
+            else:
+                logger.info(f"Thread di streaming camera {camera_index} terminato")
 
 
 def _capture_frames(self) -> List[Dict[str, Any]]:
