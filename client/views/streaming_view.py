@@ -924,8 +924,19 @@ class DualStreamView(QWidget):
                 "Questa funzionalità è in fase di sviluppo."
             )
 
+    # !/usr/bin/env python3
+    # -*- coding: utf-8 -*-
+
+    """
+    Correzione per il crash durante il cambio di modalità colore/scala di grigi.
+    Sostituire questa parte nella classe StreamingView in client/views/streaming_view.py
+    """
+
     def _apply_camera_settings(self):
-        """Applica le impostazioni delle camere."""
+        """
+        Applica le impostazioni delle camere con gestione degli errori migliorata.
+        Versione corretta che previene crash durante il cambio di modalità.
+        """
         if not self._scanner or not self._connection_manager or not self._connection_manager.is_connected(
                 self._scanner.device_id):
             QMessageBox.warning(
@@ -935,7 +946,7 @@ class DualStreamView(QWidget):
             )
             return
 
-        # Raccogli le impostazioni
+        # Raccogliere le impostazioni attuali
         left_mode = "color" if self.left_mode_color.isChecked() else "grayscale"
         left_exposure = self.left_exposure_slider.value()
         left_gain = self.left_gain_slider.value()
@@ -976,13 +987,62 @@ class DualStreamView(QWidget):
             }
         }
 
-        # Invia la configurazione al server
+        # PUNTO 1: IMPORTANTE - Verificare se lo streaming è attivo
+        streaming_was_active = False
+        if hasattr(self, '_streaming') and self._streaming:
+            streaming_was_active = True
+
+            # Mostra un messaggio che informa l'utente
+            QMessageBox.information(
+                self,
+                "Applicazione configurazione",
+                "Per applicare le modifiche alla modalità, lo streaming verrà temporaneamente interrotto e riavviato.",
+                QMessageBox.Ok
+            )
+
+            # Ferma lo streaming in modo sicuro
+            try:
+                self.stop_streaming()
+                logger.info("Streaming fermato per applicare la nuova configurazione")
+            except Exception as e:
+                logger.error(f"Errore nell'arresto dello streaming: {e}")
+                # Continuiamo comunque, l'importante è che il codice vada avanti
+
+        # PUNTO 2: Invia la configurazione con gestione errori migliorata
         try:
-            if self._connection_manager.send_message(
-                    self._scanner.device_id,
-                    "SET_CONFIG",
-                    {"config": config}
-            ):
+            # Usa un timeout più lungo per le modifiche di configurazione
+            dialog = QProgressDialog("Applicazione delle impostazioni in corso...", "Annulla", 0, 100, self)
+            dialog.setWindowTitle("Attendere")
+            dialog.setMinimumDuration(500)  # Mostra solo se l'operazione dura più di 500ms
+            dialog.setValue(20)
+            dialog.setWindowModality(Qt.WindowModal)
+
+            # Crea un timeout sicuro
+            success = False
+            max_attempts = 3
+
+            for attempt in range(1, max_attempts + 1):
+                dialog.setValue(20 + attempt * 20)  # Aggiorna la barra di progresso
+
+                try:
+                    # Invia la configurazione con timeout
+                    if self._connection_manager.send_message(
+                            self._scanner.device_id,
+                            "SET_CONFIG",
+                            {"config": config}
+                    ):
+                        # La configurazione è stata inviata, ma attendiamo conferma
+                        time.sleep(0.5)  # Lascia tempo allo scanner per applicare le modifiche
+                        success = True
+                        break
+                except Exception as e:
+                    logger.warning(f"Tentativo {attempt}/{max_attempts} fallito: {e}")
+                    time.sleep(0.5)  # Pausa tra i tentativi
+
+            dialog.setValue(100)  # Completa la barra di progresso
+
+            # Verifica l'esito dell'operazione
+            if success:
                 QMessageBox.information(
                     self,
                     "Impostazioni applicate",
@@ -991,15 +1051,45 @@ class DualStreamView(QWidget):
             else:
                 QMessageBox.warning(
                     self,
-                    "Errore",
-                    "Impossibile applicare le impostazioni: errore di comunicazione."
+                    "Avviso",
+                    "La configurazione è stata inviata, ma non è stato possibile confermare l'applicazione.\n"
+                    "Le modifiche potrebbero richiedere un riavvio dello streaming."
                 )
+
         except Exception as e:
             QMessageBox.critical(
                 self,
                 "Errore",
                 f"Si è verificato un errore durante l'applicazione delle impostazioni:\n{str(e)}"
             )
+            success = False
+
+        # PUNTO 3: Riavvia lo streaming se era attivo
+        if streaming_was_active:
+            try:
+                # Attendi un momento per permettere alle camere di riconfigurare
+                time.sleep(1.0)
+
+                # Riavvia lo streaming
+                if self._scanner:
+                    logger.info("Riavvio streaming dopo cambio configurazione")
+                    success = self.start_streaming(self._scanner)
+
+                    if not success:
+                        QMessageBox.warning(
+                            self,
+                            "Avviso",
+                            "La configurazione è stata applicata, ma non è stato possibile riavviare lo streaming.\n"
+                            "Prova a riavviare manualmente lo streaming."
+                        )
+            except Exception as e:
+                logger.error(f"Errore nel riavvio dello streaming: {e}")
+                QMessageBox.warning(
+                    self,
+                    "Avviso",
+                    f"La configurazione è stata applicata, ma si è verificato un errore nel riavvio dello streaming:\n{str(e)}\n"
+                    "Prova a riavviare manualmente lo streaming."
+                )
 
     def start_streaming(self, scanner: Scanner) -> bool:
         """
