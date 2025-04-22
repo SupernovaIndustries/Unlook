@@ -1,65 +1,65 @@
-import time
-import numpy as np
-import cv2
-import serial
+import time, serial
 
-# 1. Configura la seriale
-ser = serial.Serial(
-    port='/dev/serial0',
-    baudrate=9600,
-    bytesize=serial.EIGHTBITS,
-    parity=serial.PARITY_NONE,
-    stopbits=serial.STOPBITS_ONE,
-    timeout=1
-)
+# 1) Apri la porta UART5 (o AMA0 se preferisci) a 115200, timeout 1 s
+ser = serial.Serial('/dev/ttyAMA5', 115200, timeout=1)
+# 2) Lascialo riposare per dargli il tempo di boot (~2 s)
+time.sleep(2.0)
 
-def calc_checksum(data_bytes):
+# 3) Pulisci eventuali dati spuri
+ser.reset_input_buffer()
+ser.reset_output_buffer()
+
+def checksum(data_bytes):
     return sum(data_bytes) & 0xFF
 
-def send_uart(subaddr, payload=b''):
+def send_mspm0(subaddr, payload=b''):
     """
-    Frame UART per DLPC3421 via MSPM0:
-    [0]=0x55
-    [1]=MainCmd (Write = 0x36)
-    [2]=len(payload)+1   (+1 per subaddr)
-    [3]=subaddr (Sub-Address, es. 0x1A)
-    [4..]=payload
-    [..]=checksum
-    [..]=0x0A
+    Costruisce e invia un frame MSPM0:
+      Sync = 0x55
+      MainCmd = ((len(payload)+1) << 2) | 0x02
+      Sub‑Address = subaddr
+      Payload = …
+      Checksum = sum(MainCmd,Subaddr,Payload) mod 256
+      Delimiter = 0x0A
     """
-    length = len(payload) + 1
-    frame = bytearray([0x55, 0x36, length, subaddr]) + payload
-    frame.append(calc_checksum(frame[1:]))
+    size     = len(payload) + 1
+    main_cmd = (size << 2) | 0x02
+    frame    = bytearray([0x55, main_cmd, subaddr]) + payload
+    frame.append(checksum(frame[1:]))
     frame.append(0x0A)
+    print("TX:", frame.hex())
     ser.write(frame)
-    time.sleep(0.005)
+    ser.flush()
+    # attendi un po’ prima del prossimo comando
+    time.sleep(0.1)
 
-# 2. Freeze immagine (Write Image Freeze = 0x1A, payload 01h) :contentReference[oaicite:0]{index=0}
-send_uart(subaddr=0x1A, payload=bytes([0x01]))
+def read_resp():
+    resp = ser.read(128)
+    if resp:
+        print("RX:", resp.hex())
 
-# 3. Crop full‑DMD (Write Image Crop = 0x10) a 0,0 → 640×360 :contentReference[oaicite:1]{index=1}
-# coord x,y start = 0 → [0,0], width=640 → 0x80,0x02, height=360 → 0x68,0x01 (LSB,MSB)
-payload_crop = bytes([0x00,0x00,   # X start LSB,MSB
-                      0x00,0x00,   # Y start LSB,MSB
-                      0x80,0x02,   # pixels/line = 640
-                      0x68,0x01])  # lines/frame = 360
-send_uart(subaddr=0x10, payload=payload_crop)
+# --- 1. (Opzionale) Leggi versione firmware ---
+send_mspm0(0x28)  # Read Version
+read_resp()
 
-# 4. Test Pattern Select = 0x0B :contentReference[oaicite:2]{index=2}
-#   pattern=Horizontal lines (03h), border disabled (b7=0) → Byte1=0x03
-#   colore FG=White(7), BG=Black(0) → Byte2=0x70
-#   foreground width=1 (LSB=1), background width=9 (LSB=9) → Bytes3,4
-payload_tpg = bytes([
-    0x03,       # Byte1: pattern=03h
-    0x70,       # Byte2: FG=7,BG=0
-    0x01,       # Byte3: fore width
-    0x09        # Byte4: back width
-    # nessun Byte5/6 per horizontal lines
-])
-send_uart(subaddr=0x0B, payload=payload_tpg)
+# --- 2. Disabilita ogni input video esterno (Write External Video Source Format) ---
+# subaddr=0x07, payload 0x00 = no video
+send_mspm0(0x07, b'\x00')
 
-# 5. Seleziona Test Pattern Generator (Write Input Source Select = 0x05, payload 01h) :contentReference[oaicite:3]{index=3}
-send_uart(subaddr=0x05, payload=bytes([0x01]))
+# --- 3. Freeze (blocca il DMD per riconfigurare in sicurezza) ---
+send_mspm0(0x1A, b'\x01')
 
-# 6. Sblocca immagine (Write Image Freeze = 0x1A, payload 00h)
-send_uart(subaddr=0x1A, payload=bytes([0x00]))
+# --- 4. Seleziona Test Pattern Generator come sorgente ---
+send_mspm0(0x05, b'\x01')
+
+# --- 5. Invia il pattern “linee orizzontali” ---
+payload = bytes([0x03,  # Horizontal lines
+                 0x70,  # FG=White(7) in alto nibble, BG=Black(0) in basso
+                 0x01,  # foreground width
+                 0x09]) # background width
+send_mspm0(0x0B, payload)
+
+# --- 6. Unfreeze (mostra il nuovo pattern) ---
+send_mspm0(0x1A, b'\x00')
+
+print("Se tutto è OK, ora sul proiettore dovresti vedere le linee orizzontali.")
