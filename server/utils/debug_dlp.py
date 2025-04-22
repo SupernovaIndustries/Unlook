@@ -1,6 +1,6 @@
 import serial, time
 
-ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+ser = serial.Serial('/dev/ttyAMA5', 115200, timeout=1)
 time.sleep(0.1)
 
 # Read Version: 55 0A 28 2E 0A
