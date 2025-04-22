@@ -2,7 +2,7 @@ import time, serial
 
 # Sostituisci con la tua porta (es. '/dev/ttyAMA5' o '/dev/serial0')
 PORT = '/dev/ttyAMA5'
-BAUD = 115200
+BAUD = 9600
 
 # Comandi da testare: (subaddr, payload_bytes)
 COMMANDS = [
