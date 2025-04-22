@@ -111,6 +111,7 @@ class UnLookServer:
         self.broadcast_thread = None
         self.command_thread = None
         self.stream_threads = []
+        self._activity_check_timer = None
 
         # Controllo di flusso
         self._frame_interval = 1.0 / 30.0  # Intervallo iniziale per 30 FPS
@@ -183,7 +184,7 @@ class UnLookServer:
                     "resolution": [1280, 720],
                     "framerate": 30,
                     "format": "RGB888",  # Utilizziamo sempre RGB888 come formato base
-                    "mode": "grayscale"  # La conversione verrà fatta via software
+                    "mode": "color"  # Di default entrambe le camere sono a colori, per compatibilità con la GUI
                 },
                 "right": {
                     "enabled": True,
@@ -243,7 +244,7 @@ class UnLookServer:
                             if "format" not in config["camera"][cam_name] or config["camera"][cam_name][
                                 "format"] == "GREY":
                                 config["camera"][cam_name]["format"] = "RGB888"
-                            # Mantieni il campo mode per la conversione software
+                            # Mantieni il campo mode per la conversione software, con default color
                             if "mode" not in config["camera"][cam_name]:
                                 config["camera"][cam_name]["mode"] = "color"
 
@@ -463,6 +464,14 @@ class UnLookServer:
     def _cleanup_resources(self):
         """Pulisce le risorse in caso di errore durante l'avvio o lo spegnimento."""
         try:
+            # Ferma eventuali timer attivi
+            if hasattr(self,
+                       '_activity_check_timer') and self._activity_check_timer and self._activity_check_timer.is_alive():
+                try:
+                    self._activity_check_timer.cancel()
+                except:
+                    pass
+
             # Chiudi i socket
             try:
                 if hasattr(self, 'command_socket') and self.command_socket:
@@ -477,12 +486,19 @@ class UnLookServer:
                 logger.debug(f"Errore nella chiusura del socket di streaming: {e}")
 
             # Ferma le camere
+            cameras_to_stop = []
             for cam_info in self.cameras:
+                cameras_to_stop.append((cam_info["name"], cam_info["camera"]))
+
+            # Le fermiamo tutte anche con errori
+            for name, camera in cameras_to_stop:
                 try:
-                    if cam_info["camera"].started:
-                        cam_info["camera"].stop()
+                    if camera.started:
+                        logger.info(f"Arresto camera {name}...")
+                        camera.stop()
+                        logger.info(f"Camera {name} arrestata con successo")
                 except Exception as e:
-                    logger.debug(f"Errore nell'arresto della camera {cam_info['name']}: {e}")
+                    logger.error(f"Errore nell'arresto della camera {name}: {e}")
         except Exception as e:
             logger.error(f"Errore nella pulizia delle risorse: {e}")
 
@@ -503,6 +519,11 @@ class UnLookServer:
         if self.state["streaming"]:
             self.stop_streaming()
 
+        # Ferma il timer di controllo attività client
+        if hasattr(self,
+                   '_activity_check_timer') and self._activity_check_timer and self._activity_check_timer.is_alive():
+            self._activity_check_timer.cancel()
+
         # Ferma il servizio di broadcast
         if hasattr(self, 'broadcast_thread') and self.broadcast_thread and self.broadcast_thread.is_alive():
             logger.info("Arresto del servizio di broadcast...")
@@ -521,13 +542,26 @@ class UnLookServer:
         except Exception as e:
             logger.error(f"Errore nella chiusura dei socket: {e}")
 
-        # Ferma le camere
+        # Ferma le camere una per una, con gestione errori robusta
         for cam_info in self.cameras:
-            logger.info(f"Arresto della camera {cam_info['name']}...")
+            name = cam_info["name"]
+            camera = cam_info["camera"]
+            logger.info(f"Arresto della camera {name}...")
             try:
-                cam_info["camera"].stop()
+                if camera.started:
+                    camera.stop()
+                    logger.info(f"Camera {name} arrestata con successo")
+                else:
+                    logger.info(f"Camera {name} già arrestata")
             except Exception as e:
-                logger.error(f"Errore nell'arresto della camera {cam_info['name']}: {e}")
+                logger.error(f"Errore nell'arresto della camera {name}: {e}")
+                # Prova un secondo metodo di chiusura
+                try:
+                    logger.info(f"Tentativo alternativo di arresto per camera {name}")
+                    camera.close()
+                    logger.info(f"Camera {name} chiusa con successo")
+                except Exception as e2:
+                    logger.error(f"Anche il tentativo alternativo ha fallito: {e2}")
 
         logger.info("Server UnLook arrestato")
 
@@ -678,6 +712,11 @@ class UnLookServer:
                         command_type = message.get('type', '')
                         logger.info(f"Comando ricevuto: {command_type}")
 
+                        # Registra l'attività client
+                        self._last_client_activity = time.time()
+                        self.client_connected = True
+                        self.state["clients_connected"] = 1
+
                         # Processa il comando
                         response = self._process_command(message)
 
@@ -796,6 +835,20 @@ class UnLookServer:
                 else:
                     response['status'] = 'error'
                     response['error'] = 'Errore nella cattura dei frame'
+
+            elif command_type == 'DISCONNECT':
+                # Comando esplicito di disconnessione
+                logger.info("Comando di disconnessione ricevuto dal client")
+                response['disconnected'] = True
+                # Segnala la disconnessione del client
+                self.client_connected = False
+                self.client_ip = None
+                self.state["clients_connected"] = 0
+
+                # Ferma lo streaming se attivo
+                if self.state["streaming"]:
+                    logger.info("Arresto streaming a seguito della disconnessione del client")
+                    self.stop_streaming()
 
             else:
                 # Comando sconosciuto
@@ -1040,8 +1093,12 @@ class UnLookServer:
         # Attendi che i thread di streaming terminino
         for thread in self.stream_threads:
             if thread.is_alive():
+                # Attendi con timeout per evitare blocchi
                 thread.join(timeout=2.0)
+                if thread.is_alive():
+                    logger.warning("Thread di streaming ancora attivo dopo il timeout")
 
+        # Svuota la lista dei thread
         self.stream_threads = []
 
         # Calcola statistiche totali
