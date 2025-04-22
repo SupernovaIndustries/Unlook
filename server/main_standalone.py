@@ -1719,8 +1719,8 @@ class UnLookServer:
                                                     f"qualità aumentata a {quality}")
 
                 except Exception as e:
-                if self.running and self.state["streaming"]:  # Solo log se ancora in esecuzione
-                    logger.error(f"Errore nello streaming camera {camera_index}: {e}")
+                    if self.running and self.state["streaming"]:  # Solo log se ancora in esecuzione
+                        logger.error(f"Errore nello streaming camera {camera_index}: {e}")
                 time.sleep(0.01)  # Pausa più lunga in caso di errore
 
                 # Reset del timing
