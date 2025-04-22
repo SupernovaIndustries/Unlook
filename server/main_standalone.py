@@ -111,7 +111,6 @@ class UnLookServer:
         self.broadcast_thread = None
         self.command_thread = None
         self.stream_threads = []
-        self._activity_check_timer = None
 
         # Controllo di flusso
         self._frame_interval = 1.0 / 30.0  # Intervallo iniziale per 30 FPS
@@ -184,7 +183,7 @@ class UnLookServer:
                     "resolution": [1280, 720],
                     "framerate": 30,
                     "format": "RGB888",  # Utilizziamo sempre RGB888 come formato base
-                    "mode": "color"  # Di default entrambe le camere sono a colori, per compatibilità con la GUI
+                    "mode": "color"  # La conversione verrà fatta via software
                 },
                 "right": {
                     "enabled": True,
@@ -244,7 +243,7 @@ class UnLookServer:
                             if "format" not in config["camera"][cam_name] or config["camera"][cam_name][
                                 "format"] == "GREY":
                                 config["camera"][cam_name]["format"] = "RGB888"
-                            # Mantieni il campo mode per la conversione software, con default color
+                            # Mantieni il campo mode per la conversione software
                             if "mode" not in config["camera"][cam_name]:
                                 config["camera"][cam_name]["mode"] = "color"
 
@@ -464,14 +463,6 @@ class UnLookServer:
     def _cleanup_resources(self):
         """Pulisce le risorse in caso di errore durante l'avvio o lo spegnimento."""
         try:
-            # Ferma eventuali timer attivi
-            if hasattr(self,
-                       '_activity_check_timer') and self._activity_check_timer and self._activity_check_timer.is_alive():
-                try:
-                    self._activity_check_timer.cancel()
-                except:
-                    pass
-
             # Chiudi i socket
             try:
                 if hasattr(self, 'command_socket') and self.command_socket:
@@ -486,19 +477,12 @@ class UnLookServer:
                 logger.debug(f"Errore nella chiusura del socket di streaming: {e}")
 
             # Ferma le camere
-            cameras_to_stop = []
             for cam_info in self.cameras:
-                cameras_to_stop.append((cam_info["name"], cam_info["camera"]))
-
-            # Le fermiamo tutte anche con errori
-            for name, camera in cameras_to_stop:
                 try:
-                    if camera.started:
-                        logger.info(f"Arresto camera {name}...")
-                        camera.stop()
-                        logger.info(f"Camera {name} arrestata con successo")
+                    if cam_info["camera"].started:
+                        cam_info["camera"].stop()
                 except Exception as e:
-                    logger.error(f"Errore nell'arresto della camera {name}: {e}")
+                    logger.debug(f"Errore nell'arresto della camera {cam_info['name']}: {e}")
         except Exception as e:
             logger.error(f"Errore nella pulizia delle risorse: {e}")
 
@@ -519,11 +503,6 @@ class UnLookServer:
         if self.state["streaming"]:
             self.stop_streaming()
 
-        # Ferma il timer di controllo attività client
-        if hasattr(self,
-                   '_activity_check_timer') and self._activity_check_timer and self._activity_check_timer.is_alive():
-            self._activity_check_timer.cancel()
-
         # Ferma il servizio di broadcast
         if hasattr(self, 'broadcast_thread') and self.broadcast_thread and self.broadcast_thread.is_alive():
             logger.info("Arresto del servizio di broadcast...")
@@ -542,26 +521,13 @@ class UnLookServer:
         except Exception as e:
             logger.error(f"Errore nella chiusura dei socket: {e}")
 
-        # Ferma le camere una per una, con gestione errori robusta
+        # Ferma le camere
         for cam_info in self.cameras:
-            name = cam_info["name"]
-            camera = cam_info["camera"]
-            logger.info(f"Arresto della camera {name}...")
+            logger.info(f"Arresto della camera {cam_info['name']}...")
             try:
-                if camera.started:
-                    camera.stop()
-                    logger.info(f"Camera {name} arrestata con successo")
-                else:
-                    logger.info(f"Camera {name} già arrestata")
+                cam_info["camera"].stop()
             except Exception as e:
-                logger.error(f"Errore nell'arresto della camera {name}: {e}")
-                # Prova un secondo metodo di chiusura
-                try:
-                    logger.info(f"Tentativo alternativo di arresto per camera {name}")
-                    camera.close()
-                    logger.info(f"Camera {name} chiusa con successo")
-                except Exception as e2:
-                    logger.error(f"Anche il tentativo alternativo ha fallito: {e2}")
+                logger.error(f"Errore nell'arresto della camera {cam_info['name']}: {e}")
 
         logger.info("Server UnLook arrestato")
 
@@ -712,11 +678,6 @@ class UnLookServer:
                         command_type = message.get('type', '')
                         logger.info(f"Comando ricevuto: {command_type}")
 
-                        # Registra l'attività client
-                        self._last_client_activity = time.time()
-                        self.client_connected = True
-                        self.state["clients_connected"] = 1
-
                         # Processa il comando
                         response = self._process_command(message)
 
@@ -744,7 +705,7 @@ class UnLookServer:
     def _process_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
         """
         Processa un comando ricevuto da un client.
-        Versione migliorata con supporto parametri di streaming avanzati.
+        Versione migliorata con supporto parametri di streaming avanzati e gestione sicura delle configurazioni.
 
         Args:
             command: Dizionario rappresentante il comando
@@ -765,15 +726,32 @@ class UnLookServer:
             if command_type == 'PING':
                 # Comando ping
                 response['timestamp'] = time.time()
+                # Aggiorna timestamp di attività client
+                self._last_client_activity = time.time()
+                self.client_ip = command.get('client_ip')
+                self.client_connected = True
 
             elif command_type == 'GET_STATUS':
                 # Aggiorna lo stato
                 self.state['uptime'] = time.time() - self.state['start_time']
+                # Aggiorna timestamp di attività client
+                self._last_client_activity = time.time()
+                self.client_connected = True
 
                 # Aggiungi lo stato alla risposta
                 response['state'] = self.state
 
+                # Includi informazioni sulle modalità attuali delle camere
+                camera_modes = {}
+                for cam_info in self.cameras:
+                    camera_modes[cam_info["name"]] = cam_info.get("mode", "color")
+                response['camera_modes'] = camera_modes
+
             elif command_type == 'START_STREAM':
+                # Aggiorna timestamp di attività client
+                self._last_client_activity = time.time()
+                self.client_connected = True
+
                 # Avvia lo streaming con supporto parametri avanzati
                 if not self.state["streaming"]:
                     # Opzioni opzionali per lo streaming
@@ -805,6 +783,9 @@ class UnLookServer:
                     response['message'] = "Streaming già attivo"
 
             elif command_type == 'STOP_STREAM':
+                # Aggiorna timestamp di attività client
+                self._last_client_activity = time.time()
+
                 # Ferma lo streaming
                 if self.state["streaming"]:
                     self.stop_streaming()
@@ -814,19 +795,65 @@ class UnLookServer:
                     response['message'] = "Streaming non attivo"
 
             elif command_type == 'SET_CONFIG':
-                # Aggiorna la configurazione
+                # Aggiorna timestamp di attività client
+                self._last_client_activity = time.time()
+                self.client_connected = True
+
+                # Aggiorna la configurazione con gestione errori migliorata
                 if 'config' in command:
-                    self._update_config(command['config'])
-                    response['config_updated'] = True
+                    # Controlla se lo streaming è attivo prima di applicare la configurazione
+                    was_streaming = self.state["streaming"]
+
+                    try:
+                        # Se lo streaming è attivo, fermalo prima di applicare le modifiche
+                        if was_streaming:
+                            logger.info("Interruzione temporanea dello streaming per applicare la configurazione")
+                            self.stop_streaming()
+                            time.sleep(0.5)  # Piccola pausa per assicurarsi che lo streaming sia completamente fermato
+
+                        # Ora applica la configurazione
+                        self._update_config(command['config'])
+                        response['config_updated'] = True
+
+                        # Se lo streaming era attivo, riavvialo
+                        if was_streaming:
+                            time.sleep(0.5)  # Piccola pausa per assicurarsi che le camere siano pronte
+                            logger.info("Riavvio dello streaming dopo aggiornamento configurazione")
+                            self.start_streaming()
+
+                    except Exception as e:
+                        logger.error(f"Errore nell'applicazione della configurazione: {e}")
+                        response['status'] = 'error'
+                        response['error'] = f'Errore nell\'applicazione della configurazione: {str(e)}'
+
+                        # Prova a riavviare lo streaming se era attivo
+                        if was_streaming:
+                            try:
+                                self.start_streaming()
+                            except Exception as e2:
+                                logger.error(f"Errore nel riavvio dello streaming dopo errore di configurazione: {e2}")
                 else:
                     response['status'] = 'error'
                     response['error'] = 'Configurazione mancante'
 
             elif command_type == 'GET_CONFIG':
+                # Aggiorna timestamp di attività client
+                self._last_client_activity = time.time()
+                self.client_connected = True
+
                 # Restituisci la configurazione
                 response['config'] = self.config
 
+                # Includi informazioni sulle modalità attuali delle camere
+                camera_modes = {}
+                for cam_info in self.cameras:
+                    camera_modes[cam_info["name"]] = cam_info.get("mode", "color")
+                response['camera_modes'] = camera_modes
+
             elif command_type == 'CAPTURE_FRAME':
+                # Aggiorna timestamp di attività client
+                self._last_client_activity = time.time()
+
                 # Cattura un singolo frame
                 frames = self._capture_frames()
                 if frames:
@@ -835,20 +862,6 @@ class UnLookServer:
                 else:
                     response['status'] = 'error'
                     response['error'] = 'Errore nella cattura dei frame'
-
-            elif command_type == 'DISCONNECT':
-                # Comando esplicito di disconnessione
-                logger.info("Comando di disconnessione ricevuto dal client")
-                response['disconnected'] = True
-                # Segnala la disconnessione del client
-                self.client_connected = False
-                self.client_ip = None
-                self.state["clients_connected"] = 0
-
-                # Ferma lo streaming se attivo
-                if self.state["streaming"]:
-                    logger.info("Arresto streaming a seguito della disconnessione del client")
-                    self.stop_streaming()
 
             else:
                 # Comando sconosciuto
@@ -905,37 +918,90 @@ class UnLookServer:
 
     def _update_config(self, new_config: Dict[str, Any]):
         """
-        Aggiorna la configurazione del server.
+        Aggiorna la configurazione del server con gestione migliorata per le modalità camera.
 
         Args:
             new_config: Nuova configurazione
         """
-        # Aggiorna ricorsivamente la configurazione
-        self._update_dict_recursive(self.config, new_config)
+        logger.info("Applicazione nuova configurazione...")
 
-        # Correggi i formati non supportati
-        if "camera" in new_config:
-            for cam_name in ["left", "right"]:
-                if cam_name in new_config["camera"]:
-                    if "format" in new_config["camera"][cam_name] and new_config["camera"][cam_name][
-                        "format"] == "GREY":
-                        # Correggi il formato non supportato
-                        self.config["camera"][cam_name]["format"] = "RGB888"
-                        logger.info(f"Formato GREY non supportato, convertito a RGB888 per camera {cam_name}")
+        # Interrompi lo streaming se attivo (dovrebbe già essere fermato nella funzione chiamante)
+        was_streaming = self.state["streaming"]
+        if was_streaming:
+            self.stop_streaming()
+            time.sleep(0.5)  # Assicura che lo streaming sia completamente fermato
 
-        # Applica le modifiche alle camere
-        self._apply_camera_config()
-
-        # Salva la configurazione aggiornata
-        config_path = CONFIG_DIR / 'config.json'
         try:
-            with open(config_path, 'w') as f:
-                json.dump(self.config, f, indent=2)
-            logger.info(f"Configurazione salvata in {config_path}")
-        except Exception as e:
-            logger.error(f"Errore nel salvataggio della configurazione: {e}")
+            # Verifica se ci sono modifiche alle modalità delle camere
+            # Se una camera cambia modalità, imposta entrambe le camere alla stessa modalità
+            camera_mode_changed = False
+            target_mode = None
 
-        logger.info("Configurazione aggiornata")
+            if "camera" in new_config:
+                # Verifica se c'è una modifica alla modalità di una fotocamera
+                if "left" in new_config["camera"] and "mode" in new_config["camera"]["left"]:
+                    target_mode = new_config["camera"]["left"]["mode"]
+                    camera_mode_changed = True
+                elif "right" in new_config["camera"] and "mode" in new_config["camera"]["right"]:
+                    target_mode = new_config["camera"]["right"]["mode"]
+                    camera_mode_changed = True
+
+                # Se c'è una modifica alla modalità, applica la stessa modalità a entrambe le camere
+                if camera_mode_changed and target_mode:
+                    logger.info(f"Cambio modalità camera rilevato. Impostazione di entrambe le camere a: {target_mode}")
+
+                    # Imposta entrambe le camere alla stessa modalità
+                    if "left" in new_config["camera"]:
+                        new_config["camera"]["left"]["mode"] = target_mode
+                    else:
+                        # Se left non è presente nel nuovo config, crealo
+                        if "left" not in new_config["camera"]:
+                            new_config["camera"]["left"] = {}
+                        new_config["camera"]["left"]["mode"] = target_mode
+
+                    if "right" in new_config["camera"]:
+                        new_config["camera"]["right"]["mode"] = target_mode
+                    else:
+                        # Se right non è presente nel nuovo config, crealo
+                        if "right" not in new_config["camera"]:
+                            new_config["camera"]["right"] = {}
+                        new_config["camera"]["right"]["mode"] = target_mode
+
+            # Aggiorna ricorsivamente la configurazione
+            self._update_dict_recursive(self.config, new_config)
+
+            # Correggi i formati non supportati
+            if "camera" in new_config:
+                for cam_name in ["left", "right"]:
+                    if cam_name in new_config["camera"]:
+                        if "format" in new_config["camera"][cam_name] and new_config["camera"][cam_name][
+                            "format"] == "GREY":
+                            # Correggi il formato non supportato
+                            self.config["camera"][cam_name]["format"] = "RGB888"
+                            logger.info(f"Formato GREY non supportato, convertito a RGB888 per camera {cam_name}")
+
+            # Applica le modifiche alle camere
+            self._apply_camera_config()
+
+            # Salva la configurazione aggiornata
+            config_path = CONFIG_DIR / 'config.json'
+            try:
+                with open(config_path, 'w') as f:
+                    json.dump(self.config, f, indent=2)
+                logger.info(f"Configurazione salvata in {config_path}")
+            except Exception as e:
+                logger.error(f"Errore nel salvataggio della configurazione: {e}")
+
+            logger.info("Configurazione aggiornata con successo")
+
+        except Exception as e:
+            logger.error(f"Errore nell'aggiornamento della configurazione: {e}")
+            raise
+        finally:
+            # Se lo streaming era attivo, riavvialo
+            if was_streaming:
+                # Nella funzione chiamante verrà riavviato lo streaming
+                pass
 
     def _update_dict_recursive(self, original: Dict[str, Any], update: Dict[str, Any]):
         """
@@ -954,9 +1020,9 @@ class UnLookServer:
     def _apply_camera_config(self):
         """
         Applica la configurazione alle camere.
-        Versione migliorata con supporto per modalità colore/scala di grigi.
+        Versione migliorata con supporto per modalità colore/scala di grigi e sincronizzazione delle camere.
         """
-        # Se lo streaming è attivo, fermalo
+        # Se lo streaming è attivo, fermalo (dovrebbe già essere fatto nella funzione chiamante)
         was_streaming = self.state["streaming"]
         if was_streaming:
             self.stop_streaming()
@@ -965,13 +1031,22 @@ class UnLookServer:
         for cam_info in self.cameras:
             try:
                 camera = cam_info["camera"]
-                camera.stop()
+
+                # Ferma la camera se è attiva
+                if camera.started:
+                    camera.stop()
+                    time.sleep(0.2)  # Breve pausa
 
                 # Ottieni la configurazione
                 if cam_info["name"] == "left":
                     cam_config = self.config["camera"]["left"]
                 else:
                     cam_config = self.config["camera"]["right"]
+
+                # Aggiorna la modalità della camera nell'oggetto cam_info
+                if "mode" in cam_config:
+                    cam_info["mode"] = cam_config["mode"]
+                    logger.info(f"Impostazione camera {cam_info['name']} in modalità {cam_config['mode']}")
 
                 # Determina il formato in base alla modalità se specificata
                 format_str = cam_config.get("format", "RGB888")
@@ -980,20 +1055,14 @@ class UnLookServer:
                     format_str = "RGB888"
                     logger.warning(f"Formato GREY non supportato, convertito a RGB888 per camera {cam_info['name']}")
 
-                # Aggiorna la modalità per la conversione software
-                if "mode" in cam_config:
-                    cam_info["mode"] = cam_config["mode"]
-
                 # Applica i controlli avanzati se presenti
                 controls = {"FrameRate": cam_config.get("framerate", 30)}
 
                 # Controlla se ci sono altre impostazioni da applicare
                 if "exposure" in cam_config:
                     # Converti da 0-100 a valori appropriati per la camera
-                    # AEC e AGC potrebbero dover essere disabilitati per controllo manuale
                     controls["AeEnable"] = 0  # Disabilita auto-esposizione
-                    # Mappa da 0-100 a un valore di esposizione appropriato (dipende dall'hardware)
-                    exposure_val = int(cam_config["exposure"] * 10000 / 100)  # esempio mappatura
+                    exposure_val = int(cam_config["exposure"] * 10000 / 100)
                     controls["ExposureTime"] = exposure_val
                     logger.info(f"Camera {cam_info['name']} esposizione: {exposure_val}")
 
@@ -1004,42 +1073,41 @@ class UnLookServer:
                     logger.info(f"Camera {cam_info['name']} gain: {gain_val}")
 
                 if "brightness" in cam_config:
-                    # Mappa 0-100 a valore appropriato per la camera
                     brightness_val = (cam_config["brightness"] / 100.0) * 2.0 - 1.0  # -1.0 a 1.0
                     controls["Brightness"] = brightness_val
 
                 if "contrast" in cam_config:
-                    # Mappa 0-100 a valore appropriato per la camera
                     contrast_val = cam_config["contrast"] / 50.0  # 0-2.0, 1.0 è neutro
                     controls["Contrast"] = contrast_val
 
                 if "saturation" in cam_config and format_str != "GREY":
-                    # Mappa 0-100 a valore appropriato per la camera
                     saturation_val = cam_config["saturation"] / 50.0  # 0-2.0, 1.0 è neutro
                     controls["Saturation"] = saturation_val
 
                 if "sharpness" in cam_config:
-                    # Mappa 0-100 a valore appropriato per la camera
                     sharpness_val = cam_config["sharpness"] / 100.0
                     controls["Sharpness"] = sharpness_val
 
                 # Applica la configurazione
                 try:
+                    logger.info(f"Applicazione nuova configurazione alla camera {cam_info['name']}")
                     camera_config = camera.create_video_configuration(
                         main={"size": tuple(cam_config["resolution"]),
                               "format": format_str},
                         controls=controls
                     )
-                    camera.configure(camera_config)
 
-                    # Riavvia la camera
+                    # Configura e avvia la camera
+                    camera.configure(camera_config)
                     camera.start()
-                    logger.info(f"Configurazione applicata alla camera {cam_info['name']}")
+                    logger.info(f"Configurazione applicata con successo alla camera {cam_info['name']}")
+
                 except Exception as e:
                     logger.error(
                         f"Errore durante l'applicazione della configurazione alla camera {cam_info['name']}: {e}")
                     # Prova a riavviare la camera con la configurazione precedente
                     try:
+                        logger.info(f"Tentativo di riavvio camera {cam_info['name']} con la configurazione precedente")
                         camera.start()
                     except Exception as e2:
                         logger.error(f"Errore nel riavvio della camera {cam_info['name']}: {e2}")
@@ -1047,13 +1115,11 @@ class UnLookServer:
             except Exception as e:
                 logger.error(f"Errore nell'applicazione della configurazione alla camera {cam_info['name']}: {e}")
 
-        # Riavvia lo streaming se era attivo
-        if was_streaming:
-            self.start_streaming()
+        # Il riavvio dello streaming, se era attivo, sarà gestito dalla funzione chiamante
 
     def start_streaming(self):
         """
-        Avvia lo streaming video.
+        Avvia lo streaming video con miglior gestione delle modalità.
         """
         if self.state["streaming"]:
             logger.warning("Lo streaming è già attivo")
@@ -1064,9 +1130,13 @@ class UnLookServer:
         # Avvia un thread di streaming per ogni camera
         self.stream_threads = []
         for cam_info in self.cameras:
+            # Ottieni la modalità corrente
+            mode = cam_info.get("mode", "color")
+            logger.info(f"Avvio streaming camera {cam_info['index']} ({cam_info['name']}) in modalità {mode}")
+
             thread = threading.Thread(
                 target=self._stream_camera,
-                args=(cam_info["camera"], cam_info["index"], cam_info.get("mode", "color"))
+                args=(cam_info["camera"], cam_info["index"], mode)
             )
             thread.daemon = True
             thread.start()
@@ -1093,12 +1163,8 @@ class UnLookServer:
         # Attendi che i thread di streaming terminino
         for thread in self.stream_threads:
             if thread.is_alive():
-                # Attendi con timeout per evitare blocchi
                 thread.join(timeout=2.0)
-                if thread.is_alive():
-                    logger.warning("Thread di streaming ancora attivo dopo il timeout")
 
-        # Svuota la lista dei thread
         self.stream_threads = []
 
         # Calcola statistiche totali
@@ -1114,8 +1180,7 @@ class UnLookServer:
     def _stream_camera(self, camera: "Picamera2", camera_index: int, mode: str = "color"):
         """
         Funzione ottimizzata che gestisce lo streaming di una camera.
-        Versione con latenza ridotta e priorità di thread.
-        Elimina buffer e pipeline complessi per la massima reattività.
+        Versione con gestione migliorata della modalità a colori e scala di grigi.
 
         Args:
             camera: Oggetto camera
@@ -1181,16 +1246,44 @@ class UnLookServer:
                         continue
 
                     # Converti in base alla modalità (grayscale o color)
-                    if mode == "grayscale" and len(frame.shape) == 3:
-                        # Converti in scala di grigi via software
-                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-                    elif len(frame.shape) == 3 and frame.shape[2] == 4:  # RGBA
-                        frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
-                    elif len(frame.shape) == 2 and mode != "grayscale":  # Grayscale ma vogliamo colore
-                        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                    # IMPORTANTE: Qui gestiamo in modo più affidabile la conversione tra modalità
+                    try:
+                        if mode == "grayscale" and len(frame.shape) == 3:
+                            # Converti in scala di grigi via software
+                            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                        elif len(frame.shape) == 3 and frame.shape[2] == 4:  # RGBA
+                            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                        elif len(frame.shape) == 2 and mode == "color":  # Grayscale ma vogliamo colore
+                            # Se siamo in modalità colore ma abbiamo un frame in scala di grigi,
+                            # convertiamo in un'immagine a colori (BGR)
+                            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+                        # Verifica aggiuntiva per assicurarci che il frame sia nel formato corretto
+                        if mode == "grayscale" and len(frame.shape) == 3:
+                            # Se siamo ancora nel formato sbagliato, forza la conversione
+                            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        elif mode == "color" and len(frame.shape) == 2:
+                            # Se siamo ancora nel formato sbagliato, forza la conversione
+                            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+                    except Exception as conv_err:
+                        logger.error(f"Errore nella conversione del formato immagine: {conv_err}")
+                        # Continua comunque con il frame originale
+
+                    # Controlla una volta di più il formato
+                    if frame is None or frame.size == 0:
+                        logger.error(f"Frame invalido dopo conversione, camera {camera_index}")
+                        time.sleep(0.005)
+                        continue
 
                     # Comprimi in JPEG - la compressione avviene inline, nessuna copia aggiuntiva
-                    success, encoded_data = cv2.imencode('.jpg', frame, encode_params)
+                    try:
+                        success, encoded_data = cv2.imencode('.jpg', frame, encode_params)
+                    except Exception as enc_err:
+                        logger.error(
+                            f"Errore nell'encoding JPEG: {enc_err}. Frame shape: {frame.shape}, dtype: {frame.dtype}")
+                        time.sleep(0.005)
+                        continue
 
                     if not success or encoded_data is None or encoded_data.size == 0:
                         logger.error(f"Errore nella codifica JPEG, camera {camera_index}")
@@ -1204,7 +1297,8 @@ class UnLookServer:
                         "frame": frame_count,
                         "timestamp": timestamp,
                         "format": "jpeg",
-                        "resolution": [frame.shape[1], frame.shape[0]]
+                        "resolution": [frame.shape[1], frame.shape[0]],
+                        "mode": mode  # Aggiungiamo la modalità all'header
                     }
 
                     # Invia l'header e poi i dati - uso di copy=False per evitare copie extra
@@ -1231,7 +1325,7 @@ class UnLookServer:
                             current_fps = 100 / elapsed
                             encode_size = len(encoded_data.tobytes()) / 1024  # KB
                             logger.info(f"Camera {camera_index}: {current_fps:.1f} FPS, "
-                                        f"{encode_size:.1f} KB/frame")
+                                        f"{encode_size:.1f} KB/frame, modalità: {mode}")
 
                             # Aggiorna tempo per prossima statistica
                             last_stats_time = current_time

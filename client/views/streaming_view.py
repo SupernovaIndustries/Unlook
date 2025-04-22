@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QFormLayout, QComboBox, QSlider, QCheckBox,
     QSpinBox, QDoubleSpinBox, QFrame, QSplitter, QFileDialog,
-    QMessageBox, QTabWidget, QRadioButton, QButtonGroup, QLineEdit
+    QMessageBox, QTabWidget, QRadioButton, QButtonGroup, QLineEdit,
+    QProgressDialog
 )
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QMutex, QMutexLocker
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
@@ -935,7 +936,7 @@ class DualStreamView(QWidget):
     def _apply_camera_settings(self):
         """
         Applica le impostazioni delle camere con gestione degli errori migliorata.
-        Versione corretta che previene crash durante il cambio di modalità.
+        Versione ottimizzata per prevenire crash e garantire sincronizzazione delle modalità.
         """
         if not self._scanner or not self._connection_manager or not self._connection_manager.is_connected(
                 self._scanner.device_id):
@@ -963,6 +964,38 @@ class DualStreamView(QWidget):
         right_sharpness = self.right_sharpness_slider.value()
         right_saturation = self.right_saturation_slider.value()
 
+        # Verifica se c'è un cambio di modalità e avvisa l'utente che entrambe le camere saranno impostate allo stesso modo
+        mode_changed = False
+        if (left_mode != right_mode) or (
+                hasattr(self, '_previous_mode_left') and self._previous_mode_left != left_mode) or (
+                hasattr(self, '_previous_mode_right') and self._previous_mode_right != right_mode):
+            mode_changed = True
+            # Memorizza le modalità precedenti per riferimento futuro
+            self._previous_mode_left = left_mode
+            self._previous_mode_right = right_mode
+
+            # Assicura coerenza tra le modalità delle camere (entrambe a colori o entrambe in scala di grigi)
+            # Utilizziamo sempre la modalità della camera sinistra come riferimento
+            right_mode = left_mode
+
+            # Aggiorna l'interfaccia per riflettere questa sincronizzazione
+            if left_mode == "color":
+                self.right_mode_color.blockSignals(True)
+                self.right_mode_color.setChecked(True)
+                self.right_mode_color.blockSignals(False)
+            else:
+                self.right_mode_grayscale.blockSignals(True)
+                self.right_mode_grayscale.setChecked(True)
+                self.right_mode_grayscale.blockSignals(False)
+
+            # Avvisa l'utente della sincronizzazione
+            QMessageBox.information(
+                self,
+                "Sincronizzazione modalità",
+                f"Le modalità delle camere sono state sincronizzate, entrambe impostate a: {left_mode.upper()}.\n"
+                "Per il corretto funzionamento, entrambe le camere devono utilizzare la stessa modalità."
+            )
+
         # Crea il payload di configurazione
         config = {
             "camera": {
@@ -976,7 +1009,7 @@ class DualStreamView(QWidget):
                     "saturation": left_saturation
                 },
                 "right": {
-                    "mode": right_mode,
+                    "mode": right_mode,  # Ora garantito che sia uguale a left_mode
                     "exposure": right_exposure,
                     "gain": right_gain,
                     "brightness": right_brightness,
@@ -987,7 +1020,7 @@ class DualStreamView(QWidget):
             }
         }
 
-        # PUNTO 1: IMPORTANTE - Verificare se lo streaming è attivo
+        # Verifica se lo streaming è attivo
         streaming_was_active = False
         if hasattr(self, '_streaming') and self._streaming:
             streaming_was_active = True
@@ -996,7 +1029,7 @@ class DualStreamView(QWidget):
             QMessageBox.information(
                 self,
                 "Applicazione configurazione",
-                "Per applicare le modifiche alla modalità, lo streaming verrà temporaneamente interrotto e riavviato.",
+                "Per applicare le modifiche, lo streaming verrà temporaneamente interrotto e riavviato.",
                 QMessageBox.Ok
             )
 
@@ -1006,9 +1039,9 @@ class DualStreamView(QWidget):
                 logger.info("Streaming fermato per applicare la nuova configurazione")
             except Exception as e:
                 logger.error(f"Errore nell'arresto dello streaming: {e}")
-                # Continuiamo comunque, l'importante è che il codice vada avanti
+                # Continuiamo comunque
 
-        # PUNTO 2: Invia la configurazione con gestione errori migliorata
+        # Invia la configurazione con gestione errori migliorata
         try:
             # Usa un timeout più lungo per le modifiche di configurazione
             dialog = QProgressDialog("Applicazione delle impostazioni in corso...", "Annulla", 0, 100, self)
@@ -1031,8 +1064,8 @@ class DualStreamView(QWidget):
                             "SET_CONFIG",
                             {"config": config}
                     ):
-                        # La configurazione è stata inviata, ma attendiamo conferma
-                        time.sleep(0.5)  # Lascia tempo allo scanner per applicare le modifiche
+                        # La configurazione è stata inviata, attendiamo conferma
+                        time.sleep(1.0)  # Lascia tempo allo scanner per applicare le modifiche
                         success = True
                         break
                 except Exception as e:
@@ -1043,6 +1076,10 @@ class DualStreamView(QWidget):
 
             # Verifica l'esito dell'operazione
             if success:
+                # Se c'è stato un cambio di modalità, attendi un po' più a lungo
+                if mode_changed:
+                    time.sleep(1.0)  # Pausa aggiuntiva per il cambio di modalità
+
                 QMessageBox.information(
                     self,
                     "Impostazioni applicate",
@@ -1064,11 +1101,11 @@ class DualStreamView(QWidget):
             )
             success = False
 
-        # PUNTO 3: Riavvia lo streaming se era attivo
+        # Riavvia lo streaming se era attivo
         if streaming_was_active:
             try:
                 # Attendi un momento per permettere alle camere di riconfigurare
-                time.sleep(1.0)
+                time.sleep(1.5)
 
                 # Riavvia lo streaming
                 if self._scanner:
