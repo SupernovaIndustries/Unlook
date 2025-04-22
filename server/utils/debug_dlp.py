@@ -1,6 +1,6 @@
 import time, serial
 
-# 1) Apri la UART5 o AMA0 a 115200
+# --- Configura la seriale su UART5 ---
 ser = serial.Serial('/dev/ttyAMA5', 115200, timeout=1)
 time.sleep(0.1)
 
@@ -8,12 +8,11 @@ def checksum(data_bytes):
     return sum(data_bytes) & 0xFF
 
 def send_mspm0(subaddr, payload=b''):
-    # MSPM0: main_cmd = ((len(payload)+1) << 2) | 0x02
     size = len(payload) + 1
     main_cmd = (size << 2) | 0x02
     frame = bytearray([0x55, main_cmd, subaddr]) + payload
-    frame.append(checksum(frame[1:]))  # checksum su main_cmd, subaddr e payload
-    frame.append(0x0A)                 # delimiter
+    frame.append(checksum(frame[1:]))
+    frame.append(0x0A)
     print("TX:", frame.hex())
     ser.write(frame)
     ser.flush()
@@ -23,11 +22,20 @@ def read_resp():
     resp = ser.read(64)
     print("RX:", resp.hex())
 
-# --- Leggi versione firmware
-send_mspm0(0x28)   # subaddr 0x28 = Read Version
+# --- 1) Leggi versione firmware (opzionale) ---
+send_mspm0(0x28)   # Read Version
 read_resp()
 
-# --- Mostra test‐pattern “horizontal lines”
-# payload: [pattern=0x03, FG=0x7,BG=0x0 → 0x70, fore_width=1, back_width=9]
+# --- 2) Freeze immagine (Write Image Freeze = subaddr 0x1A, payload 0x01) ---
+send_mspm0(0x1A, b'\x01')
+
+# --- 3) Seleziona Test Pattern Generator (Input Source = subaddr 0x05, payload 0x01) ---
+send_mspm0(0x05, b'\x01')
+
+# --- 4) Imposta il Test Pattern “horizontal lines” (subaddr 0x0B) ---
 send_mspm0(0x0B, bytes([0x03, 0x70, 0x01, 0x09]))
-print("Ora guarda il proiettore: dovresti vedere linee orizzontali.")
+
+# --- 5) Unfreeze immagine (Write Image Freeze = subaddr 0x1A, payload 0x00) ---
+send_mspm0(0x1A, b'\x00')
+
+print("Ora sul proiettore dovresti vedere le linee orizzontali.")
