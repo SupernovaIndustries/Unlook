@@ -3,7 +3,8 @@
 
 """
 Finestra principale dell'applicazione UnLook Client.
-Versione migliorata con supporto configurazione integrato.
+Versione migliorata con supporto configurazione integrato,
+correzione del bug di disconnessione e autopair.
 """
 
 import logging
@@ -15,10 +16,10 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QStatusBar, QToolBar, QDockWidget, QSplitter, QFrame,
-    QTabWidget, QMessageBox, QMenu, QFileDialog, QDialog
+    QTabWidget, QMessageBox, QMenu, QFileDialog, QDialog, QApplication
 )
-from PySide6.QtCore import Qt, Slot, QSettings, QSize, QPoint
-from PySide6.QtGui import QIcon, QPixmap, QFont, QAction
+from PySide6.QtCore import Qt, Slot, QSettings, QSize, QPoint, QTimer, QEvent, QCoreApplication
+from PySide6.QtGui import QIcon, QPixmap, QFont, QAction, QCloseEvent
 
 from client.controllers.scanner_controller import ScannerController
 from client.models.scanner_model import Scanner, ScannerStatus
@@ -94,7 +95,37 @@ class MainWindow(QMainWindow):
         # Avvia la scoperta degli scanner
         self.scanner_controller.start_discovery()
 
+        # Configura il timer per l'autopair ritardato
+        # (dopo che la scoperta ha avuto tempo di trovare gli scanner)
+        self._autopair_timer = QTimer(self)
+        self._autopair_timer.setSingleShot(True)
+        self._autopair_timer.timeout.connect(self._attempt_autopair)
+        self._autopair_timer.start(2000)  # 2 secondi dopo l'avvio
+
         logger.info("Interfaccia utente principale inizializzata")
+
+    def _attempt_autopair(self):
+        """
+        Tenta di connettersi automaticamente all'ultimo scanner utilizzato.
+        """
+        try:
+            # Controlla se ci sono scanner disponibili prima di tentare l'autopair
+            if not self.scanner_controller.scanners:
+                logger.info("Nessuno scanner disponibile per l'autopair, continuo a cercare...")
+                # Continua a cercare scanner e riprova più tardi
+                self._autopair_timer.start(3000)  # Riprova tra 3 secondi
+                return
+
+            logger.info("Tentativo di autoconnessione all'ultimo scanner...")
+            success = self.scanner_controller.try_autoconnect_last_scanner()
+
+            if success:
+                self.status_bar.showMessage("Connessione all'ultimo scanner utilizzato...", 3000)
+            else:
+                logger.info("Autoconnessione fallita o non possibile, nessun problema")
+
+        except Exception as e:
+            logger.error(f"Errore durante l'autoconnessione: {str(e)}")
 
     def _setup_ui(self):
         """Configura l'interfaccia utente principale."""
@@ -260,44 +291,51 @@ class MainWindow(QMainWindow):
         # Salva lo stato della finestra
         settings.setValue("mainwindow/state", self.saveState())
 
-    def closeEvent(self, event):
+    def closeEvent(self, event: QCloseEvent):
         """
         Gestisce l'evento di chiusura della finestra.
+        Versione corretta che gestisce meglio la disconnessione per prevenire crash.
         """
         logger.info("Chiusura dell'applicazione in corso...")
 
-        # Salva le impostazioni
-        self._save_settings()
+        try:
+            # Salva le impostazioni
+            self._save_settings()
 
-        # Ferma la scoperta degli scanner
-        self.scanner_controller.stop_discovery()
+            # Ferma la scoperta degli scanner
+            self.scanner_controller.stop_discovery()
 
-        # Invia un comando di arresto streaming esplicito se connesso
-        selected_scanner = self.scanner_controller.selected_scanner
-        if selected_scanner and self.scanner_controller.is_connected(selected_scanner.device_id):
-            logger.info(f"Scanner connesso trovato: {selected_scanner.name}")
+            # Invia un comando di arresto streaming esplicito se connesso
+            selected_scanner = self.scanner_controller.selected_scanner
+            if selected_scanner and self.scanner_controller.is_connected(selected_scanner.device_id):
+                logger.info(f"Scanner connesso trovato: {selected_scanner.name}")
 
-            # Importa qui per evitare problemi di importazione circolare
-            from client.network.connection_manager import ConnectionManager
-            connection_manager = ConnectionManager()
+                # Importa qui per evitare problemi di importazione circolare
+                from client.network.connection_manager import ConnectionManager
+                connection_manager = ConnectionManager()
 
-            try:
-                # Ferma lo streaming se attivo
-                if hasattr(self, 'streaming_widget') and self.streaming_widget:
-                    logger.info("Arresto dello streaming...")
-                    self.streaming_widget.stop_streaming()
+                try:
+                    # Ferma lo streaming se attivo
+                    if hasattr(self, 'streaming_widget') and self.streaming_widget:
+                        logger.info("Arresto dello streaming...")
+                        self.streaming_widget.stop_streaming()
 
-                # Invia esplicitamente il comando STOP_STREAM
-                logger.info(f"Invio comando STOP_STREAM a {selected_scanner.name}...")
-                connection_manager.send_message(selected_scanner.device_id, "STOP_STREAM")
-                # Breve pausa per assicurarsi che il comando venga processato
-                time.sleep(0.3)
-            except Exception as e:
-                logger.error(f"Errore nell'invio del comando STOP_STREAM: {e}")
+                    # Invia esplicitamente il comando STOP_STREAM
+                    logger.info(f"Invio comando STOP_STREAM a {selected_scanner.name}...")
+                    connection_manager.send_message(selected_scanner.device_id, "STOP_STREAM")
+                    # Breve pausa per assicurarsi che il comando venga processato
+                    time.sleep(0.3)
+                except Exception as e:
+                    logger.error(f"Errore nell'invio del comando STOP_STREAM: {e}")
 
-        # Disconnetti tutti gli scanner
-        logger.info("Disconnessione da tutti gli scanner...")
-        self._disconnect_all()
+            # Disconnetti tutti gli scanner in modo sicuro
+            logger.info("Disconnessione da tutti gli scanner...")
+            self._disconnect_all()
+
+            # Attendi un breve momento per permettere alle disconnessioni di completarsi
+            time.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Errore durante la chiusura dell'applicazione: {e}")
 
         # Accetta l'evento di chiusura
         logger.info("Applicazione chiusa con successo")
@@ -385,7 +423,8 @@ class MainWindow(QMainWindow):
         self.action_toggle_connection.setText("Connetti")
 
         # Ferma lo streaming se attivo
-        self.streaming_widget.stop_streaming()
+        if hasattr(self, 'streaming_widget') and self.streaming_widget:
+            self.streaming_widget.stop_streaming()
 
         # Passa alla scheda degli scanner
         self.central_tabs.setCurrentIndex(self.TabIndex.SCANNER.value)
@@ -437,7 +476,8 @@ class MainWindow(QMainWindow):
             selected_scanner = self.scanner_controller.selected_scanner
             if selected_scanner and selected_scanner.status == ScannerStatus.CONNECTED:
                 # Se il dispositivo è connesso ma lo streaming non è attivo, avvia lo streaming automaticamente
-                if not self.streaming_widget.is_streaming():
+                if hasattr(self,
+                           'streaming_widget') and self.streaming_widget and not self.streaming_widget.is_streaming():
                     self.streaming_widget.start_streaming(selected_scanner)
 
     @Slot()
@@ -477,10 +517,22 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(f"Disconnessione in corso...", 3000)
 
     def _disconnect_all(self):
-        """Disconnette tutti gli scanner connessi."""
-        for scanner in self.scanner_controller.scanners:
-            if self.scanner_controller.is_connected(scanner.device_id):
-                self.scanner_controller.disconnect_from_scanner(scanner.device_id)
+        """
+        Disconnette tutti gli scanner connessi in modo sicuro.
+        Versione migliorata con gestione errori.
+        """
+        try:
+            for scanner in self.scanner_controller.scanners:
+                if self.scanner_controller.is_connected(scanner.device_id):
+                    try:
+                        logger.info(f"Disconnessione da {scanner.name} in corso...")
+                        self.scanner_controller.disconnect_from_scanner(scanner.device_id)
+                    except Exception as e:
+                        # Catturo le eccezioni per singolo scanner, così se uno fallisce
+                        # possiamo comunque provare con gli altri
+                        logger.error(f"Errore durante la disconnessione da {scanner.name}: {e}")
+        except Exception as e:
+            logger.error(f"Errore nella disconnessione da tutti gli scanner: {e}")
 
     def _update_ui_for_selected_scanner(self):
         """Aggiorna l'interfaccia in base allo scanner selezionato."""

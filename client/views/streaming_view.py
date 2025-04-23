@@ -1128,6 +1128,17 @@ class DualStreamView(QWidget):
                     "Prova a riavviare manualmente lo streaming."
                 )
 
+    def _send_keep_alive(self):
+        """
+        Invia un messaggio PING periodico al server per mantenere viva la connessione.
+        """
+        if self._streaming and self._scanner and self._connection_manager:
+            try:
+                self._connection_manager.send_message(self._scanner.device_id, "PING")
+                logger.debug("Messaggio keep-alive inviato")
+            except Exception as e:
+                logger.warning(f"Errore nell'invio del messaggio keep-alive: {e}")
+
     def start_streaming(self, scanner: Scanner) -> bool:
         """
         Avvia lo streaming video dalle due camere dello scanner.
@@ -1161,6 +1172,10 @@ class DualStreamView(QWidget):
             # Imposta il timer per controllare se la connessione viene stabilita
             self._retry_count = 0
             self._retry_timer.start()
+
+            self._keep_alive_timer = QTimer(self)
+            self._keep_alive_timer.timeout.connect(self._send_keep_alive)
+            self._keep_alive_timer.start(5000)  # Invia ping ogni 5 secondi
 
             # Ritorna True per indicare che il processo è iniziato (anche se lo streaming non è ancora attivo)
             return True
