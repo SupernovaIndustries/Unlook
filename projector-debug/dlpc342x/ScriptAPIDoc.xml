@@ -1,0 +1,3880 @@
+<!--                                  
+ Copyright (c) 2024 Texas Instruments
+                                      
+
+ NOTE: This file is auto generated from a command definition file.
+       Please do not modify the file directly.                    
+
+ Command Spec Version : 1.0
+ -->
+<?xml-stylesheet type="text/xsl" href="ScriptAPIDoc.xsl"?>
+<ScriptAPIDoc>
+  <Function>
+    <Name>WriteOperatingModeSelect</Name>
+    <OpCode>05</OpCode>
+    <Desc>Selects the image operating mode for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>OperatingMode</Name>
+        <Type>OperatingMode</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadOperatingModeSelect</Name>
+    <OpCode>06</OpCode>
+    <Desc>Reads the state of the image operating mode for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>OperatingMode</Name>
+        <Type>OperatingMode</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteExternalVideoSourceFormatSelect</Name>
+    <OpCode>07</OpCode>
+    <Desc>Specifies the active external video port and the source data type for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>VideoFormat</Name>
+        <Type>ExternalVideoFormat</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadExternalVideoSourceFormatSelect</Name>
+    <OpCode>08</OpCode>
+    <Desc>Reads the state of the active external video port and the source data type for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>VideoFormat</Name>
+        <Type>ExternalVideoFormat</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteVideoChromaProcessingSelect</Name>
+    <OpCode>09</OpCode>
+    <Desc>Specifies the characteristics of the selected YCbCr source and the type of chroma processing that will be used for the YCbCr source in the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>ChromaInterpolationMethod</Name>
+        <Type>ChromaInterpolationMethod</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>ChromaChannelSwap</Name>
+        <Type>ChromaChannelSwap</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>CscCoefficientSet</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadVideoChromaProcessingSelect</Name>
+    <OpCode>0A</OpCode>
+    <Desc>Reads the specified characteristics for the selected YCrCb source and the chroma processing used.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>ChromaInterpolationMethod</Name>
+        <Type>ChromaInterpolationMethod</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>ChromaChannelSwap</Name>
+        <Type>ChromaChannelSwap</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>CscCoefficientSet</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteSolidField</Name>
+    <OpCode>0B</OpCode>
+    <Desc>Writes a solid field pattern as internal test pattern for display.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Border</Name>
+        <Type>BorderEnable</Type>
+        <Desc>Enable 1 pixel wide white border around the test pattern. 0: Disable, 1: Enable</Desc>
+      </Param>
+      <Param>
+        <Name>ForegroundColor</Name>
+        <Type>Color</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteHorizontalRamp</Name>
+    <OpCode>0B</OpCode>
+    <Desc>Writes a horizontal ramp pattern as internal test pattern for display.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Border</Name>
+        <Type>BorderEnable</Type>
+        <Desc>Enable 1 pixel wide white border around the test pattern. 0: Disable, 1: Enable</Desc>
+      </Param>
+      <Param>
+        <Name>ForegroundColor</Name>
+        <Type>Color</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>StartValue</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>EndValue</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteVerticalRamp</Name>
+    <OpCode>0B</OpCode>
+    <Desc>Writes a vertical ramp pattern as internal test pattern for display.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Border</Name>
+        <Type>BorderEnable</Type>
+        <Desc>Enable 1 pixel wide white border around the test pattern. 0: Disable, 1: Enable</Desc>
+      </Param>
+      <Param>
+        <Name>ForegroundColor</Name>
+        <Type>Color</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>StartValue</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>EndValue</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteHorizontalLines</Name>
+    <OpCode>0B</OpCode>
+    <Desc>Writes a horizontal lines pattern as internal test pattern for display.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Border</Name>
+        <Type>BorderEnable</Type>
+        <Desc>Enable 1 pixel wide white border around the test pattern. 0: Disable, 1: Enable</Desc>
+      </Param>
+      <Param>
+        <Name>BackgroundColor</Name>
+        <Type>Color</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>ForegroundColor</Name>
+        <Type>Color</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>ForegroundLineWidth</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>BackgroundLineWidth</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteDiagonalLines</Name>
+    <OpCode>0B</OpCode>
+    <Desc>Writes a diagonal lines pattern as internal test pattern for display.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Border</Name>
+        <Type>BorderEnable</Type>
+        <Desc>Enable 1 pixel wide white border around the test pattern. 0: Disable, 1: Enable</Desc>
+      </Param>
+      <Param>
+        <Name>BackgroundColor</Name>
+        <Type>Color</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>ForegroundColor</Name>
+        <Type>Color</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>HorizontalSpacing</Name>
+        <Type>DiagonalLineSpacing</Type>
+        <Desc>The horizontal spacing</Desc>
+      </Param>
+      <Param>
+        <Name>VerticalSpacing</Name>
+        <Type>DiagonalLineSpacing</Type>
+        <Desc>The vertical spacing</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteVerticalLines</Name>
+    <OpCode>0B</OpCode>
+    <Desc>Writes a vertical lines pattern as internal test pattern for display.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Border</Name>
+        <Type>BorderEnable</Type>
+        <Desc>Enable 1 pixel wide white border around the test pattern. 0: Disable, 1: Enable</Desc>
+      </Param>
+      <Param>
+        <Name>BackgroundColor</Name>
+        <Type>Color</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>ForegroundColor</Name>
+        <Type>Color</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>ForegroundLineWidth</Name>
+        <Type>int</Type>
+        <Desc>The foreground line width</Desc>
+      </Param>
+      <Param>
+        <Name>BackgroundLineWidth</Name>
+        <Type>int</Type>
+        <Desc>The background line width</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteGridLines</Name>
+    <OpCode>0B</OpCode>
+    <Desc>Writes a grid lines pattern as internal test pattern for display.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>GridLines</Name>
+        <Type>GridLines</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteCheckerboard</Name>
+    <OpCode>0B</OpCode>
+    <Desc>Writes a checkerboard pattern as internal test pattern for display. 0: Disable, 1: Enable</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Border</Name>
+        <Type>BorderEnable</Type>
+        <Desc>Enable 1 pixel wide white border around the test pattern. 0: Disable, 1: Enable</Desc>
+      </Param>
+      <Param>
+        <Name>BackgroundColor</Name>
+        <Type>Color</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>ForegroundColor</Name>
+        <Type>Color</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>HorizontalCheckerCount</Name>
+        <Type>int</Type>
+        <Desc>The range is 0 to 2047.</Desc>
+      </Param>
+      <Param>
+        <Name>VerticalCheckerCount</Name>
+        <Type>int</Type>
+        <Desc>The range is 0 to 2047.</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteColorbars</Name>
+    <OpCode>0B</OpCode>
+    <Desc>Writes a colorbars pattern as internal test pattern for display.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Border</Name>
+        <Type>BorderEnable</Type>
+        <Desc>Enable 1 pixel wide white border around the test pattern. 0: Disable, 1: Enable</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadTestPatternSelect</Name>
+    <OpCode>0C</OpCode>
+    <Desc>Reads back the host-specified parameters for an internal test pattern.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>TestPatternSelect</Name>
+        <Type>TestPatternSelect</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteSplashScreenSelect</Name>
+    <OpCode>0D</OpCode>
+    <Desc>Selects the index of a splash screen that is to be displayed. See also Write Splash Screen Execute.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>SplashScreenIndex</Name>
+        <Type>int</Type>
+        <Desc>The splash screen index, zero-based (the first splash screen stored in flash is index 0).</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadSplashScreenSelect</Name>
+    <OpCode>0E</OpCode>
+    <Desc>Returns the index of a splash screen that is to be displayed (or is being displayed).</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>SplashScreenIndex</Name>
+        <Type>int</Type>
+        <Desc>The splash screen index, zero-based (the first splash screen stored in flash is index 0).</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>ReadSplashScreenHeader</Name>
+    <OpCode>0F</OpCode>
+    <Desc>Read Splash screen header</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>SplashScreenHeader</Name>
+        <Type>SplashScreenHeader</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>SplashScreenIndex</Name>
+        <Type>int</Type>
+        <Desc>The splash screen index, zero-based (the first splash screen stored in flash is index 0).</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteImageCrop</Name>
+    <OpCode>10</OpCode>
+    <Desc>Specifies which portion of the input image is to be displayed the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>CaptureStartPixel</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>CaptureStartLine</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>PixelsPerLine</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>LinesPerFrame</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadImageCrop</Name>
+    <OpCode>11</OpCode>
+    <Desc>Reads the state of the image crop settings from the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>CaptureStartPixel</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>CaptureStartLine</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>PixelsPerLine</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>LinesPerFrame</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteDisplayImageOrientation</Name>
+    <OpCode>14</OpCode>
+    <Desc>Specifies the image orientation of the displayed image for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>LongAxisImageFlip</Name>
+        <Type>ImageFlip</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>ShortAxisImageFlip</Name>
+        <Type>ImageFlip</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadDisplayImageOrientation</Name>
+    <OpCode>15</OpCode>
+    <Desc>Reads the state of the displayed image orientation function for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>LongAxisImageFlip</Name>
+        <Type>ImageFlip</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>ShortAxisImageFlip</Name>
+        <Type>ImageFlip</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteDisplayImageCurtain</Name>
+    <OpCode>16</OpCode>
+    <Desc>Controls the display image curtain for the projection module. An image curtain fills the entire display with the selected color regardless of selected operating mode (except for Internal Pattern Streaming).</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Enable</Name>
+        <Type>ImageCurtainEnable</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>Color</Name>
+        <Type>Color</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadDisplayImageCurtain</Name>
+    <OpCode>17</OpCode>
+    <Desc>Reads the state of the image curtain control function for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>Enable</Name>
+        <Type>ImageCurtainEnable</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>Color</Name>
+        <Type>Color</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteImageFreeze</Name>
+    <OpCode>1A</OpCode>
+    <Desc>Enables or disables the image freeze function for the projection module. If enabled, this preserves the current image data.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Enable</Name>
+        <Type>bool</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadImageFreeze</Name>
+    <OpCode>1B</OpCode>
+    <Desc>Reads the state of the image freeze function for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>Enable</Name>
+        <Type>bool</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteLookSelect</Name>
+    <OpCode>22</OpCode>
+    <Desc>Specifies the Look for the image on the projection module. A Look typically specifies a target white point.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>LookNumber</Name>
+        <Type>int</Type>
+        <Desc>Zero-based index.</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadLookSelect</Name>
+    <OpCode>23</OpCode>
+    <Desc>Reads the state of the Look select command for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>LookNumber</Name>
+        <Type>int</Type>
+        <Desc>Zero-based index.</Desc>
+      </Param>
+      <Param>
+        <Name>SequenceIndex</Name>
+        <Type>int</Type>
+        <Desc>Zero-based index.</Desc>
+      </Param>
+      <Param>
+        <Name>SequenceFrameTime</Name>
+        <Type>float</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>ReadSequenceHeaderAttributes</Name>
+    <OpCode>26</OpCode>
+    <Desc>Reads Look and Sequence header information for the active Look and Sequence of the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>SequenceHeaderAttributes</Name>
+        <Type>SequenceHeaderAttributes</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteExecuteFlashBatchFile</Name>
+    <OpCode>2D</OpCode>
+    <Desc>Executes a batch file stored in the flash image.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>BatchFileNumber</Name>
+        <Type>int</Type>
+        <Desc>Zero-based index.</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteInputImageSize</Name>
+    <OpCode>2E</OpCode>
+    <Desc>Specifies the active data size of the external input image to the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>PixelsPerLine</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>LinesPerFrame</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadInputImageSize</Name>
+    <OpCode>2F</OpCode>
+    <Desc>Reads the specified data size of the external input image to the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>PixelsPerLine</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>LinesPerFrame</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteSplashScreenExecute</Name>
+    <OpCode>35</OpCode>
+    <Desc>Retrieves the select splash screen from flash for display on the projection module. See also Write Splash Screen Select.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteMirrorLock</Name>
+    <OpCode>39</OpCode>
+    <Desc>This command is used to lock/unlock the DMD interface for optical alignment. When locked, DMD mirrors will not change state.</Desc>
+    <TIInternal>True</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>MirrorLockOption</Name>
+        <Type>MirrorLockOptions</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadMirrorLock</Name>
+    <OpCode>3A</OpCode>
+    <Desc>Reads the lock/unlock state of the DMD interface for optical alignment.</Desc>
+    <TIInternal>True</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>MirrorLockOption</Name>
+        <Type>MirrorLockOptions</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteLedOutputControlMethod</Name>
+    <OpCode>50</OpCode>
+    <Desc>Specifies the method for controlling the LED outputs for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>LedControlMethod</Name>
+        <Type>LedControlMethod</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadLedOutputControlMethod</Name>
+    <OpCode>51</OpCode>
+    <Desc>Reads the state of the LED output control method for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>LedControlMethod</Name>
+        <Type>LedControlMethod</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteRgbLedEnable</Name>
+    <OpCode>52</OpCode>
+    <Desc>Enables the LEDs for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>RedLedEnable</Name>
+        <Type>bool</Type>
+        <Desc>0: Disable, 1: Enable</Desc>
+      </Param>
+      <Param>
+        <Name>GreenLedEnable</Name>
+        <Type>bool</Type>
+        <Desc>0: Disable, 1: Enable</Desc>
+      </Param>
+      <Param>
+        <Name>BlueLedEnable</Name>
+        <Type>bool</Type>
+        <Desc>0: Disable, 1: Enable</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadRgbLedEnable</Name>
+    <OpCode>53</OpCode>
+    <Desc>Reads the state of the LED enables for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>RedLedEnable</Name>
+        <Type>bool</Type>
+        <Desc>0: Disable, 1: Enable</Desc>
+      </Param>
+      <Param>
+        <Name>GreenLedEnable</Name>
+        <Type>bool</Type>
+        <Desc>0: Disable, 1: Enable</Desc>
+      </Param>
+      <Param>
+        <Name>BlueLedEnable</Name>
+        <Type>bool</Type>
+        <Desc>0: Disable, 1: Enable</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteRgbLedCurrent</Name>
+    <OpCode>54</OpCode>
+    <Desc>Sets the IDAC register value of the PMIC for the red, green, and blue LEDs. This value directly controls the LED current.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>RedLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>GreenLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>BlueLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadRgbLedCurrent</Name>
+    <OpCode>55</OpCode>
+    <Desc>Reads the state of the current for the red, green, and blue LEDs. This value directly controls the LED current.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>RedLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>GreenLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>BlueLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>ReadCaicLedMaxAvailablePower</Name>
+    <OpCode>57</OpCode>
+    <Desc>Reads the specified maximum LED power (Watts) allowed for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>MaxLedPower</Name>
+        <Type>float</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteRgbLedMaxCurrent</Name>
+    <OpCode>5C</OpCode>
+    <Desc>Specifies the maximum LED current allowed for each LED in the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>MaxRedLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>MaxGreenLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>MaxBlueLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadRgbLedMaxCurrent</Name>
+    <OpCode>5D</OpCode>
+    <Desc>Reads the specified maximum LED current allowed for each LED in the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>MaxRedLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>MaxGreenLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>MaxBlueLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>ReadCaicRgbLedCurrent</Name>
+    <OpCode>5F</OpCode>
+    <Desc>Reads the state of the current for the red, green, and blue LEDs of the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>RedLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>GreenLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>BlueLedCurrent</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteLocalAreaBrightnessBoostControl</Name>
+    <OpCode>80</OpCode>
+    <Desc>Controls the local area brightness boost image processing functionality for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>LabbControl</Name>
+        <Type>LabbControl</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>SharpnessStrength</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>LabbStrengthSetting</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadLocalAreaBrightnessBoostControl</Name>
+    <OpCode>81</OpCode>
+    <Desc>Reads the state of the local area brightness boost image processing functionality for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>LabbControl</Name>
+        <Type>LabbControl</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>SharpnessStrength</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>LabbStrengthSetting</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>LabbGainValue</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteCaicImageProcessingControl</Name>
+    <OpCode>84</OpCode>
+    <Desc>Controls the CAIC functionality for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>CaicGainDisplayScale</Name>
+        <Type>CaicGainDisplayScale</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>CaicGainDisplayEnable</Name>
+        <Type>bool</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>CaicMaxLumensGain</Name>
+        <Type>float</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>CaicClippingThreshold</Name>
+        <Type>float</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadCaicImageProcessingControl</Name>
+    <OpCode>85</OpCode>
+    <Desc>Reads the state of the CAIC functionality within the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>CaicGainDisplayScale</Name>
+        <Type>CaicGainDisplayScale</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>CaicGainDisplayEnable</Name>
+        <Type>bool</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>CaicMaxLumensGain</Name>
+        <Type>float</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>CaicClippingThreshold</Name>
+        <Type>float</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteColorCoordinateAdjustmentControl</Name>
+    <OpCode>86</OpCode>
+    <Desc>Controls the Color Coordinate Adjustment (CCA) image processing functionality for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>CcaEnable</Name>
+        <Type>bool</Type>
+        <Desc>Must be enabled during normal operation. 0: Disable, 1: Enable</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadColorCoordinateAdjustmentControl</Name>
+    <OpCode>87</OpCode>
+    <Desc>Reads the state of the Color Coordinate Adjustment (CCA) image processing within the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>CcaEnable</Name>
+        <Type>bool</Type>
+        <Desc>0: Disable, 1: Enable</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteKeystoneCorrectionControl</Name>
+    <OpCode>88</OpCode>
+    <Desc>Controls the keystone correction image processing functionality for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>KeystoneCorrectionEnable</Name>
+        <Type>bool</Type>
+        <Desc>0: Disable, 1: Enable</Desc>
+      </Param>
+      <Param>
+        <Name>OpticalThrowRatio</Name>
+        <Type>float</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>OpticalDmdOffset</Name>
+        <Type>float</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadKeystoneCorrectionControl</Name>
+    <OpCode>89</OpCode>
+    <Desc>Reads the state of the keystone correction image processing within the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>KeystoneCorrectionEnable</Name>
+        <Type>bool</Type>
+        <Desc>0: Disable, 1: Enable</Desc>
+      </Param>
+      <Param>
+        <Name>OpticalThrowRatio</Name>
+        <Type>float</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+      <Param>
+        <Name>OpticalDmdOffset</Name>
+        <Type>float</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteKeystoneProjectionPitchAngle</Name>
+    <OpCode>BB</OpCode>
+    <Desc>Specifies the keystone projection pitch angle for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>PitchAngle</Name>
+        <Type>float</Type>
+        <Desc>The range is -40 to 40.</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadKeystoneProjectionPitchAngle</Name>
+    <OpCode>BC</OpCode>
+    <Desc>Reads the specified keystone projection pitch angle for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>PitchAngle</Name>
+        <Type>float</Type>
+        <Desc>The range is -40 to 40.</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteDsiHsClockInput</Name>
+    <OpCode>BD</OpCode>
+    <Desc>Sets the input DSI high speed clock frequency in MHz.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>ClockSpeed</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadDsiHsClockInput</Name>
+    <OpCode>BE</OpCode>
+    <Desc>Gets the expected input DSI high speed clock frequency in MHz.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>ClockSpeed</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>ReadShortStatus</Name>
+    <OpCode>D0</OpCode>
+    <Desc>Provides a brief system status for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>ShortStatus</Name>
+        <Type>ShortStatus</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>ReadSystemStatus</Name>
+    <OpCode>D1</OpCode>
+    <Desc>Reads system status information for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>SystemStatus</Name>
+        <Type>SystemStatus</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>ReadSystemSoftwareVersion</Name>
+    <OpCode>D2</OpCode>
+    <Desc>Reads the Arm software version (main application) information for the projection module. This application is part of the firmware image.</Desc>
+    <TIInternal>True</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>PatchVersion</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>MinorVersion</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>MajorVersion</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>ReadCommunicationStatus</Name>
+    <OpCode>D3</OpCode>
+    <Desc>Reads I2C communication status information for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>CommunicationStatus</Name>
+        <Type>CommunicationStatus</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>ReadControllerDeviceId</Name>
+    <OpCode>D4</OpCode>
+    <Desc>Reads the controller device ID for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>DeviceId</Name>
+        <Type>ControllerDeviceId</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>ReadDmdDeviceId</Name>
+    <OpCode>D5</OpCode>
+    <Desc>Reads the DMD device ID or DMD fuse data for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>DeviceId</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>DmdDataSelection</Name>
+        <Type>DmdDataSelection</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadSystemTemperature</Name>
+    <OpCode>D6</OpCode>
+    <Desc>Reads the System Temperature.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>Temperature</Name>
+        <Type>float</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteDsiPortEnable</Name>
+    <OpCode>D7</OpCode>
+    <Desc>Enables the DSI port for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Enable</Name>
+        <Type>DsiEnable</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadDsiPortEnable</Name>
+    <OpCode>D8</OpCode>
+    <Desc>Returns the state of the DSI port for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>Enable</Name>
+        <Type>DsiEnable</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>ReadFirmwareBuildVersion</Name>
+    <OpCode>D9</OpCode>
+    <Desc>Reads the controller firmware version for the projection module.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>PatchVersion</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>MinorVersion</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>MajorVersion</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>ReadFlashUpdatePrecheck</Name>
+    <OpCode>DD</OpCode>
+    <Desc>Verifies that a pending flash update (write) is appropriate for the specified block of the projection module flash. Must have called Write Flash Data Type Select prior.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>PackageSizeStatus</Name>
+        <Type>Error</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>PacakgeConfigurationCollapsed</Name>
+        <Type>Error</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>PacakgeConfigurationIdentifier</Name>
+        <Type>Error</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>FlashUpdatePackageSize</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteFlashDataTypeSelect</Name>
+    <OpCode>DE</OpCode>
+    <Desc>Selects the data block that will be written/read from the flash.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>FlashSelect</Name>
+        <Type>FlashDataTypeSelect</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteFlashDataLength</Name>
+    <OpCode>DF</OpCode>
+    <Desc>Specifies the length in bytes of data that will be written/read from the flash.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>FlashDataLength</Name>
+        <Type>int</Type>
+        <Desc>LSB first.</Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteFlashErase</Name>
+    <OpCode>E0</OpCode>
+    <Desc>Erases the selected flash data.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WriteFlashStart</Name>
+    <OpCode>E1</OpCode>
+    <Desc>Writes data to the flash.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Data</Name>
+        <Type>bytearray</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteFlashContinue</Name>
+    <OpCode>E2</OpCode>
+    <Desc>Writes data to the flash.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Data</Name>
+        <Type>bytearray</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadFlashStart</Name>
+    <OpCode>E3</OpCode>
+    <Desc>Reads data from the flash.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>Data</Name>
+        <Type>bytearray</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Length</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadFlashContinue</Name>
+    <OpCode>E4</OpCode>
+    <Desc>Reads data from the flash.</Desc>
+    <TIInternal>False</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>Data</Name>
+        <Type>bytearray</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Length</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteInternalRegisterAddress</Name>
+    <OpCode>E5</OpCode>
+    <Desc>Specifies the address of an internal register in the projection module. This command is sent before a register read/write.</Desc>
+    <TIInternal>True</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Address</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WriteInternalRegister</Name>
+    <OpCode>E6</OpCode>
+    <Desc>Writes data to an internal register of the projection module.</Desc>
+    <TIInternal>True</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Data</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadInternalRegister</Name>
+    <OpCode>E7</OpCode>
+    <Desc>Reads data from an internal register of the projection module. </Desc>
+    <TIInternal>True</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>Data</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters />
+  </Function>
+  <Function>
+    <Name>WritePadRegisterAddress</Name>
+    <OpCode>EB</OpCode>
+    <Desc>Specifies the address of an external PAD register in the projection module. This command is sent before a register read/write.</Desc>
+    <TIInternal>True</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Address</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>DataLength</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+      <Param>
+        <Name>ReadWrite</Name>
+        <Type>ReadWrite</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>WritePadRegister</Name>
+    <OpCode>EC</OpCode>
+    <Desc>Writes data to an external PAD register.</Desc>
+    <TIInternal>True</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Data</Name>
+        <Type>bytearray</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Function>
+    <Name>ReadPadRegister</Name>
+    <OpCode>ED</OpCode>
+    <Desc>Reads data from an external PAD register.</Desc>
+    <TIInternal>True</TIInternal>
+    <Returns>
+      <Param>
+        <Name>Summary</Name>
+        <Type>ExecutionSummary</Type>
+        <Desc>Status and summary of command execution.</Desc>
+      </Param>
+      <Param>
+        <Name>Data</Name>
+        <Type>bytearray</Type>
+        <Desc></Desc>
+      </Param>
+    </Returns>
+    <Parameters>
+      <Param>
+        <Name>Length</Name>
+        <Type>int</Type>
+        <Desc></Desc>
+      </Param>
+    </Parameters>
+  </Function>
+  <Enum>
+    <Name>ActiveOrIdle</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>Active</Name>
+      <Desc>Previous frame active</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Idle</Name>
+      <Desc>Previous frame idle</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>Application</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>BootApp</Name>
+      <Desc>Boot App</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>MainApp</Name>
+      <Desc>Main App</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>BorderColorSource</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>Command</Name>
+      <Desc>Defined by the border color command</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Flash</Name>
+      <Desc>Flash defined 24-bit color</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>BorderEnable</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Disable</Name>
+      <Desc>Disable</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Enable</Name>
+      <Desc>Enable</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ByteOrders</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>LittleEndian</Name>
+      <Desc>Little endian</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>BigEndian</Name>
+      <Desc>Big endian</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>CaicGainDisplayScale</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>P1024</Name>
+      <Desc>100% = 1024 pixels</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>P512</Name>
+      <Desc>100% = 512 pixels</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>CaicWpcControl</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>Disabled</Name>
+      <Desc>White point correction disabled</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Enabled</Name>
+      <Desc>White point correction enabled</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ChromaChannelSwap</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Cbcr</Name>
+      <Desc>CbCr</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Crcb</Name>
+      <Desc>CrCb</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ChromaInterpolationMethod</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>ChromaInterpolation</Name>
+      <Desc>Chroma Interpolation</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>ChromaCopy</Name>
+      <Desc>Chroma Copy</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ChromaOrders</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>CrFirst</Name>
+      <Desc>Cr first</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>CbFirst</Name>
+      <Desc>Cb first</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>Color</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Black</Name>
+      <Desc>Black</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Red</Name>
+      <Desc>Red</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>Green</Name>
+      <Desc>Green</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>Blue</Name>
+      <Desc>Blue</Desc>
+      <Value>3</Value>
+    </Member>
+    <Member>
+      <Name>Cyan</Name>
+      <Desc>Cyan</Desc>
+      <Value>4</Value>
+    </Member>
+    <Member>
+      <Name>Magenta</Name>
+      <Desc>Magenta</Desc>
+      <Value>5</Value>
+    </Member>
+    <Member>
+      <Name>Yellow</Name>
+      <Desc>Yellow</Desc>
+      <Value>6</Value>
+    </Member>
+    <Member>
+      <Name>White</Name>
+      <Desc>White</Desc>
+      <Value>7</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ColorOrders</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Rgb</Name>
+      <Desc>RGB</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Grb</Name>
+      <Desc>GRB</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>CompressionTypes</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Uncompressed</Name>
+      <Desc>Uncompressed</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>RgbRleCompressed</Name>
+      <Desc>RGB RLE Compressed</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>Unused</Name>
+      <Desc>Unused</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>YuvRleCompressed</Name>
+      <Desc>YUV RLE Compressed</Desc>
+      <Value>3</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ControllerConfiguration</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Single</Name>
+      <Desc>Single</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Dual</Name>
+      <Desc>Dual</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ControllerDeviceId</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Dlpc3430</Name>
+      <Desc>Dlpc3430</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3433</Name>
+      <Desc>Dlpc3433</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3432</Name>
+      <Desc>Dlpc3432</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3434</Name>
+      <Desc>Dlpc3434</Desc>
+      <Value>3</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3435</Name>
+      <Desc>Dlpc3435</Desc>
+      <Value>4</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3438</Name>
+      <Desc>Dlpc3438</Desc>
+      <Value>5</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3436</Name>
+      <Desc>Dlpc3436</Desc>
+      <Value>6</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3437</Name>
+      <Desc>Dlpc3437</Desc>
+      <Value>7</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3472</Name>
+      <Desc>Dlpc3472</Desc>
+      <Value>8</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3439</Name>
+      <Desc>Dlpc3439</Desc>
+      <Value>9</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3440</Name>
+      <Desc>Dlpc3440</Desc>
+      <Value>10</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3478</Name>
+      <Desc>Dlpc3478</Desc>
+      <Value>11</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3479</Name>
+      <Desc>Dlpc3479</Desc>
+      <Value>12</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3470</Name>
+      <Desc>Dlpc3470</Desc>
+      <Value>15</Value>
+    </Member>
+    <Member>
+      <Name>Dlpc3421</Name>
+      <Desc>Dlpc3421</Desc>
+      <Value>14</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>DiagonalLineSpacing</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Dls3</Name>
+      <Desc>3 pixels</Desc>
+      <Value>3</Value>
+    </Member>
+    <Member>
+      <Name>Dls7</Name>
+      <Desc>7 pixels</Desc>
+      <Value>7</Value>
+    </Member>
+    <Member>
+      <Name>Dls15</Name>
+      <Desc>15 pixels</Desc>
+      <Value>15</Value>
+    </Member>
+    <Member>
+      <Name>Dls31</Name>
+      <Desc>31 pixels</Desc>
+      <Value>31</Value>
+    </Member>
+    <Member>
+      <Name>Dls63</Name>
+      <Desc>63 pixels</Desc>
+      <Value>63</Value>
+    </Member>
+    <Member>
+      <Name>Dls127</Name>
+      <Desc>127 pixels</Desc>
+      <Value>127</Value>
+    </Member>
+    <Member>
+      <Name>Dls255</Name>
+      <Desc>255 pixels</Desc>
+      <Value>255</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>DmdDataSelection</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>DmdDeviceId</Name>
+      <Desc>DmdDeviceId</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>DmdFuseGroup0</Name>
+      <Desc>DmdFuseGroup0</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>DmdFuseGroup1</Name>
+      <Desc>DmdFuseGroup1</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>DmdFuseGroup2</Name>
+      <Desc>DmdFuseGroup2</Desc>
+      <Value>3</Value>
+    </Member>
+    <Member>
+      <Name>DmdFuseGroup3</Name>
+      <Desc>DmdFuseGroup3</Desc>
+      <Value>4</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>DmdSequencerSyncMode</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>AutoSync</Name>
+      <Desc>Auto-sync</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>ForceLockToInternalVsync</Name>
+      <Desc>Force lock to internal VSYNC</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>DsiEnable</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Enable</Name>
+      <Desc>Enable</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Disable</Name>
+      <Desc>Disable</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>Error</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>NoError</Name>
+      <Desc>No Error</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Error</Name>
+      <Desc>Error</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ExposureTimeSupported</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>No</Name>
+      <Desc>No</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Yes</Name>
+      <Desc>Yes</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ExternalVideoFormat</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Dsi</Name>
+      <Desc>DSI, Bus Width: 1 - 4</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>ParallelRgb565Bw16</Name>
+      <Desc>Parallel, RGB 565, Bus Width: 16, 1 Clk/Pixel</Desc>
+      <Value>64</Value>
+    </Member>
+    <Member>
+      <Name>ParallelRgb666Bw18</Name>
+      <Desc>Parallel, RGB 666, Bus Width: 18, 1 Clk/Pixel</Desc>
+      <Value>65</Value>
+    </Member>
+    <Member>
+      <Name>ParallelRgb888Bw8</Name>
+      <Desc>Parallel, RGB 888, Bus Width: 8, 3 Clk/Pixel</Desc>
+      <Value>66</Value>
+    </Member>
+    <Member>
+      <Name>ParallelRgb888Bw24</Name>
+      <Desc>Parallel, RGB 888, Bus Width: 24, 1 Clks/Pixel</Desc>
+      <Value>67</Value>
+    </Member>
+    <Member>
+      <Name>ParallelYcbcr666Bw18</Name>
+      <Desc>Parallel, YCbCr 666, Bus Width: 18, 1 Clk/Pixel</Desc>
+      <Value>80</Value>
+    </Member>
+    <Member>
+      <Name>ParallelYcbcr888Bw24</Name>
+      <Desc>Parallel, YCbCr 888, Bus Width: 24, 1 Clk/Pixel</Desc>
+      <Value>81</Value>
+    </Member>
+    <Member>
+      <Name>ParallelYcbcr422Bw8</Name>
+      <Desc>Parallel, YCbCr 4:2:2 88, Bus Width: 8, 2 Clks/Pixel</Desc>
+      <Value>96</Value>
+    </Member>
+    <Member>
+      <Name>ParallelYcbcr422Bw16</Name>
+      <Desc>Parallel, YCbCr 4:2:2 88, Bus Width: 16, 1 Clk/Pixel</Desc>
+      <Value>97</Value>
+    </Member>
+    <Member>
+      <Name>Bt656</Name>
+      <Desc>BT656, YCbCr 4:2:2 88, Bus Width: 8, 2 Clk/Pixel</Desc>
+      <Value>160</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>FlashDataTypeSelect</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>EntireFlash</Name>
+      <Desc>Entire Flash</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>EntireFlashNoOem</Name>
+      <Desc>Entire Flash except OEM Calibration and Scratchpad Data</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>MainApp</Name>
+      <Desc>Main Software Application</Desc>
+      <Value>16</Value>
+    </Member>
+    <Member>
+      <Name>TiApp</Name>
+      <Desc>TI Application Data (AOM)</Desc>
+      <Value>32</Value>
+    </Member>
+    <Member>
+      <Name>BatchFiles</Name>
+      <Desc>OEM Batchfiles</Desc>
+      <Value>48</Value>
+    </Member>
+    <Member>
+      <Name>Looks</Name>
+      <Desc>Looks Data</Desc>
+      <Value>64</Value>
+    </Member>
+    <Member>
+      <Name>Sequences</Name>
+      <Desc>Sequence Data</Desc>
+      <Value>80</Value>
+    </Member>
+    <Member>
+      <Name>Cmt</Name>
+      <Desc>Degamma/CMT Data</Desc>
+      <Value>96</Value>
+    </Member>
+    <Member>
+      <Name>Cca</Name>
+      <Desc>CCA Data</Desc>
+      <Value>112</Value>
+    </Member>
+    <Member>
+      <Name>Gluts</Name>
+      <Desc>General LUT Data</Desc>
+      <Value>128</Value>
+    </Member>
+    <Member>
+      <Name>Splash</Name>
+      <Desc>OEM Splash Screens</Desc>
+      <Value>144</Value>
+    </Member>
+    <Member>
+      <Name>OemCal</Name>
+      <Desc>OEM Calibration Data</Desc>
+      <Value>160</Value>
+    </Member>
+    <Member>
+      <Name>OemScratchpadFull0</Name>
+      <Desc>Entire OEM Scratchpad Data Set 0</Desc>
+      <Value>176</Value>
+    </Member>
+    <Member>
+      <Name>OemScratchpadPartial0</Name>
+      <Desc>Partial OEM Scrathpad Data Set 0</Desc>
+      <Value>177</Value>
+    </Member>
+    <Member>
+      <Name>OemScratchpadFull1</Name>
+      <Desc>Entire OEM Scratchpad Data Set 1</Desc>
+      <Value>178</Value>
+    </Member>
+    <Member>
+      <Name>OemScratchpadPartial1</Name>
+      <Desc>Partial OEM Scrathpad Data Set 1</Desc>
+      <Value>179</Value>
+    </Member>
+    <Member>
+      <Name>OemScratchpadFull2</Name>
+      <Desc>Entire OEM Scratchpad Data Set 2</Desc>
+      <Value>180</Value>
+    </Member>
+    <Member>
+      <Name>OemScratchpadPartial2</Name>
+      <Desc>Partial OEM Scrathpad Data Set 2</Desc>
+      <Value>181</Value>
+    </Member>
+    <Member>
+      <Name>OemScratchpadFull3</Name>
+      <Desc>Entire OEM Scratchpad Data Set 3</Desc>
+      <Value>181</Value>
+    </Member>
+    <Member>
+      <Name>OemScratchpadPartial3</Name>
+      <Desc>Partial OEM Scrathpad Data Set 3</Desc>
+      <Value>183</Value>
+    </Member>
+    <Member>
+      <Name>EntireSensPatternData</Name>
+      <Desc>Entire Sensing Pattern Data</Desc>
+      <Value>208</Value>
+    </Member>
+    <Member>
+      <Name>EntireSensSeqData</Name>
+      <Desc>Entire Sensing Sequence Data</Desc>
+      <Value>224</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>FlashErase</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Complete</Name>
+      <Desc>Complete</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>NotComplete</Name>
+      <Desc>Not Complete</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>IdleMode</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>Disabled</Name>
+      <Desc>Idle Mode Disabled</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Auto</Name>
+      <Desc>Auto Idle Mode Enabled</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>Manual</Name>
+      <Desc>Manual Idle Mode Enabled</Desc>
+      <Value>2</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>IlluminatorEnable</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>Disable</Name>
+      <Desc>Disable</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Enable</Name>
+      <Desc>Enable</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>IllumSelect</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>NoneSelected</Name>
+      <Desc>None Selected</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>RedOnly</Name>
+      <Desc>Red Only</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>Rgb</Name>
+      <Desc>RGB</Desc>
+      <Value>7</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ImageCurtainEnable</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Disable</Name>
+      <Desc>Disable</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Enable</Name>
+      <Desc>Enable</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ImageFlip</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>ImageNotFlipped</Name>
+      <Desc>Image not flipped</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>ImageFlipped</Name>
+      <Desc>Image flipped</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>LabbControl</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Disabled</Name>
+      <Desc>Disabled</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Manual</Name>
+      <Desc>Enabled: Manual strength control (no light sensor)</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>Automatic</Name>
+      <Desc>Enabled: Automatic strength control (uses light sensor - not supported)</Desc>
+      <Value>2</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>LedControlMethod</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Manual</Name>
+      <Desc>Manual RGB LED currents (disables CAIC algorithm)</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Automatic</Name>
+      <Desc>CAIC (automatic) RGB LED power (enables CAIC algorithm)</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>LedState</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>LedOff</Name>
+      <Desc>LED Off</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>LedOn</Name>
+      <Desc>LED On</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>MasterOrSlaveOperation</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Master</Name>
+      <Desc>Master</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Slave</Name>
+      <Desc>Slave</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>MirrorLockOptions</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>DmdInterfaceLock</Name>
+      <Desc>DMD Interface Lock</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>DmdInterfaceUnlock</Name>
+      <Desc>DMD Interface Unlock</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>DmdInterfaceUnlockDelay100MsDmdInterfaceLock</Name>
+      <Desc>DMD Interface Unlock, delay 100ms, DMD Interface Lock</Desc>
+      <Value>3</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>MotionVideoType</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>Pattern22</Name>
+      <Desc>Two frames repeat, two frames repeat, etc. (2:2 pattern)</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Pattern32</Name>
+      <Desc>Three frames repeat, two frames repeat, etc. (3:2 pattern)</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>OperatingMode</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>ExternalVideoPort</Name>
+      <Desc>External Video Port</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>TestPatternGenerator</Name>
+      <Desc>Test Pattern Generator</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>SplashScreen</Name>
+      <Desc>Splash Screen</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>SensExternalPattern</Name>
+      <Desc>External Pattern Streaming</Desc>
+      <Value>3</Value>
+    </Member>
+    <Member>
+      <Name>SensInternalPattern</Name>
+      <Desc>Internal Pattern Streaming</Desc>
+      <Value>4</Value>
+    </Member>
+    <Member>
+      <Name>SensSplashPattern</Name>
+      <Desc>Splash Pattern Streaming</Desc>
+      <Value>5</Value>
+    </Member>
+    <Member>
+      <Name>Standby</Name>
+      <Desc>Standby</Desc>
+      <Value>255</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>PatternControl</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>Start</Name>
+      <Desc>Start</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Stop</Name>
+      <Desc>Stop</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>Pause</Name>
+      <Desc>Pause</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>Step</Name>
+      <Desc>Step</Desc>
+      <Value>3</Value>
+    </Member>
+    <Member>
+      <Name>Resume</Name>
+      <Desc>Resume</Desc>
+      <Value>4</Value>
+    </Member>
+    <Member>
+      <Name>Reset</Name>
+      <Desc>Reset</Desc>
+      <Value>5</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>PatternDirection</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>HorizontalPattern</Name>
+      <Desc>Horizontal Pattern</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>VerticalPattern</Name>
+      <Desc>Vertical Pattern</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>PatternMode</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>External</Name>
+      <Desc>External</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Internal</Name>
+      <Desc>Internal</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>Splash</Name>
+      <Desc>Splash</Desc>
+      <Value>2</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>PatternReadyStatus</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>NotReady</Name>
+      <Desc>Not Ready</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Ready</Name>
+      <Desc>Ready</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>PixelFormats</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Rgb565</Name>
+      <Desc>16-bit RGB 5-6-5</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>Ycbcr422</Name>
+      <Desc>16-bit YCbCr 4:2:2</Desc>
+      <Value>3</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>PowerSupply</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>SupplyVoltageNormal</Name>
+      <Desc>Supply Voltage Normal</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>SupplyVoltageLow</Name>
+      <Desc>Supply Voltage Low</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ReadWrite</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>Write</Name>
+      <Desc>Write</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Read</Name>
+      <Desc>Read</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>SensingError</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>NoError</Name>
+      <Desc>No Error</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>IlluminationTimeNotSupported</Name>
+      <Desc>Illumination Time Not Supported</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>PreIlluminationTimeNotSupported</Name>
+      <Desc>Pre-Illumination Time Not Supported</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>PostIlluminationTimeNotSupported</Name>
+      <Desc>Post-Illumination Time Not Supported</Desc>
+      <Value>3</Value>
+    </Member>
+    <Member>
+      <Name>TriggerOut1DelayNotSupported</Name>
+      <Desc>TriggerOut1 Delay Not Supported</Desc>
+      <Value>4</Value>
+    </Member>
+    <Member>
+      <Name>TriggerOut2DelayNotSupported</Name>
+      <Desc>TriggerOut2 Delay Not Supported</Desc>
+      <Value>5</Value>
+    </Member>
+    <Member>
+      <Name>MaxPatternOrderTableEntriesExceeded</Name>
+      <Desc>Max Pattern Order Table Entries Exceeded</Desc>
+      <Value>6</Value>
+    </Member>
+    <Member>
+      <Name>InternalPatternDisplayAndTimingConfigurationNotSupported</Name>
+      <Desc>Internal Pattern Display and Timing Configuration Not Supported</Desc>
+      <Value>7</Value>
+    </Member>
+    <Member>
+      <Name>InternalPatternDisplayConfigurationNotSupported</Name>
+      <Desc>Internal Pattern Display Configuration Not Supported</Desc>
+      <Value>8</Value>
+    </Member>
+    <Member>
+      <Name>ExternalPatternPeriodError</Name>
+      <Desc>External Pattern Period Error</Desc>
+      <Value>9</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>SequenceType</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>OneBitMono</Name>
+      <Desc>1 Bit Mono</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>OneBitRgb</Name>
+      <Desc>1 Bit RGB</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>EightBitMono</Name>
+      <Desc>8 Bit Mono</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>EightBitRgb</Name>
+      <Desc>8 Bit RGB</Desc>
+      <Value>3</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>SequenceTypeRead</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>OneBitMonoExt</Name>
+      <Desc>1 Bit Mono External</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>OneBitRgbExt</Name>
+      <Desc>1 Bit RGB External</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>EightBitMonoExt</Name>
+      <Desc>8 Bit Mono External</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>EightBitRgbExt</Name>
+      <Desc>8 Bit RGB External</Desc>
+      <Value>3</Value>
+    </Member>
+    <Member>
+      <Name>OneBitMonoInt</Name>
+      <Desc>1 Bit Mono Internal</Desc>
+      <Value>4</Value>
+    </Member>
+    <Member>
+      <Name>OneBitRgbInt</Name>
+      <Desc>1 Bit RGB Internal</Desc>
+      <Value>5</Value>
+    </Member>
+    <Member>
+      <Name>EightBitMonoInt</Name>
+      <Desc>8 Bit Mono Internal</Desc>
+      <Value>6</Value>
+    </Member>
+    <Member>
+      <Name>EightBitRgbInt</Name>
+      <Desc>8 Bit RGB Internal</Desc>
+      <Value>7</Value>
+    </Member>
+    <Member>
+      <Name>OneBitMonoSplash</Name>
+      <Desc>1 Bit Mono Splash</Desc>
+      <Value>8</Value>
+    </Member>
+    <Member>
+      <Name>OneBitRgbSplash</Name>
+      <Desc>1 Bit RGB Splash</Desc>
+      <Value>9</Value>
+    </Member>
+    <Member>
+      <Name>EightBitMonoSplash</Name>
+      <Desc>8 Bit Mono Splash</Desc>
+      <Value>10</Value>
+    </Member>
+    <Member>
+      <Name>EightBitRgbSplash</Name>
+      <Desc>8 Bit RGB Splash</Desc>
+      <Value>11</Value>
+    </Member>
+    <Member>
+      <Name>Seq5050</Name>
+      <Desc>Seq 50 50</Desc>
+      <Value>12</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>StillImageMotionVideo</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>StillImage</Name>
+      <Desc>Previous frame still</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>MotionVideo</Name>
+      <Desc>Previous frame video</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>SystemAutoSyncSetting</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>LockToExternalVsync</Name>
+      <Desc>Lock to external VSYNC</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>LockToInternalVsync</Name>
+      <Desc>Lock to internal VSYNC</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>SystemInit</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>NotComplete</Name>
+      <Desc>Not Complete</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Complete</Name>
+      <Desc>Complete</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>TestPattern</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>SolidField</Name>
+      <Desc>Solid Field</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>HorizontalRamp</Name>
+      <Desc>Horizontal Ramp</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>VerticalRamp</Name>
+      <Desc>Vertical Ramp</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>HorizontalLines</Name>
+      <Desc>Horizontal Lines</Desc>
+      <Value>3</Value>
+    </Member>
+    <Member>
+      <Name>DiagonalLines</Name>
+      <Desc>Diagonal Lines</Desc>
+      <Value>4</Value>
+    </Member>
+    <Member>
+      <Name>VerticalLines</Name>
+      <Desc>Vertical Lines</Desc>
+      <Value>5</Value>
+    </Member>
+    <Member>
+      <Name>Grid</Name>
+      <Desc>Grid</Desc>
+      <Value>6</Value>
+    </Member>
+    <Member>
+      <Name>Checkerboard</Name>
+      <Desc>Checkerboard</Desc>
+      <Value>7</Value>
+    </Member>
+    <Member>
+      <Name>Colorbars</Name>
+      <Desc>Colorbars</Desc>
+      <Value>8</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>TestPatternBorderEnable</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>Disable</Name>
+      <Desc>Disable</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Enable</Name>
+      <Desc>Enable</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ThreadState</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>TxReady</Name>
+      <Desc>TX READY</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>TxCompleted</Name>
+      <Desc>TX COMPLETED</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>TxTerminated</Name>
+      <Desc>TX TERMINATED</Desc>
+      <Value>2</Value>
+    </Member>
+    <Member>
+      <Name>TxSuspended</Name>
+      <Desc>TX SUSPENDED</Desc>
+      <Value>3</Value>
+    </Member>
+    <Member>
+      <Name>TxSleep</Name>
+      <Desc>TX SLEEP</Desc>
+      <Value>4</Value>
+    </Member>
+    <Member>
+      <Name>TxQueueSusp</Name>
+      <Desc>TX QUEUE SUSP</Desc>
+      <Value>5</Value>
+    </Member>
+    <Member>
+      <Name>TxSemaphoreSusp</Name>
+      <Desc>TX SEMAPHORE SUSP</Desc>
+      <Value>6</Value>
+    </Member>
+    <Member>
+      <Name>TxEventFlag</Name>
+      <Desc>TX EVENT FLAG</Desc>
+      <Value>7</Value>
+    </Member>
+    <Member>
+      <Name>TxBlockMemory</Name>
+      <Desc>TX BLOCK MEMORY</Desc>
+      <Value>8</Value>
+    </Member>
+    <Member>
+      <Name>TxByteMemory</Name>
+      <Desc>TX BYTE MEMORY</Desc>
+      <Value>9</Value>
+    </Member>
+    <Member>
+      <Name>TxMutexSusp</Name>
+      <Desc>TX MUTEX SUSP</Desc>
+      <Value>13</Value>
+    </Member>
+    <Member>
+      <Name>TxIoDriver</Name>
+      <Desc>TX IO DRIVER</Desc>
+      <Value>10</Value>
+    </Member>
+    <Member>
+      <Name>TxUnknown</Name>
+      <Desc>TX UNKNOWN</Desc>
+      <Value>4294967295</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ThreeDDominance</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>LeftDominantLeftEyeFirst</Name>
+      <Desc>Left Dominant (left eye first)</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>RightDominantRightEyeFirst</Name>
+      <Desc>Right Dominant (right eye first)</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ThreeDModes</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>TwoDOperation</Name>
+      <Desc>2-D Operation</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>ThreeDOperation</Name>
+      <Desc>3-D Operation</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ThreeDReferencePolarity</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>CorrectNoInversionRequired</Name>
+      <Desc>Correct (no inversion required)</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>IncorrectInversionRequired</Name>
+      <Desc>Incorrect (inversion required)</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ThreeDReferenceSource</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>InternalReference</Name>
+      <Desc>Internal Reference</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>ExternalReferenceVia3DrPin</Name>
+      <Desc>External Reference via 3DR pin</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>TriggerEnable</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>Disable</Name>
+      <Desc>Disable</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Enable</Name>
+      <Desc>Enable</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>TriggerInversion</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>NotInverted</Name>
+      <Desc>Not Inverted</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Inverted</Name>
+      <Desc>Inverted</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>TriggerPolarity</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>ActiveLow</Name>
+      <Desc>Active Low</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>ActiveHi</Name>
+      <Desc>Active Hi</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>TriggerType</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>Trigger1</Name>
+      <Desc>Trigger Out 1</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Trigger2</Name>
+      <Desc>Trigger Out 2</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>WatchdogTimeout</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>NoTimeout</Name>
+      <Desc>No Timeout</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Timeout</Name>
+      <Desc>Timeout</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>WriteControl</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>Continue</Name>
+      <Desc>Continue</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Start</Name>
+      <Desc>Start</Desc>
+      <Value>1</Value>
+    </Member>
+    <Member>
+      <Name>ReloadFromFlash</Name>
+      <Desc>Reload from Flash</Desc>
+      <Value>2</Value>
+    </Member>
+  </Enum>
+  <Enum>
+    <Name>ZeroDarkTimeSupported</Name>
+    <TIInternal>True</TIInternal>
+    <Member>
+      <Name>No</Name>
+      <Desc>No</Desc>
+      <Value>0</Value>
+    </Member>
+    <Member>
+      <Name>Yes</Name>
+      <Desc>Yes</Desc>
+      <Value>1</Value>
+    </Member>
+  </Enum>
+  <Class>
+    <Name>CommunicationStatus</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>InvalidCommandError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>InvalidCommandParameterValue</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>CommandProcessingError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>FlashBatchFileError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>ReadCommandError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>InvalidNumberOfCommandParameters</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>BusTimeoutByDisplayError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>AbortedOpCode</Name>
+      <Type>int</Type>
+      <Desc></Desc>
+    </Member>
+  </Class>
+  <Class>
+    <Name>ExecutionSummary</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Successful</Name>
+      <Type>bool</Type>
+      <Desc>A boolean value indicating if the command execution was successful.</Desc>
+    </Member>
+    <Member>
+      <Name>Command</Name>
+      <Type>str</Type>
+      <Desc>The command that was executed.</Desc>
+    </Member>
+  </Class>
+  <Class>
+    <Name>GridLines</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>Border</Name>
+      <Type>BorderEnable</Type>
+      <Desc>Enable 1 pixel wide white border around the test pattern. 0: Disable, 1: Enable</Desc>
+    </Member>
+    <Member>
+      <Name>BackgroundColor</Name>
+      <Type>Color</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>ForegroundColor</Name>
+      <Type>Color</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>HorizontalForegroundLineWidth</Name>
+      <Type>int</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>HorizontalBackgroundLineWidth</Name>
+      <Type>int</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>VerticalForegroundLineWidth</Name>
+      <Type>int</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>VerticalBackgroundLineWidth</Name>
+      <Type>int</Type>
+      <Desc></Desc>
+    </Member>
+  </Class>
+  <Class>
+    <Name>SequenceHeaderAttributes</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>LookRedDutyCycle</Name>
+      <Type>float</Type>
+      <Desc>LSB first.</Desc>
+    </Member>
+    <Member>
+      <Name>LookGreenDutyCycle</Name>
+      <Type>float</Type>
+      <Desc>LSB first.</Desc>
+    </Member>
+    <Member>
+      <Name>LookBlueDutyCycle</Name>
+      <Type>float</Type>
+      <Desc>LSB first.</Desc>
+    </Member>
+    <Member>
+      <Name>LookMaxFrameTime</Name>
+      <Type>float</Type>
+      <Desc>Maximum frame period supported by selected sequence in current look. LSB first.</Desc>
+    </Member>
+    <Member>
+      <Name>LookMinFrameTime</Name>
+      <Type>float</Type>
+      <Desc>Minimum frame period supported by selected sequence in current look. LSB first.</Desc>
+    </Member>
+    <Member>
+      <Name>LookMaxSequenceVectors</Name>
+      <Type>int</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>SeqRedDutyCycle</Name>
+      <Type>float</Type>
+      <Desc>LSB first.</Desc>
+    </Member>
+    <Member>
+      <Name>SeqGreenDutyCycle</Name>
+      <Type>float</Type>
+      <Desc>LSB first.</Desc>
+    </Member>
+    <Member>
+      <Name>SeqBlueDutyCycle</Name>
+      <Type>float</Type>
+      <Desc>LSB first.</Desc>
+    </Member>
+    <Member>
+      <Name>SeqMaxFrameTime</Name>
+      <Type>float</Type>
+      <Desc>Maximum frame period supported by selected sequence. LSB first.</Desc>
+    </Member>
+    <Member>
+      <Name>SeqMinFrameTime</Name>
+      <Type>float</Type>
+      <Desc>Minimum frame period supported by selected sequence. LSB first.</Desc>
+    </Member>
+    <Member>
+      <Name>SeqMaxSequenceVectors</Name>
+      <Type>int</Type>
+      <Desc>Internal-use only.</Desc>
+    </Member>
+  </Class>
+  <Class>
+    <Name>ShortStatus</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>SystemInitialized</Name>
+      <Type>SystemInit</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>CommunicationError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>SystemError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>FlashEraseComplete</Name>
+      <Type>FlashErase</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>FlashError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>SensingSequenceError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>Application</Name>
+      <Type>Application</Type>
+      <Desc></Desc>
+    </Member>
+  </Class>
+  <Class>
+    <Name>SplashScreenHeader</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>WidthInPixels</Name>
+      <Type>int</Type>
+      <Desc>LSB first.</Desc>
+    </Member>
+    <Member>
+      <Name>HeightInPixels</Name>
+      <Type>int</Type>
+      <Desc>LSB first.</Desc>
+    </Member>
+    <Member>
+      <Name>SizeInBytes</Name>
+      <Type>int</Type>
+      <Desc>LSB first.</Desc>
+    </Member>
+    <Member>
+      <Name>PixelFormat</Name>
+      <Type>PixelFormats</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>CompressionType</Name>
+      <Type>CompressionTypes</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>ColorOrder</Name>
+      <Type>ColorOrders</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>ChromaOrder</Name>
+      <Type>ChromaOrders</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>ByteOrder</Name>
+      <Type>ByteOrders</Type>
+      <Desc></Desc>
+    </Member>
+  </Class>
+  <Class>
+    <Name>SystemStatus</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>DmdDeviceError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>DmdInterfaceError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>DmdTrainingError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>RedLedEnableState</Name>
+      <Type>LedState</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>GreenLedEnableState</Name>
+      <Type>LedState</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>BlueLedEnableState</Name>
+      <Type>LedState</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>RedLedError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>GreenLedError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>BlueLedError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>SequenceAbortError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>SequenceError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>DcPowerSupply</Name>
+      <Type>PowerSupply</Type>
+      <Desc>Functionality depends on PMIC used.</Desc>
+    </Member>
+    <Member>
+      <Name>SensingError</Name>
+      <Type>SensingError</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>ControllerConfiguration</Name>
+      <Type>ControllerConfiguration</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>MasterOrSlaveOperation</Name>
+      <Type>MasterOrSlaveOperation</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>ProductConfigurationError</Name>
+      <Type>Error</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>WatchdogTimerTimeout</Name>
+      <Type>WatchdogTimeout</Type>
+      <Desc></Desc>
+    </Member>
+  </Class>
+  <Class>
+    <Name>TestPatternSelect</Name>
+    <TIInternal>False</TIInternal>
+    <Member>
+      <Name>PatternSelect</Name>
+      <Type>TestPattern</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>Border</Name>
+      <Type>BorderEnable</Type>
+      <Desc>Enable 1 pixel wide white border around the test pattern. 0: Disable, 1: Enable</Desc>
+    </Member>
+    <Member>
+      <Name>BackgroundColor</Name>
+      <Type>Color</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>ForegroundColor</Name>
+      <Type>Color</Type>
+      <Desc></Desc>
+    </Member>
+    <Member>
+      <Name>StartValue</Name>
+      <Type>int</Type>
+      <Desc>Starting pixel value for horizontal/vertical ramp.</Desc>
+    </Member>
+    <Member>
+      <Name>EndValue</Name>
+      <Type>int</Type>
+      <Desc>Ending pixel value for horizontal/vertical ramp.</Desc>
+    </Member>
+    <Member>
+      <Name>ForegroundLineWidth</Name>
+      <Type>int</Type>
+      <Desc>Foreground line width for horizontal/vertical lines.</Desc>
+    </Member>
+    <Member>
+      <Name>BackgroundLineWidth</Name>
+      <Type>int</Type>
+      <Desc>Background line width for horizontal/vertical lines.</Desc>
+    </Member>
+    <Member>
+      <Name>HorizontalSpacing</Name>
+      <Type>int</Type>
+      <Desc>Horizontal spacing for diagonal lines.</Desc>
+    </Member>
+    <Member>
+      <Name>VerticalSpacing</Name>
+      <Type>int</Type>
+      <Desc>Vertical spacing for diagonal lines.</Desc>
+    </Member>
+    <Member>
+      <Name>HorizontalForegroundLineWidth</Name>
+      <Type>int</Type>
+      <Desc>Horizontal foreground line width for grid lines.</Desc>
+    </Member>
+    <Member>
+      <Name>HorizontalBackgroundLineWidth</Name>
+      <Type>int</Type>
+      <Desc>Horizontal background line width for grid lines.</Desc>
+    </Member>
+    <Member>
+      <Name>HorizontalCheckerCount</Name>
+      <Type>int</Type>
+      <Desc>Number of horizontal checkers in checkerboard.</Desc>
+    </Member>
+    <Member>
+      <Name>VerticalForegroundLineWidth</Name>
+      <Type>int</Type>
+      <Desc>Vertical foreground line width for grid lines.</Desc>
+    </Member>
+    <Member>
+      <Name>VerticalBackgroundLineWidth</Name>
+      <Type>int</Type>
+      <Desc>Vertical background line width for grid lines.</Desc>
+    </Member>
+    <Member>
+      <Name>VerticalCheckerCount</Name>
+      <Type>int</Type>
+      <Desc>Number of vertical checkers in checkerboard.</Desc>
+    </Member>
+  </Class>
+</ScriptAPIDoc>
