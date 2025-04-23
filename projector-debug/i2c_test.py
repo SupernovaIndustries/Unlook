@@ -17,7 +17,7 @@ from dlpc342x.dlpc342x import (
 )
 
 # 3) Apri il bus I2C-1 e definisci l’indirizzo del DLPC3421 (0x36)
-bus = SMBus(1)
+bus = SMBus(3)
 DLPC_ADDR = 0x36
 
 # 4) Callback per scrittura e lettura
