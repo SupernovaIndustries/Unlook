@@ -23,7 +23,7 @@ logger = logging.getLogger("DLPC342XExample")
 # or when it's used from the server directory structure
 try:
     # When used from server directory
-    from projector import DLPC342XController, OperatingMode, Color, BorderEnable, DiagonalLineSpacing
+    from dlpc342x_i2c import DLPC342XController, OperatingMode, Color, BorderEnable, DiagonalLineSpacing
 except ImportError:
     # When example is in same directory as library files
     from dlpc342x_i2c import DLPC342XController, OperatingMode, Color, BorderEnable, DiagonalLineSpacing
@@ -33,9 +33,9 @@ def main():
     """Example of using the DLPC342X I2C controller."""
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='DLPC342X Test Pattern Generator')
-    parser.add_argument('--bus', type=int, default=1,
+    parser.add_argument('--bus', type=int, default=3,
                         help='I2C bus number (default: 1)')
-    parser.add_argument('--address', type=int, default=0x36,
+    parser.add_argument('--address', type=int, default=0x1b,
                         help='I2C device address in hex (default: 0x36)')
     parser.add_argument('--pattern', type=str, default='cycle',
                         choices=['cycle', 'horizontal', 'vertical', 'diagonal', 'grid', 'checker', 'colorbars',
