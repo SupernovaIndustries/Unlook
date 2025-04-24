@@ -5,8 +5,11 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="31592bd9-183c-4f71-ad25-9064a5892649" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/UnLook.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/UnLook.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/projector/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/server/projector/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/projector/dlpc342x_i2c.py" beforeDir="false" afterPath="$PROJECT_DIR$/server/projector/dlp342x/dlpc342x_i2c.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/projector/example.py" beforeDir="false" afterPath="$PROJECT_DIR$/server/projector/example.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/projector/packer.py" beforeDir="false" afterPath="$PROJECT_DIR$/server/projector/dlp342x/packer.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -68,6 +71,7 @@
 }]]></component>
   <component name="RecentsManager">
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="G:\Supernova\Prototipi\UnLook\Software\Unlook\server\projector\dlp342x" />
       <recent name="G:\Supernova\Prototipi\UnLook\Software\Unlook\projector-debug" />
     </key>
   </component>

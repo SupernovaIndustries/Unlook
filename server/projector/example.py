@@ -8,8 +8,6 @@ This demonstrates generating various test patterns on the projector.
 
 import time
 import logging
-import sys
-import os
 import argparse
 
 # Configure logging
@@ -23,10 +21,10 @@ logger = logging.getLogger("DLPC342XExample")
 # or when it's used from the server directory structure
 try:
     # When used from server directory
-    from dlpc342x_i2c import DLPC342XController, OperatingMode, Color, BorderEnable, DiagonalLineSpacing
+    from dlp342x import DLPC342XController, OperatingMode, Color, BorderEnable, DiagonalLineSpacing
 except ImportError:
     # When example is in same directory as library files
-    from dlpc342x_i2c import DLPC342XController, OperatingMode, Color, BorderEnable, DiagonalLineSpacing
+    from dlp342x import DLPC342XController, OperatingMode, Color, BorderEnable, DiagonalLineSpacing
 
 
 def main():

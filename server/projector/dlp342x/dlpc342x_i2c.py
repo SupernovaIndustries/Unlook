@@ -3,7 +3,7 @@ import time
 from enum import Enum
 from smbus2 import SMBus
 import logging
-from . import packer
+from server.projector.dlp342x import packer
 
 # Configure logging
 logger = logging.getLogger(__name__)
