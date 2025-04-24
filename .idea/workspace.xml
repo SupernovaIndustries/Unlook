@@ -7,9 +7,7 @@
     <list default="true" id="31592bd9-183c-4f71-ad25-9064a5892649" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/server/projector/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/server/projector/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/server/projector/dlpc342x_i2c.py" beforeDir="false" afterPath="$PROJECT_DIR$/server/projector/dlp342x/dlpc342x_i2c.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/server/projector/example.py" beforeDir="false" afterPath="$PROJECT_DIR$/server/projector/example.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/server/projector/packer.py" beforeDir="false" afterPath="$PROJECT_DIR$/server/projector/dlp342x/packer.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/projector/dlp342x/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/server/projector/dlp342x/__init__.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
