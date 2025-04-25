@@ -5,6 +5,7 @@
 UnLook Scanner Server - Applicazione server per il Raspberry Pi
 Gestisce le camere e lo streaming video verso il client.
 Versione ottimizzata con controllo di flusso e riduzione della latenza.
+Integrazione con ScanManager per scansione 3D a luce strutturata.
 """
 
 import os
@@ -25,11 +26,13 @@ PROJECT_DIR = Path(__file__).parent.absolute()
 LOG_DIR = PROJECT_DIR / "logs"
 CONFIG_DIR = PROJECT_DIR / "config"
 CAPTURE_DIR = PROJECT_DIR / "captures"
+SCAN_DIR = PROJECT_DIR / "scans"
 
 # Assicura che le directory esistano
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+SCAN_DIR.mkdir(parents=True, exist_ok=True)
 
 # Configurazione logging
 logging.basicConfig(
@@ -61,6 +64,18 @@ try:
     # Importazione di ZMQ e PiCamera2
     import zmq
     from picamera2 import Picamera2
+
+    # Importazione di ScanManager per scansione 3D
+    try:
+        from server.scan_manager import ScanManager
+    except ImportError:
+        try:
+            from scan_manager import ScanManager
+
+            logger.info("ScanManager importato correttamente")
+        except ImportError as e:
+            logger.error(f"Impossibile importare ScanManager: {e}")
+            ScanManager = None
 except ImportError as e:
     logger.error(f"Dipendenza mancante: {e}")
     logger.error("Installa le dipendenze necessarie con: pip install pyzmq numpy picamera2 opencv-python")
@@ -71,6 +86,7 @@ class UnLookServer:
     """
     Server principale che gestisce le camere e le connessioni con i client.
     Versione ottimizzata per ridurre la latenza e migliorare il controllo di flusso.
+    Integra ScanManager per la funzionalità di scansione 3D.
     """
 
     def __init__(self, config_path: str = None):
@@ -97,6 +113,7 @@ class UnLookServer:
             "cameras_connected": len(self.cameras),
             "clients_connected": 0,
             "streaming": False,
+            "scanning": False,
             "uptime": 0.0,
             "start_time": time.time()
         }
@@ -126,6 +143,15 @@ class UnLookServer:
 
         # Parametri di qualità dell'immagine
         self._jpeg_quality = 90  # Qualità JPEG ottimale per bassa latenza
+
+        # Inizializza il gestore di scansione 3D
+        self.scan_manager = None
+        if ScanManager is not None:
+            try:
+                self.scan_manager = ScanManager(self)
+                logger.info("Gestore di scansione 3D inizializzato")
+            except Exception as e:
+                logger.error(f"Errore nell'inizializzazione del gestore di scansione 3D: {e}")
 
         logger.info(f"Server UnLook inizializzato con ID: {self.device_id}")
         logger.info(f"Configurazione: max_fps={self.config['stream'].get('max_fps', 30)}, quality={self._jpeg_quality}")
@@ -198,6 +224,14 @@ class UnLookServer:
                 "quality": 90,  # Qualità JPEG (0-100)
                 "max_fps": 30,  # FPS massimo
                 "min_fps": 15  # FPS minimo per regolazione dinamica
+            },
+            "scan": {
+                "pattern_type": "PROGRESSIVE",
+                "num_patterns": 12,
+                "exposure_time": 0.5,
+                "quality": 3,
+                "i2c_bus": 3,
+                "i2c_address": "0x36"
             }
         }
 
@@ -246,6 +280,15 @@ class UnLookServer:
                             # Mantieni il campo mode per la conversione software
                             if "mode" not in config["camera"][cam_name]:
                                 config["camera"][cam_name]["mode"] = "color"
+
+                # Assicura che la sezione scan sia presente
+                if "scan" not in config:
+                    config["scan"] = default_config["scan"]
+                else:
+                    # Assicura che tutti i parametri di scan siano presenti
+                    for key, value in default_config["scan"].items():
+                        if key not in config["scan"]:
+                            config["scan"][key] = value
 
                 # Salva la configurazione aggiornata
                 with open(config_path, 'w') as f:
@@ -503,6 +546,14 @@ class UnLookServer:
         if self.state["streaming"]:
             self.stop_streaming()
 
+        # Pulisci il gestore di scansione 3D se presente
+        if self.scan_manager:
+            try:
+                self.scan_manager.cleanup()
+                logger.info("Gestore di scansione 3D arrestato")
+            except Exception as e:
+                logger.error(f"Errore nell'arresto del gestore di scansione 3D: {e}")
+
         # Ferma il servizio di broadcast
         if hasattr(self, 'broadcast_thread') and self.broadcast_thread and self.broadcast_thread.is_alive():
             logger.info("Arresto del servizio di broadcast...")
@@ -605,7 +656,8 @@ class UnLookServer:
                             "dual_camera": len(self.cameras) > 1,
                             "color_mode": True,
                             "tof": False,
-                            "dlp": False
+                            "dlp": self.scan_manager is not None,
+                            "structured_light": self.scan_manager is not None
                         }
                     }
 
@@ -705,7 +757,7 @@ class UnLookServer:
     def _process_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
         """
         Processa un comando ricevuto da un client.
-        Versione migliorata con supporto parametri di streaming avanzati e gestione sicura delle configurazioni.
+        Versione migliorata con supporto per comandi di scansione 3D.
 
         Args:
             command: Dizionario rappresentante il comando
@@ -746,6 +798,10 @@ class UnLookServer:
                 for cam_info in self.cameras:
                     camera_modes[cam_info["name"]] = cam_info.get("mode", "color")
                 response['camera_modes'] = camera_modes
+
+                # Aggiungi informazioni sulla scansione 3D se disponibile
+                if self.scan_manager:
+                    response['scan_status'] = self.scan_manager.get_scan_status()
 
             elif command_type == 'START_STREAM':
                 # Aggiorna timestamp di attività client
@@ -863,6 +919,76 @@ class UnLookServer:
                     response['status'] = 'error'
                     response['error'] = 'Errore nella cattura dei frame'
 
+            # --- COMANDI DI SCANSIONE 3D ---
+
+            elif command_type == 'START_SCAN':
+                # Aggiorna timestamp di attività client
+                self._last_client_activity = time.time()
+                self.client_connected = True
+
+                # Avvia una scansione 3D
+                if self.scan_manager:
+                    scan_config = command.get('scan_config', None)
+                    scan_result = self.scan_manager.start_scan(scan_config)
+
+                    # Aggiorna lo stato del server
+                    self.state["scanning"] = scan_result['status'] == 'success'
+
+                    # Restituisci il risultato
+                    response.update(scan_result)
+                else:
+                    response['status'] = 'error'
+                    response['message'] = 'Funzionalità di scansione 3D non disponibile'
+
+            elif command_type == 'STOP_SCAN':
+                # Aggiorna timestamp di attività client
+                self._last_client_activity = time.time()
+                self.client_connected = True
+
+                # Interrompe una scansione 3D in corso
+                if self.scan_manager:
+                    scan_result = self.scan_manager.stop_scan()
+
+                    # Aggiorna lo stato del server
+                    self.state["scanning"] = False
+
+                    # Restituisci il risultato
+                    response.update(scan_result)
+                else:
+                    response['status'] = 'error'
+                    response['message'] = 'Funzionalità di scansione 3D non disponibile'
+
+            elif command_type == 'GET_SCAN_STATUS':
+                # Aggiorna timestamp di attività client
+                self._last_client_activity = time.time()
+                self.client_connected = True
+
+                # Ottiene lo stato della scansione 3D in corso
+                if self.scan_manager:
+                    scan_status = self.scan_manager.get_scan_status()
+                    response['scan_status'] = scan_status
+
+                    # Aggiorna anche lo stato del server
+                    self.state["scanning"] = scan_status.get('state', 'IDLE') == 'SCANNING'
+                else:
+                    response['status'] = 'warning'
+                    response['message'] = 'Funzionalità di scansione 3D non disponibile'
+                    response['scan_status'] = {'state': 'UNAVAILABLE'}
+
+            elif command_type == 'GET_SCAN_CONFIG':
+                # Aggiorna timestamp di attività client
+                self._last_client_activity = time.time()
+                self.client_connected = True
+
+                # Ottiene la configurazione di scansione 3D
+                if self.scan_manager:
+                    scan_config = self.scan_manager.get_scan_config()
+                    response['scan_config'] = scan_config
+                else:
+                    response['status'] = 'warning'
+                    response['message'] = 'Funzionalità di scansione 3D non disponibile'
+                    response['scan_config'] = None
+
             else:
                 # Comando sconosciuto
                 response['status'] = 'error'
@@ -895,6 +1021,12 @@ class UnLookServer:
             if self.state["streaming"]:
                 logger.info("Arresto automatico dello streaming per client inattivo")
                 self.stop_streaming()
+
+            # Interrompi la scansione se attiva
+            if self.state["scanning"] and self.scan_manager:
+                logger.info("Arresto automatico della scansione per client inattivo")
+                self.scan_manager.stop_scan()
+                self.state["scanning"] = False
 
             # Aggiorna lo stato
             self.client_connected = False
@@ -966,6 +1098,11 @@ class UnLookServer:
                         if "right" not in new_config["camera"]:
                             new_config["camera"]["right"] = {}
                         new_config["camera"]["right"]["mode"] = target_mode
+
+            # Verifica se ci sono modifiche alla configurazione di scansione
+            if "scan" in new_config and self.scan_manager:
+                logger.info("Aggiornamento configurazione di scansione")
+                # Aggiorna la configurazione del gestore di scansione
 
             # Aggiorna ricorsivamente la configurazione
             self._update_dict_recursive(self.config, new_config)
@@ -1418,11 +1555,17 @@ def main():
     parser.add_argument('--quality', type=int, help='Qualità JPEG (5-95, default 90)', default=85)
     parser.add_argument('--fps', type=int, help='FPS target (5-60, default 30)', default=30)
     parser.add_argument('--debug', action='store_true', help='Abilita il livello di log DEBUG')
+    parser.add_argument('--i2c-bus', type=int, help='Bus I2C per il proiettore DLP', default=3)
+    parser.add_argument('--i2c-address', type=str, help='Indirizzo I2C per il proiettore DLP', default="0x36")
     args = parser.parse_args()
 
     # Imposta il livello di log
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    # Imposta variabili d'ambiente per ScanManager
+    os.environ["UNLOOK_I2C_BUS"] = str(args.i2c_bus)
+    os.environ["UNLOOK_I2C_ADDRESS"] = args.i2c_address
 
     # Crea e avvia il server
     server = UnLookServer(config_path=args.config)
@@ -1435,6 +1578,11 @@ def main():
     server._jpeg_quality = max(70, min(95, args.quality))
     fps = max(5, min(60, args.fps))
     server._frame_interval = 1.0 / fps
+
+    # Aggiorna configurazione di scansione
+    if server.config["scan"]:
+        server.config["scan"]["i2c_bus"] = args.i2c_bus
+        server.config["scan"]["i2c_address"] = args.i2c_address
 
     logger.info(f"Parametri di avvio: FPS={fps}, qualità={server._jpeg_quality}, HWM=1")
 
@@ -1455,6 +1603,11 @@ def main():
         logger.info("Server UnLook in esecuzione. Premi Ctrl+C per terminare.")
         logger.info(f"Identificatore UUID dispositivo: {server.device_id}")
         logger.info("Ricorda di etichettare il case con questo UUID!")
+
+        # Capacità
+        has_scanning = server.scan_manager is not None
+        logger.info(f"Capacità di scansione 3D: {'Disponibile' if has_scanning else 'Non disponibile'}")
+        logger.info(f"Numero di camere: {len(server.cameras)}")
 
         # Mantieni il thread principale attivo
         while True:
