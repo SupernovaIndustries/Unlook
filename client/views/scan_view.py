@@ -1115,6 +1115,10 @@ class ScanView(QWidget):
                 log_entry += f", Errore: {error_message}"
             self.scan_log += log_entry + "\n"
 
+        # INSERISCI QUI: Aggiorna le anteprime delle immagini se possibile
+        if state == "SCANNING" and self._polling_attempts % 3 == 0:  # Aggiorna ogni 3 polling
+            self._update_preview_image()
+
         # Controlla se la scansione è completata o in errore
         if state == "COMPLETED":
             self._handle_scan_completed()
