@@ -25,6 +25,7 @@ from client.controllers.scanner_controller import ScannerController
 from client.models.scanner_model import Scanner, ScannerStatus
 from client.views.scanner_view import ScannerDiscoveryWidget
 from client.views.streaming_view import DualStreamView
+from client.views.scan_view import ScanView
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ class MainWindow(QMainWindow):
         """Indici delle schede nella finestra principale."""
         SCANNER = 0
         STREAMING = 1
+        SCANNING = 2
 
     def __init__(self, scanner_controller: ScannerController):
         super().__init__()
@@ -85,6 +87,9 @@ class MainWindow(QMainWindow):
 
         # Carica le impostazioni
         self._load_settings()
+        
+        # Disabilita la scheda di scansione all'avvio
+        self.central_tabs.setTabEnabled(self.TabIndex.SCANNING.value, False)
 
         # Inizializza l'interfaccia utente
         self._setup_ui()
@@ -136,10 +141,12 @@ class MainWindow(QMainWindow):
         # Crea i widget delle schede
         self.scanner_widget = ScannerDiscoveryWidget(self.scanner_controller)
         self.streaming_widget = DualStreamView()
+        self.scanning_widget = ScanView(self.scanner_controller)
 
         # Aggiungi le schede
         self.central_tabs.addTab(self.scanner_widget, "Scanner")
         self.central_tabs.addTab(self.streaming_widget, "Streaming")
+        self.central_tabs.addTab(self.scanning_widget, "Scansione 3D")
 
         # Disabilita le schede che richiedono una connessione attiva
         self.central_tabs.setTabEnabled(self.TabIndex.STREAMING.value, False)
@@ -400,6 +407,7 @@ class MainWindow(QMainWindow):
 
         # Abilita le schede che richiedono una connessione
         self.central_tabs.setTabEnabled(self.TabIndex.STREAMING.value, True)
+        self.central_tabs.setTabEnabled(self.TabIndex.SCANNING.value, True)
 
         # Cambia il testo del pulsante di connessione
         self.action_toggle_connection.setText("Disconnetti")
@@ -418,6 +426,7 @@ class MainWindow(QMainWindow):
 
         # Disabilita le schede che richiedono una connessione
         self.central_tabs.setTabEnabled(self.TabIndex.STREAMING.value, False)
+        self.central_tabs.setTabEnabled(self.TabIndex.SCANNING.value, False)
 
         # Cambia il testo del pulsante di connessione
         self.action_toggle_connection.setText("Connetti")
@@ -544,6 +553,10 @@ class MainWindow(QMainWindow):
             self.action_toggle_connection.setText("Connetti")
             self.action_toggle_connection.setEnabled(False)
             return
+
+        # Aggiorna lo scanner selezionato nella vista di scansione
+        if selected_scanner:
+            self.scanning_widget.update_selected_scanner(selected_scanner)
 
         # Aggiorna il pulsante di connessione
         is_connected = selected_scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
