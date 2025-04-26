@@ -226,10 +226,16 @@ class ScannerController(QObject):
             return None
 
         try:
+            # Per i comandi di scansione, usiamo un timeout più lungo
+            if command_type in ["START_SCAN", "STOP_SCAN", "GET_SCAN_STATUS"]:
+                effective_timeout = max(60.0, timeout)  # Minimo 60 secondi per comandi di scansione
+            else:
+                effective_timeout = timeout
+
             # Attendi che la risposta sia disponibile
             start_time = time.time()
             check_interval = 0.2  # Controlla ogni 200ms
-            while (time.time() - start_time) < timeout:
+            while (time.time() - start_time) < effective_timeout:
                 if self._connection_manager.has_response(device_id, command_type):
                     response = self._connection_manager.get_response(device_id, command_type)
                     logger.info(f"Risposta ricevuta per comando {command_type}: {response}")
@@ -246,7 +252,7 @@ class ScannerController(QObject):
 
                 time.sleep(check_interval)
 
-            logger.warning(f"Timeout nell'attesa della risposta a {command_type}")
+            logger.warning(f"Timeout nell'attesa della risposta a {command_type} dopo {effective_timeout}s")
 
             # Verifica se lo scanner è ancora connesso
             is_still_connected = self.is_connected(device_id)

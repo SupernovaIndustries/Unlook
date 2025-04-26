@@ -927,7 +927,7 @@ class ScanView(QWidget):
                 self.status_label.setText("Scanner non connesso")
 
     def _start_scan(self):
-        """Avvia una nuova scansione."""
+        """Avvia una nuova scansione con polling dello stato migliorato."""
         if self.is_scanning:
             return
 
@@ -987,6 +987,31 @@ class ScanView(QWidget):
         self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Tempo di esposizione: {scan_config['exposure_time']} sec\n"
         self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Qualità: {scan_config['quality']}\n"
 
+        # Esegui un test di capacità prima di avviare
+        logger.info("Verifica delle capacità di scansione prima dell'avvio...")
+        check_success = self.scanner_controller.send_command(
+            self.selected_scanner.device_id,
+            "CHECK_SCAN_CAPABILITY"
+        )
+
+        if not check_success:
+            self._handle_scan_error("Impossibile verificare le capacità di scansione")
+            return
+
+        # Attendi la risposta della verifica con timeout aumentato (30s)
+        capability_response = self.scanner_controller.wait_for_response(
+            self.selected_scanner.device_id,
+            "CHECK_SCAN_CAPABILITY",
+            timeout=30.0
+        )
+
+        if not capability_response or not capability_response.get("scan_capability", False):
+            error_details = "Unknown error"
+            if capability_response and "scan_capability_details" in capability_response:
+                error_details = str(capability_response["scan_capability_details"])
+            self._handle_scan_error(f"Lo scanner non supporta la scansione 3D: {error_details}")
+            return
+
         # Invia il comando di avvio scansione al server
         try:
             logger.info(f"Avvio scansione: {self.current_scan_id}")
@@ -1001,68 +1026,106 @@ class ScanView(QWidget):
                 self._handle_scan_error("Impossibile inviare il comando di avvio scansione")
                 return
 
-            # Attendi la risposta
-            response = self.scanner_controller.wait_for_response(
-                self.selected_scanner.device_id,
-                "START_SCAN",
-                timeout=15.0
-            )
-
-            if not response:
-                # Aggiungiamo un'ulteriore verifica per vedere se la scansione è in corso comunque
-                time.sleep(1.0)  # Breve pausa
-
-                # Verifica lo stato attuale
-                check_status_success = self.scanner_controller.send_command(
-                    self.selected_scanner.device_id,
-                    "GET_SCAN_STATUS"
-                )
-
-                if check_status_success:
-                    status_response = self.scanner_controller.wait_for_response(
-                        self.selected_scanner.device_id,
-                        "GET_SCAN_STATUS",
-                        timeout=3.0
-                    )
-
-                    if status_response and status_response.get("scan_status", {}).get("state") == "SCANNING":
-                        # La scansione è iniziata nonostante il timeout
-                        self.current_scan_id = f"scan_{int(time.time())}"  # ID generico
-                        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Scansione avviata, ma nessuna conferma ricevuta\n"
-                        self.is_scanning = True
-                        self.scan_started.emit(scan_config)
-                        self.view_log_button.setEnabled(True)
-                        return
-
-                # Se non siamo riusciti a confermare lo stato
-                self._handle_scan_error("Nessuna risposta dal server")
-                return
-
-            # Verifica lo stato della risposta
-            if response.get("status") != "success":
-                error_message = response.get("message", "Errore sconosciuto")
-                self._handle_scan_error(error_message)
-                return
-
-            # Salva l'ID della scansione
-            self.current_scan_id = response.get("scan_id", self.current_scan_id)
+            # Imposta la scansione come attiva immediatamente
+            self.is_scanning = True
+            self.view_log_button.setEnabled(True)
 
             # Aggiorna il log
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Scansione avviata con ID: {self.current_scan_id}\n"
+            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Comando di avvio scansione inviato, in attesa di conferma...\n"
 
-            # Imposta lo stato di scansione attiva
-            self.is_scanning = True
+            # Avvia un timer per il polling dello stato invece di aspettare sincronamente
+            self._start_status_polling_timer()
 
             # Emetti il segnale di scansione avviata
             self.scan_started.emit(scan_config)
-
-            # Abilita il pulsante di visualizzazione del log
-            self.view_log_button.setEnabled(True)
 
         except Exception as e:
             logger.error(f"Errore nell'avvio della scansione: {e}")
             self._handle_scan_error(str(e))
 
+    def _start_status_polling_timer(self):
+        """Avvia un timer per il polling dello stato della scansione."""
+        # Se esiste già un timer di polling, fermalo
+        if hasattr(self, '_polling_timer') and self._polling_timer:
+            self._polling_timer.stop()
+
+        # Crea un nuovo timer
+        self._polling_timer = QTimer()
+        self._polling_timer.timeout.connect(self._poll_scan_status)
+        # Polling più frequente all'inizio (ogni 2 secondi)
+        self._polling_timer.start(2000)
+
+        # Contatore per tenere traccia dei tentativi di polling
+        self._polling_attempts = 0
+
+        logger.info("Timer di polling dello stato della scansione avviato")
+
+    def _poll_scan_status(self):
+        """Esegue il polling dello stato della scansione."""
+        if not self.is_scanning or not self.selected_scanner:
+            # Se la scansione è stata fermata o lo scanner non è più disponibile, ferma il polling
+            if hasattr(self, '_polling_timer') and self._polling_timer:
+                self._polling_timer.stop()
+            return
+
+        self._polling_attempts += 1
+        logger.info(f"Polling dello stato scansione (tentativo {self._polling_attempts})")
+
+        # Se abbiamo fatto più di 10 tentativi, rallenta il polling a 5 secondi
+        if self._polling_attempts > 10 and self._polling_timer.interval() < 5000:
+            self._polling_timer.setInterval(5000)
+            logger.info("Polling rallentato a 5 secondi per intervallo")
+
+        # Invia il comando di stato scansione
+        command_success = self.scanner_controller.send_command(
+            self.selected_scanner.device_id,
+            "GET_SCAN_STATUS"
+        )
+
+        if not command_success:
+            logger.warning("Impossibile inviare il comando GET_SCAN_STATUS")
+            # Non interrompiamo la scansione, continuiamo a provare
+            return
+
+        # Attendi la risposta con un timeout più breve
+        response = self.scanner_controller.wait_for_response(
+            self.selected_scanner.device_id,
+            "GET_SCAN_STATUS",
+            timeout=5.0  # timeout breve per non bloccare l'UI
+        )
+
+        if not response:
+            logger.warning("Nessuna risposta al comando GET_SCAN_STATUS")
+            return
+
+        # Estrai lo stato della scansione
+        scan_status = response.get("scan_status", {})
+        state = scan_status.get("state", "UNKNOWN")
+        progress = scan_status.get("progress", 0.0)
+        error_message = scan_status.get("error_message", "")
+
+        # Aggiorna l'interfaccia
+        self.status_label.setText(f"Stato: {state}")
+        self.progress_bar.setValue(int(progress))
+
+        # Aggiungi al log
+        if self._polling_attempts % 5 == 0 or state != "SCANNING":  # Logga ogni 5 polling o se lo stato è cambiato
+            log_entry = f"[{datetime.now().strftime('%H:%M:%S')}] Stato: {state}, Progresso: {progress:.1f}%"
+            if error_message:
+                log_entry += f", Errore: {error_message}"
+            self.scan_log += log_entry + "\n"
+
+        # Controlla se la scansione è completata o in errore
+        if state == "COMPLETED":
+            self._handle_scan_completed()
+            self._polling_timer.stop()
+        elif state == "ERROR":
+            self._handle_scan_error(error_message)
+            self._polling_timer.stop()
+        elif state == "IDLE" and self._polling_attempts > 5:
+            # Se dopo diversi tentativi lo stato è ancora IDLE, potrebbe esserci un problema
+            self._handle_scan_error("Lo scanner non ha avviato la scansione")
+            self._polling_timer.stop()
     def _stop_scan(self):
         """Interrompe la scansione in corso."""
         if not self.is_scanning or not self.selected_scanner:
@@ -1194,6 +1257,102 @@ class ScanView(QWidget):
         self.browse_button.setEnabled(True)
         self.scan_name_edit.setEnabled(True)
 
+    def _update_preview_image(self, scan_dir=None):
+        """Aggiorna l'anteprima delle immagini durante la scansione."""
+        if scan_dir is None and self.current_scan_id:
+            scan_dir = os.path.join(str(self.output_dir), self.current_scan_id)
+
+        if not scan_dir or not os.path.isdir(scan_dir):
+            return
+
+        # Cerca le immagini più recenti
+        left_dir = os.path.join(scan_dir, "left")
+        right_dir = os.path.join(scan_dir, "right")
+
+        if not os.path.isdir(left_dir) or not os.path.isdir(right_dir):
+            return
+
+        # Ottieni le immagini più recenti
+        try:
+            left_images = glob.glob(os.path.join(left_dir, "*.png"))
+            right_images = glob.glob(os.path.join(right_dir, "*.png"))
+
+            if not left_images or not right_images:
+                return
+
+            # Ordina per data di modifica (più recente prima)
+            left_images.sort(key=os.path.getmtime, reverse=True)
+            right_images.sort(key=os.path.getmtime, reverse=True)
+
+            # Prendi l'immagine più recente di ciascuna camera
+            left_image = left_images[0]
+            right_image = right_images[0]
+
+            # Carica e visualizza le immagini
+            if OPENCV_AVAILABLE:
+                # Crea o aggiorna il widget per l'anteprima delle immagini
+                if not hasattr(self, 'preview_widget') or not self.preview_widget:
+                    # Crea un nuovo widget
+                    self.preview_widget = QWidget()
+                    preview_layout = QHBoxLayout(self.preview_widget)
+
+                    self.left_preview = QLabel("Camera sinistra")
+                    self.left_preview.setAlignment(Qt.AlignCenter)
+                    self.left_preview.setMinimumSize(320, 240)
+
+                    self.right_preview = QLabel("Camera destra")
+                    self.right_preview.setAlignment(Qt.AlignCenter)
+                    self.right_preview.setMinimumSize(320, 240)
+
+                    preview_layout.addWidget(self.left_preview)
+                    preview_layout.addWidget(self.right_preview)
+
+                    # Aggiungi il widget all'interfaccia
+                    self.results_content_layout.insertWidget(0, self.preview_widget)
+
+                # Carica e mostra l'immagine sinistra
+                left_img = cv2.imread(left_image)
+                if left_img is not None:
+                    # Ridimensiona per la visualizzazione
+                    scale = min(320 / left_img.shape[1], 240 / left_img.shape[0])
+                    width = int(left_img.shape[1] * scale)
+                    height = int(left_img.shape[0] * scale)
+                    left_img_resized = cv2.resize(left_img, (width, height))
+
+                    # Converti in formato Qt
+                    left_img_rgb = cv2.cvtColor(left_img_resized, cv2.COLOR_BGR2RGB)
+                    h, w, c = left_img_rgb.shape
+                    left_qimg = QImage(left_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
+                    left_pixmap = QPixmap.fromImage(left_qimg)
+
+                    # Mostra l'immagine
+                    self.left_preview.setPixmap(left_pixmap)
+                    self.left_preview.setText("")
+
+                # Carica e mostra l'immagine destra
+                right_img = cv2.imread(right_image)
+                if right_img is not None:
+                    # Ridimensiona per la visualizzazione
+                    scale = min(320 / right_img.shape[1], 240 / right_img.shape[0])
+                    width = int(right_img.shape[1] * scale)
+                    height = int(right_img.shape[0] * scale)
+                    right_img_resized = cv2.resize(right_img, (width, height))
+
+                    # Converti in formato Qt
+                    right_img_rgb = cv2.cvtColor(right_img_resized, cv2.COLOR_BGR2RGB)
+                    h, w, c = right_img_rgb.shape
+                    right_qimg = QImage(right_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
+                    right_pixmap = QPixmap.fromImage(right_qimg)
+
+                    # Mostra l'immagine
+                    self.right_preview.setPixmap(right_pixmap)
+                    self.right_preview.setText("")
+
+                # Mostra il widget di anteprima
+                self.preview_widget.setVisible(True)
+
+        except Exception as e:
+            logger.error(f"Errore nell'aggiornamento delle anteprime: {e}")
     def _process_scan(self):
         """Elabora i dati della scansione per generare la nuvola di punti 3D."""
         if not self.current_scan_id:

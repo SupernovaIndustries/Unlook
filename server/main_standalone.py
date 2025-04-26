@@ -1039,9 +1039,15 @@ class UnLookServer:
 
                         self.state["scanning"] = scan_status.get('state', 'IDLE') == 'SCANNING'
 
-                        # Assicuriamoci che la risposta venga inviata immediatamente
+                        # Log dettagliato per debug
 
-                        logger.info(f"Inviando risposta a GET_SCAN_STATUS: {scan_status.get('state', 'UNKNOWN')}")
+                        status_state = scan_status.get('state', 'UNKNOWN')
+
+                        status_progress = scan_status.get('progress', 0)
+
+                        logger.info(f"Stato scansione: {status_state}, Progresso: {status_progress:.1f}%")
+
+                        logger.debug(f"Dettagli stato scansione: {scan_status}")
 
                     except Exception as e:
 
@@ -1051,7 +1057,15 @@ class UnLookServer:
 
                         response['message'] = f'Errore nel recupero dello stato: {str(e)}'
 
-                        response['scan_status'] = {'state': 'ERROR'}
+                        response['scan_status'] = {'state': 'ERROR', 'error_message': str(e)}
+
+                else:
+
+                    response['status'] = 'warning'
+
+                    response['message'] = 'Funzionalità di scansione 3D non disponibile'
+
+                    response['scan_status'] = {'state': 'ERROR', 'error_message': 'Scan manager non disponibile'}
 
             elif command_type == 'GET_SCAN_CONFIG':
                 # Aggiorna timestamp di attività client

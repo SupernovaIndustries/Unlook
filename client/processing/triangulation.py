@@ -115,95 +115,143 @@ class ScanProcessor:
         self._progress_callback = progress_callback
         self._completion_callback = completion_callback
 
-    def download_scan_data(self, scanner: Any, scan_id: str) -> bool:
-        """
-        Download scan data from the server.
+    def _download_scan_data(self):
+        """Scarica i dati della scansione dal server con migliore gestione degli errori."""
+        if not self.selected_scanner or not self.scanner_controller:
+            QMessageBox.warning(
+                self,
+                "Errore",
+                "Nessuno scanner selezionato per il download."
+            )
+            return False
 
-        Args:
-            scanner: Scanner object with connection information
-            scan_id: ID of the scan to download
+        if not self.current_scan_id:
+            QMessageBox.warning(
+                self,
+                "Errore",
+                "Nessuna scansione disponibile per il download."
+            )
+            return False
 
-        Returns:
-            True if download was successful, False otherwise
-        """
-        self.scan_id = scan_id
-        self.scan_dir = self.output_dir / scan_id
-        self.scan_dir.mkdir(parents=True, exist_ok=True)
+        # Aggiorna l'interfaccia
+        self.status_label.setText("Download dati in corso...")
+        self.progress_bar.setValue(0)
 
-        # Create subdirectories
-        left_dir = self.scan_dir / "left"
-        right_dir = self.scan_dir / "right"
-        left_dir.mkdir(exist_ok=True)
-        right_dir.mkdir(exist_ok=True)
+        # Aggiorna il log
+        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Inizio download dei dati della scansione\n"
 
+        # Scarica i dati
         try:
-            if ConnectionManager is None or Scanner is None:
-                logger.error("Cannot download scan data in standalone mode")
+            # Assicura che il processor sia disponibile
+            if not hasattr(self, 'scan_processor') or not self.scan_processor:
+                self.scan_processor = ScanProcessor(str(self.output_dir))
+
+            # Configura una callback per il progresso
+            def download_progress(progress, message):
+                self.progress_bar.setValue(int(progress))
+                self.status_label.setText(message)
+
+                # Aggiorna il log occasionalmente
+                if int(progress) % 10 == 0:
+                    self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Download: {int(progress)}%, {message}\n"
+
+            self.scan_processor.set_callbacks(download_progress, None)
+
+            # Prima chiediamo l'elenco dei file della scansione
+            command_success = self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "GET_SCAN_FILES",
+                {"scan_id": self.current_scan_id}
+            )
+
+            if not command_success:
+                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nella richiesta dell'elenco dei file\n"
+                self.status_label.setText("Errore nella richiesta dell'elenco dei file")
+                QMessageBox.critical(
+                    self,
+                    "Errore",
+                    "Impossibile richiedere l'elenco dei file della scansione."
+                )
                 return False
 
-            # Create connection manager if running within client app
-            connection_manager = ConnectionManager()
+            # Attendi la risposta con timeout aumentato (60 secondi)
+            files_response = self.scanner_controller.wait_for_response(
+                self.selected_scanner.device_id,
+                "GET_SCAN_FILES",
+                timeout=60.0
+            )
 
-            if not connection_manager.is_connected(scanner.device_id):
-                logger.error(f"Not connected to scanner {scanner.device_id}")
+            if not files_response or files_response.get("status") != "ok":
+                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nella risposta per l'elenco dei file\n"
+                self.status_label.setText("Errore nella risposta per l'elenco dei file")
+                QMessageBox.critical(
+                    self,
+                    "Errore",
+                    "Impossibile ottenere l'elenco dei file della scansione dal server."
+                )
                 return False
 
-            # Get scan metadata
-            logger.info(f"Requesting scan config for scan {scan_id}")
-            success, scan_config = self._request_scan_config(connection_manager, scanner.device_id)
+            # Ottieni la lista dei file
+            files = files_response.get("files", [])
+            if not files:
+                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Nessun file disponibile per la scansione\n"
+                self.status_label.setText("Nessun file disponibile per la scansione")
+                QMessageBox.warning(
+                    self,
+                    "Avviso",
+                    "Nessun file disponibile per la scansione."
+                )
+                return False
+
+            # Ora possiamo eseguire il download
+            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] {len(files)} file disponibili per il download\n"
+
+            # Esegui il download
+            success = self.scan_processor.download_scan_data(
+                self.selected_scanner,
+                self.current_scan_id
+            )
+
             if not success:
-                logger.error("Failed to get scan configuration")
+                # Aggiorna il log
+                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nel download dei dati\n"
+
+                # Aggiorna l'interfaccia
+                self.status_label.setText("Errore nel download dei dati")
+
+                # Mostra un messaggio di errore
+                QMessageBox.critical(
+                    self,
+                    "Errore",
+                    "Impossibile scaricare i dati della scansione dal server."
+                )
                 return False
 
-            # Save scan configuration
-            with open(self.scan_dir / "scan_config.json", "w") as f:
-                json.dump(scan_config, f, indent=2)
+            # Aggiorna il log
+            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Download completato con successo\n"
 
-            # Get scan files list
-            logger.info(f"Requesting scan files list for scan {scan_id}")
-            success, file_list = self._request_scan_files(connection_manager, scanner.device_id, scan_id)
-            if not success or not file_list:
-                logger.error("Failed to get scan files list")
-                return False
+            # Aggiorna l'interfaccia
+            self.status_label.setText("Download completato")
+            self.progress_bar.setValue(100)
 
-            # Download each file
-            total_files = len(file_list)
-            for i, file_info in enumerate(file_list):
-                remote_path = file_info["path"]
-                filename = Path(remote_path).name
-                camera = file_info["camera"]
-
-                # Determine local path
-                if camera == "left":
-                    local_path = left_dir / filename
-                else:
-                    local_path = right_dir / filename
-
-                # Download file
-                logger.debug(f"Downloading {remote_path} to {local_path}")
-                success = self._download_file(connection_manager, scanner.device_id,
-                                              remote_path, str(local_path))
-
-                if not success:
-                    logger.error(f"Failed to download {remote_path}")
-                    continue
-
-                # Update progress
-                if self._progress_callback:
-                    progress = (i + 1) / total_files * 100
-                    self._progress_callback(progress, f"Downloading files: {i + 1}/{total_files}")
-
-            # Load calibration data
-            self._load_or_download_calibration(connection_manager, scanner.device_id)
-
-            # Find all downloaded images
-            self._find_scan_images()
-
-            logger.info(f"Successfully downloaded scan data for scan {scan_id}")
             return True
 
         except Exception as e:
-            logger.error(f"Error downloading scan data: {e}")
+            logger.error(f"Errore nel download dei dati: {e}")
+
+            # Aggiorna il log
+            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nel download: {str(e)}\n"
+
+            # Aggiorna l'interfaccia
+            self.status_label.setText(f"Errore nel download: {str(e)}")
+
+            # Mostra un messaggio di errore
+            QMessageBox.critical(
+                self,
+                "Errore",
+                f"Si è verificato un errore durante il download dei dati:\n{str(e)}"
+            )
+
             return False
 
     def _request_scan_config(self, connection_manager, device_id):

@@ -154,7 +154,7 @@ class ScanManager:
 
     def start_scan(self, scan_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Avvia una scansione 3D.
+        Avvia una scansione 3D con migliore gestione degli errori.
 
         Args:
             scan_config: Configurazione della scansione (opzionale)
@@ -222,58 +222,246 @@ class ScanManager:
                 ScanPatternType.PROGRESSIVE
             )
 
+            # Imposta il flag di scansione prima di avviare il thread
+            self._is_scanning = True
+            self._cancel_scan = False
+
+            # Aggiorna statistiche e stato immediatamente
+            self._scan_stats = {
+                'start_time': time.time(),
+                'end_time': 0,
+                'total_frames': 0,
+                'errors': 0
+            }
+
+            self._scan_status = {
+                'state': 'INITIALIZING',
+                'progress': 0.0,
+                'elapsed_time': 0,
+                'captured_frames': 0,
+                'errors': 0,
+                'error_message': ""
+            }
+
             # Avvia la scansione in un thread separato per non bloccare la risposta
-            def scan_thread():
-                try:
-                    # Imposta il flag di scansione
-                    self._is_scanning = True
-                    self._cancel_scan = False
+            self._scan_thread = threading.Thread(
+                target=self._scan_thread_function,
+                args=(scan_id, scan_dir, pattern_type)
+            )
+            self._scan_thread.daemon = True
+            self._scan_thread.start()
 
-                    # Aggiorna le statistiche
-                    self._scan_stats = {
-                        'start_time': time.time(),
-                        'end_time': 0,
-                        'total_frames': 0,
-                        'errors': 0
-                    }
-
-                    # Avvia la scansione effettiva
-                    logger.info(f"Avvio scansione {scan_id} con configurazione: {self._scan_config}")
-
-                    # Esegui la scansione con il controller
-                    success = self._scan_controller.start_scan(
-                        pattern_type=pattern_type,
-                        num_patterns=self._scan_config['num_patterns'],
-                        exposure_time=self._scan_config['exposure_time'],
-                        quality=self._scan_config['quality']
-                    )
-
-                    if not success:
-                        logger.error(f"Errore nell'avvio della scansione: {self._scan_controller.error_message}")
-                        self._is_scanning = False
-                        return
-
-                    # Il resto del codice di scansione rimane invariato...
-
-                except Exception as e:
-                    logger.error(f"Errore nel thread di scansione: {e}")
-                    self._is_scanning = False
-
-            # Avvia il thread di scansione
-            scan_thread = threading.Thread(target=scan_thread)
-            scan_thread.daemon = True
-            scan_thread.start()
+            # Log che indica che il thread è stato avviato
+            logger.info(f"Thread di scansione avviato per scan_id: {scan_id}")
 
             # Restituisci immediatamente il risultato di successo
             return result
 
         except Exception as e:
             logger.error(f"Errore nell'avvio della scansione: {e}")
+            # Assicurati che i flag di stato siano coerenti
+            self._is_scanning = False
+            self._scan_status = {
+                'state': 'ERROR',
+                'progress': 0.0,
+                'error_message': str(e)
+            }
             return {
                 'status': 'error',
                 'message': f'Errore nell\'avvio della scansione: {str(e)}',
                 'scan_id': None
             }
+
+    def _scan_thread_function(self, scan_id: str, scan_dir: Path, pattern_type: ScanPatternType):
+        """
+        Funzione principale del thread di scansione con migliore gestione degli errori.
+
+        Args:
+            scan_id: ID della scansione
+            scan_dir: Directory per i dati della scansione
+            pattern_type: Tipo di pattern da utilizzare
+        """
+        try:
+            # Assicura che la directory di scansione esista
+            scan_dir.mkdir(parents=True, exist_ok=True)
+
+            # Aggiorna immediatamente lo stato
+            self._scan_status = {
+                'state': 'SCANNING',
+                'progress': 0.0,
+                'elapsed_time': 0,
+                'captured_frames': 0,
+                'errors': 0,
+                'error_message': ""
+            }
+
+            # Avvia la scansione effettiva
+            logger.info(f"Avvio scansione effettiva con pattern {pattern_type.name}")
+            success = self._scan_controller.start_scan(
+                pattern_type=pattern_type,
+                num_patterns=self._scan_config['num_patterns'],
+                exposure_time=self._scan_config['exposure_time'],
+                quality=self._scan_config['quality']
+            )
+
+            if not success:
+                error_msg = f"Errore nell'avvio della scansione: {self._scan_controller.error_message}"
+                logger.error(error_msg)
+                self._scan_status = {
+                    'state': 'ERROR',
+                    'progress': 0.0,
+                    'elapsed_time': time.time() - self._scan_stats['start_time'],
+                    'error_message': error_msg
+                }
+                self._is_scanning = False
+                return
+
+            # Attendi il completamento della scansione
+            while (self._scan_controller.state == ScanningState.SCANNING or
+                   self._scan_controller.state == ScanningState.INITIALIZING):
+                if self._cancel_scan:
+                    logger.info("Scansione annullata dall'utente")
+                    break
+
+                # Aggiorna lo stato ad ogni ciclo
+                controller_status = self._scan_controller.get_scan_status()
+                self._scan_status = {
+                    'state': controller_status['state'],
+                    'progress': controller_status['progress'],
+                    'elapsed_time': time.time() - self._scan_stats['start_time'],
+                    'captured_frames': controller_status.get('captured_frames', 0),
+                    'errors': controller_status.get('errors', 0),
+                    'error_message': controller_status.get('error_message', "")
+                }
+
+                time.sleep(0.5)  # Controllo più frequente
+
+            # Salva il file di configurazione della scansione
+            config_file = scan_dir / "scan_config.json"
+            with open(config_file, 'w') as f:
+                json.dump({
+                    'scan_id': scan_id,
+                    'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
+                    'config': self._scan_config,
+                    'status': self._scan_controller.get_scan_status()
+                }, f, indent=2)
+
+            # Verifica il risultato finale
+            if self._scan_controller.state == ScanningState.COMPLETED:
+                logger.info(f"Scansione {scan_id} completata con successo")
+
+                # Aggiorna le statistiche e lo stato
+                self._scan_stats['end_time'] = time.time()
+                self._scan_stats['total_frames'] = self._scan_controller.scan_stats.get('captured_frames', 0)
+
+                self._scan_status = {
+                    'state': 'COMPLETED',
+                    'progress': 100.0,
+                    'elapsed_time': self._scan_stats['end_time'] - self._scan_stats['start_time'],
+                    'captured_frames': self._scan_controller.scan_stats.get('captured_frames', 0),
+                    'errors': 0,
+                    'error_message': ""
+                }
+
+                # Salva il risultato nella directory di scansione
+                result_file = scan_dir / "scan_result.json"
+                with open(result_file, 'w') as f:
+                    json.dump({
+                        'scan_id': scan_id,
+                        'status': 'completed',
+                        'stats': self._scan_stats,
+                        'frames_captured': self._scan_controller.scan_stats.get('captured_frames', 0),
+                        'duration': self._scan_stats['end_time'] - self._scan_stats['start_time']
+                    }, f, indent=2)
+
+            elif self._cancel_scan:
+                logger.info(f"Scansione {scan_id} annullata dall'utente")
+
+                # Aggiorna le statistiche e lo stato
+                self._scan_stats['end_time'] = time.time()
+                self._scan_stats['total_frames'] = self._scan_controller.scan_stats.get('captured_frames', 0)
+
+                self._scan_status = {
+                    'state': 'CANCELLED',
+                    'progress': 0.0,
+                    'elapsed_time': self._scan_stats['end_time'] - self._scan_stats['start_time'],
+                    'captured_frames': self._scan_controller.scan_stats.get('captured_frames', 0),
+                    'errors': 0,
+                    'error_message': "Scansione annullata dall'utente"
+                }
+
+                # Salva il risultato nella directory di scansione
+                result_file = scan_dir / "scan_result.json"
+                with open(result_file, 'w') as f:
+                    json.dump({
+                        'scan_id': scan_id,
+                        'status': 'cancelled',
+                        'stats': self._scan_stats,
+                        'frames_captured': self._scan_controller.scan_stats.get('captured_frames', 0),
+                        'duration': self._scan_stats['end_time'] - self._scan_stats['start_time']
+                    }, f, indent=2)
+
+            else:
+                logger.error(f"Scansione {scan_id} fallita: {self._scan_controller.error_message}")
+
+                # Aggiorna le statistiche e lo stato
+                self._scan_stats['end_time'] = time.time()
+                self._scan_stats['total_frames'] = self._scan_controller.scan_stats.get('captured_frames', 0)
+                self._scan_stats['errors'] = self._scan_controller.scan_stats.get('errors', 0)
+
+                self._scan_status = {
+                    'state': 'ERROR',
+                    'progress': 0.0,
+                    'elapsed_time': self._scan_stats['end_time'] - self._scan_stats['start_time'],
+                    'captured_frames': self._scan_controller.scan_stats.get('captured_frames', 0),
+                    'errors': self._scan_controller.scan_stats.get('errors', 0),
+                    'error_message': self._scan_controller.error_message
+                }
+
+                # Salva il risultato nella directory di scansione
+                result_file = scan_dir / "scan_result.json"
+                with open(result_file, 'w') as f:
+                    json.dump({
+                        'scan_id': scan_id,
+                        'status': 'error',
+                        'error_message': self._scan_controller.error_message,
+                        'stats': self._scan_stats,
+                        'frames_captured': self._scan_controller.scan_stats.get('captured_frames', 0),
+                        'duration': self._scan_stats['end_time'] - self._scan_stats['start_time']
+                    }, f, indent=2)
+
+        except Exception as e:
+            logger.error(f"Errore nel thread di scansione: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+            # Aggiorna le statistiche e lo stato
+            self._scan_stats['end_time'] = time.time()
+            self._scan_stats['errors'] += 1
+
+            self._scan_status = {
+                'state': 'ERROR',
+                'progress': 0.0,
+                'elapsed_time': self._scan_stats['end_time'] - self._scan_stats['start_time'],
+                'error_message': str(e)
+            }
+
+            # Salva il risultato nella directory di scansione (se possibile)
+            try:
+                result_file = scan_dir / "scan_result.json"
+                with open(result_file, 'w') as f:
+                    json.dump({
+                        'scan_id': scan_id,
+                        'status': 'error',
+                        'error_message': str(e),
+                        'stats': self._scan_stats
+                    }, f, indent=2)
+            except:
+                pass
+
+        finally:
+            # Resetta lo stato di scansione
+            self._is_scanning = False
 
     def stop_scan(self) -> Dict[str, Any]:
         """
