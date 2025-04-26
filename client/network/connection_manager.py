@@ -47,52 +47,123 @@ class ConnectionWorker(QThread):
         self._consecutive_errors = 0
 
     def run(self):
-        """Esegue il loop principale di connessione con migliore gestione degli errori."""
-        try:
-            # Crea e configura il socket ZMQ
-            self._context = zmq.Context()
-            self._socket = self._context.socket(zmq.REQ)  # Usiamo REQ che corrisponde a REP del server
+        """Esegue il loop principale di connessione con migliore gestione degli errori e riconnessione automatica."""
+        reconnect_attempts = 0
+        max_reconnect_attempts = 5
+        reconnect_delay = 1.0  # Delay iniziale (1 secondo)
 
-            # Connessione con timeout e opzioni migliorate
-            endpoint = f"tcp://{self.host}:{self.port}"
-            logger.info(f"Tentativo di connessione a {endpoint}")
+        while reconnect_attempts <= max_reconnect_attempts:
+            try:
+                # Crea e configura il socket ZMQ
+                self._context = zmq.Context()
+                self._socket = self._context.socket(zmq.REQ)  # Usiamo REQ che corrisponde a REP del server
 
-            # Configurazione socket con migliori opzioni per robustezza
-            self._socket.setsockopt(zmq.RCVTIMEO, 5000)  # 5 secondi timeout ricezione
-            self._socket.setsockopt(zmq.SNDTIMEO, 5000)  # 5 secondi timeout invio
-            self._socket.setsockopt(zmq.LINGER, 1000)  # Attendi fino a 1 secondo alla chiusura
-            self._socket.setsockopt(zmq.RECONNECT_IVL, 500)  # Riconnetti ogni 500ms
-            self._socket.setsockopt(zmq.RECONNECT_IVL_MAX, 5000)  # Max intervallo riconnessione 5s
+                # Connessione con timeout e opzioni migliorate
+                endpoint = f"tcp://{self.host}:{self.port}"
 
-            self._socket.connect(endpoint)
+                # Configurazione socket con migliori opzioni per robustezza
+                self._socket.setsockopt(zmq.RCVTIMEO, 5000)  # 5 secondi timeout ricezione
+                self._socket.setsockopt(zmq.SNDTIMEO, 5000)  # 5 secondi timeout invio
+                self._socket.setsockopt(zmq.LINGER, 1000)  # Attendi fino a 1 secondo alla chiusura
+                self._socket.setsockopt(zmq.RECONNECT_IVL, 500)  # Riconnetti ogni 500ms
+                self._socket.setsockopt(zmq.RECONNECT_IVL_MAX, 5000)  # Max intervallo riconnessione 5s
 
-            # Connessione riuscita
-            logger.info(f"Connessione stabilita con {self.host}:{self.port}")
-            self._running = True
-            self.connection_ready.emit(self.device_id)
+                # Se questo è un tentativo di riconnessione, lo segnaliamo
+                if reconnect_attempts > 0:
+                    logger.info(
+                        f"Tentativo di riconnessione {reconnect_attempts}/{max_reconnect_attempts} a {endpoint}")
+                else:
+                    logger.info(f"Tentativo di connessione a {endpoint}")
 
-            # Loop principale
-            while self._running:
-                # Invia i messaggi in coda
-                self._process_send_queue()
+                # Connessione
+                self._socket.connect(endpoint)
 
-                # Pausa breve per evitare di sovraccaricare la CPU
-                time.sleep(0.05)
+                # Connessione riuscita
+                logger.info(f"Connessione stabilita con {self.host}:{self.port}")
+                self._running = True
 
-        except zmq.ZMQError as e:
-            logger.error(f"Errore ZMQ nella connessione: {e}")
-            self.connection_error.emit(self.device_id, f"Errore ZMQ: {str(e)}")
-        except socket.timeout:
-            logger.error(f"Timeout durante la connessione a {self.host}:{self.port}")
-            self.connection_error.emit(self.device_id, "Timeout di connessione")
-        except Exception as e:
-            logger.error(f"Errore durante la connessione: {str(e)}")
-            self.connection_error.emit(self.device_id, f"Errore: {str(e)}")
-        finally:
-            # Chiudi il socket in modo sicuro
-            self._cleanup()
-            # Notifica la chiusura
-            self.connection_closed.emit(self.device_id)
+                # Reset contatore tentativi di riconnessione
+                reconnect_attempts = 0
+
+                # Notifica connessione riuscita
+                self.connection_ready.emit(self.device_id)
+
+                # Loop principale
+                while self._running:
+                    # Invia i messaggi in coda
+                    self._process_send_queue()
+
+                    # Pausa breve per evitare di sovraccaricare la CPU
+                    time.sleep(0.05)
+
+                # Se siamo usciti dal loop in modo pulito (self._running = False), usciamo dal loop esterno
+                break
+
+            except zmq.ZMQError as e:
+                logger.error(f"Errore ZMQ nella connessione: {e}")
+
+                # Se il thread è stato fermato esplicitamente, usciamo
+                if not self._running:
+                    break
+
+                # Incrementa il contatore di tentativi e calcola il ritardo
+                reconnect_attempts += 1
+                current_delay = min(reconnect_delay * (2 ** (reconnect_attempts - 1)),
+                                    30.0)  # Backoff esponenziale, max 30 secondi
+
+                # Se abbiamo superato il numero massimo di tentativi, notifica l'errore e esci
+                if reconnect_attempts > max_reconnect_attempts:
+                    self.connection_error.emit(self.device_id,
+                                               f"Impossibile connettersi dopo {max_reconnect_attempts} tentativi")
+                    break
+
+                # Pulisci il socket corrente
+                self._cleanup()
+
+                # Attendi prima di riprovare
+                logger.info(f"Attesa di {current_delay:.1f} secondi prima del prossimo tentativo...")
+                time.sleep(current_delay)
+
+            except socket.timeout:
+                logger.error(f"Timeout durante la connessione a {self.host}:{self.port}")
+
+                # Comportamento simile all'errore ZMQ
+                if not self._running:
+                    break
+
+                reconnect_attempts += 1
+                current_delay = min(reconnect_delay * (2 ** (reconnect_attempts - 1)), 30.0)
+
+                if reconnect_attempts > max_reconnect_attempts:
+                    self.connection_error.emit(self.device_id, "Timeout di connessione ripetuti")
+                    break
+
+                self._cleanup()
+                time.sleep(current_delay)
+
+            except Exception as e:
+                logger.error(f"Errore durante la connessione: {str(e)}")
+
+                if not self._running:
+                    break
+
+                reconnect_attempts += 1
+                current_delay = min(reconnect_delay * (2 ** (reconnect_attempts - 1)), 30.0)
+
+                if reconnect_attempts > max_reconnect_attempts:
+                    self.connection_error.emit(self.device_id, f"Errore: {str(e)}")
+                    break
+
+                self._cleanup()
+                time.sleep(current_delay)
+
+            finally:
+                if reconnect_attempts > max_reconnect_attempts or not self._running:
+                    # Chiudi il socket in modo sicuro solo se usciamo definitivamente
+                    self._cleanup()
+                    # Notifica la chiusura
+                    if self._running:  # Solo se non siamo stati fermati manualmente
+                        self.connection_closed.emit(self.device_id)
 
     def send_data(self, data: bytes) -> bool:
         """
@@ -111,7 +182,7 @@ class ConnectionWorker(QThread):
             return True
 
     def _process_send_queue(self):
-        """Processa la coda dei messaggi da inviare con miglior gestione degli errori."""
+        """Processa la coda dei messaggi da inviare con miglior gestione degli errori e riconnessione."""
         with QMutexLocker(self._mutex):
             if not self._send_queue:
                 return
@@ -151,8 +222,16 @@ class ConnectionWorker(QThread):
                     return
 
                 logger.error(f"Errore ZMQ durante l'attesa di risposta: {e}")
+
+                # Riaccodiamo il messaggio per riprocessarlo al prossimo ciclo o dopo riconnessione
+                with QMutexLocker(self._mutex):
+                    self._send_queue.insert(0, data)
         except zmq.ZMQError as e:
             logger.error(f"Errore ZMQ durante l'invio: {e}")
+
+            # Riaccodiamo il messaggio
+            with QMutexLocker(self._mutex):
+                self._send_queue.insert(0, data)
 
             # Se è un errore critico, segnala la disconnessione
             if e.errno in [zmq.ETERM, zmq.ENOTSOCK, zmq.ENOTSUP]:
@@ -161,6 +240,10 @@ class ConnectionWorker(QThread):
                 self.connection_closed.emit(self.device_id)
         except Exception as e:
             logger.error(f"Errore durante l'invio: {str(e)}")
+
+            # Riaccodiamo il messaggio
+            with QMutexLocker(self._mutex):
+                self._send_queue.insert(0, data)
 
     def stop(self):
         """Ferma il worker e chiude la connessione in modo sicuro."""

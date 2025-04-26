@@ -361,9 +361,41 @@ class ScannerController(QObject):
 
     @Slot(str)
     def _on_connection_closed(self, device_id: str):
-        """Gestisce l'evento di chiusura della connessione."""
+        """Gestisce l'evento di chiusura della connessione con riconnessione automatica."""
         scanner = self._scanner_manager.get_scanner(device_id)
         if scanner:
+            old_status = scanner.status
             scanner.status = ScannerStatus.DISCONNECTED
             logger.info(f"Connessione chiusa con {scanner.name}")
+
+            # Notifica la disconnessione
             self.scanner_disconnected.emit(scanner)
+
+            # Se lo scanner era connesso o in streaming, prova a riconnettersi automaticamente
+            if old_status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING):
+                # Verifica se lo scanner è ancora presente nella lista
+                if device_id in [s.device_id for s in self._scanner_manager.scanners]:
+                    logger.info(f"Tentativo di riconnessione automatica a {scanner.name}")
+
+                    # Attendi un momento prima di riconnetterti
+                    QTimer.singleShot(2000, lambda: self._try_reconnect(device_id))
+
+    def _try_reconnect(self, device_id: str):
+        """Tenta di riconnettersi a uno scanner."""
+        scanner = self._scanner_manager.get_scanner(device_id)
+        if not scanner:
+            logger.warning(f"Impossibile riconnettersi: scanner {device_id} non trovato")
+            return
+
+        logger.info(f"Riconnessione a {scanner.name}...")
+
+        # Tenta la connessione
+        success = self.connect_to_scanner(device_id)
+
+        if success:
+            logger.info(f"Riconnessione a {scanner.name} riuscita")
+        else:
+            logger.warning(f"Riconnessione a {scanner.name} fallita")
+
+            # Riprova dopo un intervallo più lungo
+            QTimer.singleShot(5000, lambda: self._try_reconnect(device_id))

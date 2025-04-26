@@ -1096,6 +1096,15 @@ class ScanView(QWidget):
                 if log_entry not in self.scan_log:
                     self.scan_log += log_entry + "\n"
 
+            # Ogni 3 aggiornamenti di stato, richiedi un'anteprima
+            if not hasattr(self, '_preview_counter'):
+                self._preview_counter = 0
+            self._preview_counter += 1
+
+            if self._preview_counter % 3 == 0 and state == "SCANNING":
+                # Richiedi un'anteprima della scansione
+                self._request_scan_preview()
+
             # Controlla se la scansione è completata o in errore
             if state == "COMPLETED":
                 self._handle_scan_completed()
@@ -1155,7 +1164,7 @@ class ScanView(QWidget):
                 self.status_label.setText("Scanner non connesso")
 
     def _start_scan(self):
-        """Avvia una nuova scansione con polling dello stato migliorato."""
+        """Avvia una nuova scansione con polling dello stato migliorato e migliore sincronizzazione con lo streaming."""
         if self.is_scanning:
             return
 
@@ -1187,6 +1196,28 @@ class ScanView(QWidget):
             # Breve pausa per assicurarsi che la connessione sia stabilita
             time.sleep(0.5)
 
+        # Prima di avviare la scansione, ferma lo streaming se attivo
+        streaming_active = False
+        try:
+            # Ottieni un riferimento alla finestra principale
+            main_window = self.window()
+            if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
+                streaming_widget = main_window.streaming_widget
+                if hasattr(streaming_widget, 'is_streaming') and streaming_widget.is_streaming():
+                    logger.info("Arresto dello streaming prima di avviare la scansione")
+                    streaming_active = True
+                    streaming_widget.stop_streaming()
+                    # Breve pausa per assicurarsi che lo streaming sia fermato
+                    time.sleep(0.5)
+                    # Invia anche un comando esplicito di stop al server
+                    self.scanner_controller.send_command(
+                        self.selected_scanner.device_id,
+                        "STOP_STREAM"
+                    )
+                    time.sleep(0.2)  # Altra piccola pausa
+        except Exception as e:
+            logger.warning(f"Errore nell'arresto dello streaming prima della scansione: {e}")
+
         # Prepara il percorso della scansione
         scan_name = self.scan_name_edit.text()
         if not scan_name:
@@ -1207,6 +1238,9 @@ class ScanView(QWidget):
         self.options_button.setEnabled(False)
         self.browse_button.setEnabled(False)
         self.scan_name_edit.setEnabled(False)
+
+        # Memorizza che lo streaming era attivo prima della scansione
+        self._streaming_was_active = streaming_active
 
         # Reset del log
         self.scan_log = f"[{datetime.now().strftime('%H:%M:%S')}] Avvio scansione: {self.current_scan_id}\n"
@@ -1341,6 +1375,16 @@ class ScanView(QWidget):
 
             if not command_success:
                 self._handle_scan_error("Impossibile inviare il comando di avvio scansione")
+                # Se lo streaming era attivo, ripristinalo
+                if streaming_active:
+                    try:
+                        main_window = self.window()
+                        if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
+                            logger.info("Ripristino dello streaming dopo errore di avvio scansione")
+                            time.sleep(0.5)  # Piccola pausa
+                            main_window.streaming_widget.start_streaming(self.selected_scanner)
+                    except Exception as e:
+                        logger.error(f"Errore nel ripristino dello streaming: {e}")
                 return
 
             # Imposta la scansione come attiva immediatamente
@@ -1363,6 +1407,17 @@ class ScanView(QWidget):
         except Exception as e:
             logger.error(f"Errore nell'avvio della scansione: {e}")
             self._handle_scan_error(str(e))
+
+            # Se lo streaming era attivo, ripristinalo
+            if streaming_active:
+                try:
+                    main_window = self.window()
+                    if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
+                        logger.info("Ripristino dello streaming dopo errore di avvio scansione")
+                        time.sleep(0.5)  # Piccola pausa
+                        main_window.streaming_widget.start_streaming(self.selected_scanner)
+                except Exception as e:
+                    logger.error(f"Errore nel ripristino dello streaming: {e}")
 
             # Chiudi il dialog se ancora aperto
             if 'progress_dialog' in locals() and progress_dialog.isVisible():
@@ -1805,6 +1860,12 @@ class ScanView(QWidget):
         scan_path = os.path.join(str(self.output_dir), self.current_scan_id)
         self.scan_completed.emit(scan_path)
 
+        # Salva il log della scansione
+        self._save_scan_log(scan_path)
+
+        # Ripristina lo streaming se era attivo prima della scansione
+        self._restore_streaming_if_needed()
+
         # Chiedi all'utente se vuole elaborare i dati
         reply = QMessageBox.question(
             self,
@@ -1816,6 +1877,93 @@ class ScanView(QWidget):
 
         if reply == QMessageBox.Yes:
             self._process_scan()
+
+    def _request_scan_preview(self):
+        """Richiede un'anteprima della scansione in corso al server."""
+        if not self.is_scanning or not self.scanner_controller or not self.selected_scanner:
+            logger.debug("Impossibile richiedere anteprima: scansione non attiva o scanner non selezionato")
+            return False
+
+        try:
+            # Invia la richiesta di anteprima
+            command_success = self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "GET_SCAN_PREVIEW",
+                {"scan_id": self.current_scan_id}
+            )
+
+            if not command_success:
+                logger.debug("Impossibile inviare il comando GET_SCAN_PREVIEW")
+                return False
+
+            # Attendi la risposta con un timeout breve (non bloccare l'UI)
+            response = self.scanner_controller.wait_for_response(
+                self.selected_scanner.device_id,
+                "GET_SCAN_PREVIEW",
+                timeout=1.0  # Timeout breve per non bloccare l'UI
+            )
+
+            if not response:
+                logger.debug("Nessuna risposta alla richiesta GET_SCAN_PREVIEW")
+                return False
+
+            # Elabora la risposta
+            if response.get("status") == "ok":
+                # Ottieni i dati delle immagini
+                preview_data = response.get("preview_data", {})
+                left_data = preview_data.get("left")
+                right_data = preview_data.get("right")
+
+                if left_data or right_data:
+                    # Visualizza le anteprime
+                    self._process_preview_images(response)
+                    return True
+
+            return False
+        except Exception as e:
+            logger.error(f"Errore nella richiesta di anteprima: {e}")
+            return False
+    def _save_scan_log(self, scan_path):
+        """Salva il log della scansione su file."""
+        try:
+            log_file = os.path.join(scan_path, "scan_log.txt")
+            with open(log_file, 'w') as f:
+                f.write(self.scan_log)
+            logger.info(f"Log della scansione salvato su {log_file}")
+        except Exception as e:
+            logger.error(f"Errore nel salvataggio del log della scansione: {e}")
+
+    def _restore_streaming_if_needed(self):
+        """Ripristina lo streaming se era attivo prima della scansione."""
+        if hasattr(self, '_streaming_was_active') and self._streaming_was_active:
+            try:
+                # Ottieni un riferimento alla finestra principale
+                main_window = self.window()
+                if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
+                    streaming_widget = main_window.streaming_widget
+                    logger.info("Ripristino dello streaming dopo la scansione")
+
+                    # Piccola pausa per assicurarsi che il server sia pronto
+                    time.sleep(0.5)
+
+                    # Prima invia un ping per verificare che il server sia reattivo
+                    if self.scanner_controller and self.selected_scanner:
+                        self.scanner_controller.send_command(
+                            self.selected_scanner.device_id,
+                            "PING",
+                            {"timestamp": time.time()}
+                        )
+
+                        # Piccola pausa
+                        time.sleep(0.2)
+
+                        # Avvia lo streaming
+                        streaming_widget.start_streaming(self.selected_scanner)
+
+                        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Streaming ripristinato\n"
+                        logger.info("Streaming ripristinato dopo la scansione")
+            except Exception as e:
+                logger.error(f"Errore nel ripristino dello streaming: {e}")
 
     def _handle_scan_error(self, error_message):
         """Gestisce un errore durante la scansione."""
@@ -2111,7 +2259,7 @@ class ScanView(QWidget):
 
         except Exception as e:
             logger.error(f"Errore nell'elaborazione delle anteprime: {e}")
-            
+
     def _process_scan(self):
         """Elabora i dati della scansione per generare la nuvola di punti 3D."""
         if not self.current_scan_id:
