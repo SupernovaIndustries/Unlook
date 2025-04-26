@@ -55,8 +55,8 @@ class ConnectionWorker(QThread):
             # Connessione con timeout e opzioni migliorate
             endpoint = f"tcp://{self.host}:{self.port}"
             logger.info(f"Tentativo di connessione a {endpoint}")
-            self._socket.setsockopt(zmq.RCVTIMEO, 5000)  # 5 secondi timeout ricezione
-            self._socket.setsockopt(zmq.SNDTIMEO, 5000)  # 5 secondi timeout invio
+            self._socket.setsockopt(zmq.RCVTIMEO, 30000)  # 30 secondi timeout ricezione (era 5000)
+            self._socket.setsockopt(zmq.SNDTIMEO, 30000)  # 30 secondi timeout invio (era 5000)
             self._socket.setsockopt(zmq.LINGER, 1000)  # Attendi fino a 1 secondo alla chiusura
             self._socket.connect(endpoint)
 
@@ -136,9 +136,10 @@ class ConnectionWorker(QThread):
                     self.data_received.emit(self.device_id, reply_data)
                 except Exception as e:
                     logger.error(f"Errore nella decodifica della risposta: {e}")
-            except zmq.ZMQError as e:
-                # Incrementa il contatore di errori consecutivi
+            except zmq.Again as e:
+                # Errore di timeout - normalmente significa che non c'è risposta
                 self._consecutive_errors += 1
+                logger.warning(f"Timeout durante l'attesa della risposta: {e}")
 
                 # Se ci sono troppi errori consecutivi, segnala la disconnessione
                 if self._consecutive_errors >= 3:
@@ -146,8 +147,17 @@ class ConnectionWorker(QThread):
                     self._running = False
                     self.connection_closed.emit(self.device_id)
                     return
-
+            except zmq.ZMQError as e:
+                # Altri errori ZMQ
+                self._consecutive_errors += 1
                 logger.error(f"Errore ZMQ durante l'attesa di risposta: {e}")
+
+                # Se è un errore critico, segnala la disconnessione
+                if e.errno in [zmq.ETERM, zmq.ENOTSOCK, zmq.ENOTSUP]:
+                    logger.error("Errore fatale nella connessione ZMQ")
+                    self._running = False
+                    self.connection_closed.emit(self.device_id)
+                    return
         except zmq.ZMQError as e:
             logger.error(f"Errore ZMQ durante l'invio: {e}")
 
@@ -156,6 +166,7 @@ class ConnectionWorker(QThread):
                 logger.error("Errore fatale nella connessione ZMQ")
                 self._running = False
                 self.connection_closed.emit(self.device_id)
+                return
         except Exception as e:
             logger.error(f"Errore durante l'invio: {str(e)}")
 

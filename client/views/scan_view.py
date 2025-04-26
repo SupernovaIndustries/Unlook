@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QButtonGroup, QLineEdit, QProgressBar, QToolButton, QDialog, QScrollArea,
     QTextEdit, QApplication, QStyle, QStyleOption, QStyleFactory, QProgressDialog
 )
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, QSize, QSettings
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QSize, QSettings, QThread, QObject
 from PySide6.QtGui import QIcon, QFont, QColor, QPixmap, QImage
 
 # Importa il modulo di triangolazione
@@ -65,6 +65,49 @@ except ImportError:
 
 # Configura logging
 logger = logging.getLogger(__name__)
+
+
+class TestCapabilityWorker(QObject):
+    """Worker per eseguire il test delle capacità di scansione in un thread separato."""
+    progress = Signal(int, str)  # progress, message
+    finished = Signal(dict)  # response
+    error = Signal(str)  # error message
+
+    def __init__(self, scanner_controller, device_id):
+        super().__init__()
+        self.scanner_controller = scanner_controller
+        self.device_id = device_id
+
+    def run(self):
+        try:
+            self.progress.emit(20, "Invio comando di test...")
+
+            command_success = self.scanner_controller.send_command(
+                self.device_id,
+                "CHECK_SCAN_CAPABILITY"
+            )
+
+            if not command_success:
+                self.error.emit("Impossibile inviare il comando di test al server.")
+                return
+
+            self.progress.emit(40, "Attesa risposta dal server...")
+
+            # Attendi la risposta con timeout aumentato (60 secondi)
+            response = self.scanner_controller.wait_for_response(
+                self.device_id,
+                "CHECK_SCAN_CAPABILITY",
+                timeout=60.0
+            )
+
+            if not response:
+                self.error.emit("Nessuna risposta dal server entro il timeout.")
+                return
+
+            self.progress.emit(100, "Test completato.")
+            self.finished.emit(response)
+        except Exception as e:
+            self.error.emit(f"Errore durante il test: {str(e)}")
 
 
 class ScanOptionsDialog(QDialog):
@@ -434,6 +477,9 @@ class ScanView(QWidget):
         self.selected_scanner = None
         self.current_scan_id = None
         self.scan_log = ""
+        self.progress_dialog = None
+        self.test_thread = None
+        self.test_worker = None
 
         # Processor per la triangolazione
         self.scan_processor = ScanProcessor()
@@ -489,6 +535,7 @@ class ScanView(QWidget):
                     # Non fermare la scansione se lo streaming è ancora attivo
                     if self.is_scanning and not streaming_active:
                         self._handle_scan_error("Connessione con lo scanner persa")
+
     def _setup_ui(self):
         """Configura l'interfaccia utente."""
         # Layout principale
@@ -533,8 +580,6 @@ class ScanView(QWidget):
         self.options_button = QPushButton("Opzioni Avanzate...")
         self.options_button.clicked.connect(self._show_options_dialog)
         config_layout.addRow("", self.options_button)
-
-
 
         top_layout.addWidget(config_group)
 
@@ -688,137 +733,116 @@ class ScanView(QWidget):
         self.progress_bar.setValue(10)
 
         # Crea un dialog di progresso per evitare il blocco dell'UI
-        progress_dialog = QProgressDialog("Verifica delle capacità di scansione 3D...", "Annulla", 0, 100, self)
-        progress_dialog.setWindowTitle("Test in corso")
-        progress_dialog.setWindowModality(Qt.WindowModal)
-        progress_dialog.setValue(10)
-        progress_dialog.show()
+        self.progress_dialog = QProgressDialog("Verifica delle capacità di scansione 3D...", "Annulla", 0, 100, self)
+        self.progress_dialog.setWindowTitle("Test in corso")
+        self.progress_dialog.setWindowModality(Qt.WindowModal)
+        self.progress_dialog.setValue(10)
+        self.progress_dialog.show()
 
         # Processa eventi per aggiornare l'UI
         QApplication.processEvents()
 
-        # Invia il comando di test capacità con timeout aumentato
-        try:
-            logger.info("Esecuzione test capacità 3D")
-            progress_dialog.setValue(20)
-            QApplication.processEvents()
+        # Invia il comando di test capacità in un thread separato
+        self.test_thread = QThread()
+        self.test_worker = TestCapabilityWorker(self.scanner_controller, self.selected_scanner.device_id)
+        self.test_worker.moveToThread(self.test_thread)
+        self.test_worker.progress.connect(self._update_test_progress)
+        self.test_worker.finished.connect(self._on_test_capability_finished)
+        self.test_worker.error.connect(self._on_test_capability_error)
+        self.test_thread.started.connect(self.test_worker.run)
+        self.test_thread.start()
 
-            command_success = self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "CHECK_SCAN_CAPABILITY"
-            )
+    def _update_test_progress(self, progress, message):
+        """Aggiorna il progresso del test delle capacità di scansione."""
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.setValue(progress)
+            self.progress_dialog.setLabelText(message)
+        self.progress_bar.setValue(progress)
+        self.status_label.setText(message)
 
-            if not command_success:
-                progress_dialog.close()
-                self.status_label.setText("Errore nell'invio del comando di test")
-                QMessageBox.critical(
-                    self,
-                    "Errore",
-                    "Impossibile inviare il comando di test al server."
-                )
-                return
+    def _on_test_capability_finished(self, response):
+        """Gestisce il completamento del test delle capacità di scansione."""
+        # Chiudi il dialog di progresso
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.close()
+            self.progress_dialog = None
 
-            # Aggiorna la barra di progresso
-            progress_dialog.setValue(50)
-            QApplication.processEvents()
+        # Ferma il thread
+        if hasattr(self, 'test_thread') and self.test_thread:
+            self.test_thread.quit()
+            self.test_thread.wait()
+            self.test_thread = None
+            self.test_worker = None
 
-            # Attendi la risposta con timeout aumentato (60 secondi)
-            response = self.scanner_controller.wait_for_response(
-                self.selected_scanner.device_id,
-                "CHECK_SCAN_CAPABILITY",
-                timeout=60.0
-            )
+        # Verifica lo stato della risposta
+        capability_available = response.get("scan_capability", False)
+        capability_details = response.get("scan_capability_details", {})
 
-            # Chiudi il dialog di progresso
-            progress_dialog.close()
+        # Salva il risultato del test
+        self._scan_capabilities_verified = capability_available
 
-            # Se non abbiamo ottenuto risposta, facciamo un tentativo alternativo
-            if not response:
-                self.status_label.setText("Verifica dello stato del proiettore DLP...")
+        # Costruisci un messaggio dettagliato
+        if capability_available:
+            msg = "Il sistema dispone delle capacità di scansione 3D!\n\nDettagli:\n"
 
-                # Prova a verificare se il server è ancora connesso
-                ping_success = self.scanner_controller.send_command(
-                    self.selected_scanner.device_id,
-                    "PING",
-                    {"timestamp": time.time()}
-                )
+            for key, value in capability_details.items():
+                msg += f"- {key}: {value}\n"
 
-                if ping_success:
-                    # Il server è raggiungibile, ma potrebbe esserci un problema col proiettore
-                    QMessageBox.warning(
-                        self,
-                        "Avviso",
-                        "Il server è attivo ma non ha risposto alla verifica delle capacità 3D.\n\n"
-                        "Potrebbe esserci un problema con il proiettore DLP. Verifica:\n"
-                        "1. Che il proiettore sia collegato correttamente e acceso\n"
-                        "2. Che l'I2C sia abilitato sul Raspberry Pi\n"
-                        "3. Che l'indirizzo I2C sia configurato correttamente"
-                    )
-                    return
-                else:
-                    self.status_label.setText("Server non raggiungibile")
-                    QMessageBox.critical(
-                        self,
-                        "Errore",
-                        "Il server non ha risposto ai tentativi di verifica."
-                    )
-                    return
-
-            # Verifica lo stato della risposta
-            capability_available = response.get("scan_capability", False)
-            capability_details = response.get("scan_capability_details", {})
-
-            # CORREZIONE: Salva il risultato del test
-            self._scan_capabilities_verified = capability_available
-
-            # Costruisci un messaggio dettagliato
-            if capability_available:
-                msg = "Il sistema dispone delle capacità di scansione 3D!\n\nDettagli:\n"
-
-                for key, value in capability_details.items():
-                    msg += f"- {key}: {value}\n"
-
-                self.status_label.setText("Capacità di scansione 3D disponibili")
-                QMessageBox.information(
-                    self,
-                    "Test Completato",
-                    msg
-                )
-
-                # Abilita il pulsante di avvio scansione
-                self.start_scan_button.setEnabled(True)
-            else:
-                error_msg = "Il sistema NON dispone delle capacità di scansione 3D.\n\nDettagli:\n"
-
-                for key, value in capability_details.items():
-                    error_msg += f"- {key}: {value}\n"
-
-                # Aggiungi consigli per la risoluzione
-                error_msg += "\nSuggerimenti per la risoluzione:\n"
-                error_msg += "1. Verifica che il proiettore DLP sia collegato e acceso\n"
-                error_msg += "2. Controlla che l'I2C sia abilitato sul Raspberry Pi (sudo raspi-config)\n"
-                error_msg += "3. Verifica che l'indirizzo I2C e il bus siano corretti\n"
-                error_msg += "4. Riavvia il server UnLook per reinizializzare i componenti"
-
-                self.status_label.setText("Capacità di scansione 3D NON disponibili")
-                QMessageBox.warning(
-                    self,
-                    "Test Fallito",
-                    error_msg
-                )
-
-        except Exception as e:
-            if progress_dialog.isVisible():
-                progress_dialog.close()
-
-            logger.error(f"Errore nell'esecuzione del test: {e}")
-            self.status_label.setText(f"Errore: {str(e)}")
-            QMessageBox.critical(
+            self.status_label.setText("Capacità di scansione 3D disponibili")
+            QMessageBox.information(
                 self,
-                "Errore",
-                f"Si è verificato un errore durante il test:\n{str(e)}\n\n"
-                "Verifica la connessione di rete e che il server sia in esecuzione."
+                "Test Completato",
+                msg
             )
+
+            # Abilita il pulsante di avvio scansione
+            self.start_scan_button.setEnabled(True)
+        else:
+            error_msg = "Il sistema NON dispone delle capacità di scansione 3D.\n\nDettagli:\n"
+
+            for key, value in capability_details.items():
+                error_msg += f"- {key}: {value}\n"
+
+            # Aggiungi consigli per la risoluzione
+            error_msg += "\nSuggerimenti per la risoluzione:\n"
+            error_msg += "1. Verifica che il proiettore DLP sia collegato e acceso\n"
+            error_msg += "2. Controlla che l'I2C sia abilitato sul Raspberry Pi (sudo raspi-config)\n"
+            error_msg += "3. Verifica che l'indirizzo I2C e il bus siano corretti\n"
+            error_msg += "4. Riavvia il server UnLook per reinizializzare i componenti"
+
+            self.status_label.setText("Capacità di scansione 3D NON disponibili")
+            QMessageBox.warning(
+                self,
+                "Test Fallito",
+                error_msg
+            )
+
+    def _on_test_capability_error(self, error_message):
+        """Gestisce un errore durante il test delle capacità di scansione."""
+        # Chiudi il dialog di progresso
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.close()
+            self.progress_dialog = None
+
+        # Ferma il thread
+        if hasattr(self, 'test_thread') and self.test_thread:
+            self.test_thread.quit()
+            self.test_thread.wait()
+            self.test_thread = None
+            self.test_worker = None
+
+        # Aggiorna l'interfaccia
+        self.status_label.setText(f"Errore: {error_message}")
+        self.progress_bar.setValue(0)
+
+        # Mostra un messaggio di errore
+        QMessageBox.critical(
+            self,
+            "Errore",
+            f"Si è verificato un errore durante il test:\n{error_message}\n\n"
+            "Verifica la connessione di rete e che il server sia in esecuzione."
+        )
+
     def _select_output_dir(self):
         """Mostra un dialogo per selezionare la directory di output."""
         directory = QFileDialog.getExistingDirectory(
@@ -945,7 +969,9 @@ class ScanView(QWidget):
 
             # Aggiorna la UI in base allo stato più affidabile
             self.start_scan_button.setEnabled(connected)
+            self.test_scan_button.setEnabled(connected)  # Abilita/disabilita anche il pulsante di test
 
+            # Aggiorna l'etichetta di stato
             if connected:
                 if streaming_active:
                     self.status_label.setText(f"Connesso a {self.selected_scanner.name} (Streaming attivo)")
@@ -1325,6 +1351,7 @@ class ScanView(QWidget):
         except Exception as e:
             logger.error(f"Errore nel polling dello stato: {str(e)}")
             self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nel polling: {str(e)}\n"
+
     def _stop_scan(self):
         """Interrompe la scansione in corso."""
         if not self.is_scanning or not self.selected_scanner:
@@ -1564,6 +1591,7 @@ class ScanView(QWidget):
 
         except Exception as e:
             logger.error(f"Errore nell'aggiornamento delle anteprime: {e}")
+
     def _process_scan(self):
         """Elabora i dati della scansione per generare la nuvola di punti 3D."""
         if not self.current_scan_id:
@@ -2030,3 +2058,30 @@ class ScanView(QWidget):
             self.status_label.setText(f"Connesso a {scanner.name}")
         else:
             self.status_label.setText("Scanner non connesso")
+
+    def closeEvent(self, event):
+        """Gestisce l'evento di chiusura della finestra."""
+        # Ferma eventuali thread in esecuzione
+        if hasattr(self, 'test_thread') and self.test_thread:
+            self.test_thread.quit()
+            self.test_thread.wait()
+            self.test_thread = None
+            self.test_worker = None
+
+        # Chiudi eventuali dialog aperti
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.close()
+            self.progress_dialog = None
+
+        # Ferma eventuali timer
+        if hasattr(self, 'status_timer'):
+            self.status_timer.stop()
+
+        if hasattr(self, '_polling_timer') and self._polling_timer and self._polling_timer.isActive():
+            self._polling_timer.stop()
+
+        if hasattr(self, '_scan_safety_timeout') and self._scan_safety_timeout and self._scan_safety_timeout.isActive():
+            self._scan_safety_timeout.stop()
+
+        # Continua con l'evento di chiusura
+        super().closeEvent(event)
