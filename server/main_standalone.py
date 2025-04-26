@@ -55,7 +55,7 @@ try:
     logger.info(f"OpenCV ottimizzazioni hardware: {cv2.useOptimized()}")
 
     # Banner di avvio
-    print("\n╔══════════════════════════════════════════════╗")
+    print("\n╔═══════════════════════════════════════════════╗")
     print("║             UnLook Scanner Server             ║")
     print("║             Versione 2.0.0                    ║")
     print("║        (c) 2025 SupernovaIndustries           ║")
