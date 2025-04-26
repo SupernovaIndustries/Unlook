@@ -212,6 +212,8 @@ class ScannerController(QObject):
     def wait_for_response(self, device_id: str, command_type: str, timeout: float = 30.0) -> Optional[Dict[str, Any]]:
         """
         Attende la risposta a un comando inviato.
+        Versione migliorata che non blocca l'interfaccia utente e gestisce
+        correttamente gli errori e i timeout.
 
         Args:
             device_id: ID univoco dello scanner
@@ -236,8 +238,11 @@ class ScannerController(QObject):
 
             # Attendi che la risposta sia disponibile
             start_time = time.time()
-            check_interval = 0.2  # Controlla ogni 200ms
+            check_interval = 0.1  # Controlla più frequentemente (ogni 100ms)
             while (time.time() - start_time) < effective_timeout:
+                # IMPORTANTE: Permetti all'interfaccia grafica di processare eventi durante l'attesa
+                QApplication.processEvents()
+
                 if self._connection_manager.has_response(device_id, command_type):
                     response = self._connection_manager.get_response(device_id, command_type)
                     logger.info(f"Risposta ricevuta per comando {command_type}")
@@ -270,7 +275,7 @@ class ScannerController(QObject):
                             logger.info("Richiesto stato scansione dopo timeout di START_SCAN")
                     elif command_type == "GET_SCAN_STATUS":
                         # Per GET_SCAN_STATUS, aspetta un po' e riprova
-                        time.sleep(1.0)
+                        time.sleep(0.5)  # Attesa più breve
                         status_result = self.send_command(device_id, "GET_SCAN_STATUS")
                         if status_result:
                             logger.info("Ritentata richiesta stato scansione dopo timeout")

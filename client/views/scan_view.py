@@ -733,24 +733,198 @@ class ScanView(QWidget):
         self.progress_bar.setValue(10)
 
         # Crea un dialog di progresso per evitare il blocco dell'UI
-        self.progress_dialog = QProgressDialog("Verifica delle capacità di scansione 3D...", "Annulla", 0, 100, self)
-        self.progress_dialog.setWindowTitle("Test in corso")
-        self.progress_dialog.setWindowModality(Qt.WindowModal)
-        self.progress_dialog.setValue(10)
-        self.progress_dialog.show()
+        progress_dialog = QProgressDialog("Verifica delle capacità di scansione 3D...", "Annulla", 0, 100, self)
+        progress_dialog.setWindowTitle("Test in corso")
+        progress_dialog.setWindowModality(Qt.WindowModal)
+        progress_dialog.setValue(10)
+        progress_dialog.show()
 
         # Processa eventi per aggiornare l'UI
         QApplication.processEvents()
 
-        # Invia il comando di test capacità in un thread separato
-        self.test_thread = QThread()
-        self.test_worker = TestCapabilityWorker(self.scanner_controller, self.selected_scanner.device_id)
-        self.test_worker.moveToThread(self.test_thread)
-        self.test_worker.progress.connect(self._update_test_progress)
-        self.test_worker.finished.connect(self._on_test_capability_finished)
-        self.test_worker.error.connect(self._on_test_capability_error)
-        self.test_thread.started.connect(self.test_worker.run)
-        self.test_thread.start()
+        # Invia il comando di test capacità con timeout aumentato
+        try:
+            logger.info("Esecuzione test capacità 3D")
+            progress_dialog.setValue(20)
+            QApplication.processEvents()
+
+            command_success = self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "CHECK_SCAN_CAPABILITY"
+            )
+
+            if not command_success:
+                progress_dialog.close()
+                self.status_label.setText("Errore nell'invio del comando di test")
+                QMessageBox.critical(
+                    self,
+                    "Errore",
+                    "Impossibile inviare il comando di test al server."
+                )
+                return
+
+            # Aggiorna la barra di progresso
+            progress_dialog.setValue(40)
+            progress_dialog.setLabelText("Attendo risposta dal server...")
+            QApplication.processEvents()
+
+            # Thread di monitoraggio per evitare blocchi nella UI
+            class ResponseThread(QThread):
+                response_received = Signal(dict)
+                timeout_occurred = Signal()
+
+                def __init__(self, scanner_controller, device_id, command_type, timeout):
+                    super().__init__()
+                    self.scanner_controller = scanner_controller
+                    self.device_id = device_id
+                    self.command_type = command_type
+                    self.timeout = timeout
+
+                def run(self):
+                    response = self.scanner_controller.wait_for_response(
+                        self.device_id,
+                        self.command_type,
+                        timeout=self.timeout
+                    )
+
+                    if response:
+                        self.response_received.emit(response)
+                    else:
+                        self.timeout_occurred.emit()
+
+            # Avvia thread di monitoraggio
+            response_thread = ResponseThread(
+                self.scanner_controller,
+                self.selected_scanner.device_id,
+                "CHECK_SCAN_CAPABILITY",
+                timeout=30.0  # 30 secondi di timeout
+            )
+
+            # Connetti i segnali
+            response_thread.response_received.connect(
+                lambda response: self._handle_capability_response(response, progress_dialog)
+            )
+
+            response_thread.timeout_occurred.connect(
+                lambda: self._handle_capability_timeout(progress_dialog)
+            )
+
+            response_thread.start()
+
+            # Loop di aggiornamento della UI durante l'attesa
+            while response_thread.isRunning():
+                QApplication.processEvents()
+                time.sleep(0.1)  # Piccola pausa per non sovraccaricare la CPU
+
+                # Verifica se l'utente ha annullato la dialog
+                if progress_dialog.wasCanceled():
+                    response_thread.quit()
+                    response_thread.wait(1000)  # Attendi fino a 1 secondo
+                    progress_dialog.close()
+                    self.status_label.setText("Test annullato dall'utente")
+                    return
+
+            # Il thread è terminato, assicurati che la dialog sia chiusa
+            if progress_dialog.isVisible():
+                progress_dialog.close()
+
+        except Exception as e:
+            if progress_dialog.isVisible():
+                progress_dialog.close()
+
+            logger.error(f"Errore nell'esecuzione del test: {e}")
+            self.status_label.setText(f"Errore: {str(e)}")
+            QMessageBox.critical(
+                self,
+                "Errore",
+                f"Si è verificato un errore durante il test:\n{str(e)}\n\n"
+                "Verifica la connessione di rete e che il server sia in esecuzione."
+            )
+
+    def _handle_capability_response(self, response, progress_dialog):
+        """Gestisce la risposta al test delle capacità."""
+        # Chiudi la dialog se è ancora aperta
+        if progress_dialog.isVisible():
+            progress_dialog.setValue(100)
+            progress_dialog.close()
+
+        # Verifica lo stato della risposta
+        capability_available = response.get("scan_capability", False)
+        capability_details = response.get("scan_capability_details", {})
+
+        # Salva il risultato del test per uso futuro
+        self._scan_capabilities_verified = capability_available
+
+        # Costruisci un messaggio dettagliato
+        if capability_available:
+            msg = "Il sistema dispone delle capacità di scansione 3D!\n\nDettagli:\n"
+
+            for key, value in capability_details.items():
+                msg += f"- {key}: {value}\n"
+
+            self.status_label.setText("Capacità di scansione 3D disponibili")
+            QMessageBox.information(
+                self,
+                "Test Completato",
+                msg
+            )
+
+            # Abilita il pulsante di avvio scansione
+            self.start_scan_button.setEnabled(True)
+            self.test_scan_button.setEnabled(True)
+        else:
+            error_msg = "Il sistema NON dispone delle capacità di scansione 3D.\n\nDettagli:\n"
+
+            for key, value in capability_details.items():
+                error_msg += f"- {key}: {value}\n"
+
+            # Aggiungi consigli per la risoluzione
+            error_msg += "\nSuggerimenti per la risoluzione:\n"
+            error_msg += "1. Verifica che il proiettore DLP sia collegato e acceso\n"
+            error_msg += "2. Controlla che l'I2C sia abilitato sul Raspberry Pi (sudo raspi-config)\n"
+            error_msg += "3. Verifica che l'indirizzo I2C e il bus siano corretti\n"
+            error_msg += "4. Riavvia il server UnLook per reinizializzare i componenti"
+
+            self.status_label.setText("Capacità di scansione 3D NON disponibili")
+            QMessageBox.warning(
+                self,
+                "Test Fallito",
+                error_msg
+            )
+
+    def _handle_capability_timeout(self, progress_dialog):
+        """Gestisce il timeout nella risposta al test delle capacità."""
+        # Chiudi la dialog se è ancora aperta
+        if progress_dialog.isVisible():
+            progress_dialog.close()
+
+        self.status_label.setText("Verifica dello stato del proiettore DLP...")
+
+        # Prova a verificare se il server è ancora connesso
+        ping_success = self.scanner_controller.send_command(
+            self.selected_scanner.device_id,
+            "PING",
+            {"timestamp": time.time()}
+        )
+
+        if ping_success:
+            # Il server è raggiungibile, ma potrebbe esserci un problema col proiettore
+            QMessageBox.warning(
+                self,
+                "Avviso",
+                "Il server è attivo ma non ha risposto alla verifica delle capacità 3D.\n\n"
+                "Potrebbe esserci un problema con il proiettore DLP. Verifica:\n"
+                "1. Che il proiettore sia collegato correttamente e acceso\n"
+                "2. Che l'I2C sia abilitato sul Raspberry Pi\n"
+                "3. Che l'indirizzo I2C sia configurato correttamente"
+            )
+        else:
+            self.status_label.setText("Server non raggiungibile")
+            QMessageBox.critical(
+                self,
+                "Errore",
+                "Il server non ha risposto ai tentativi di verifica."
+            )
 
     def _update_test_progress(self, progress, message):
         """Aggiorna il progresso del test delle capacità di scansione."""
@@ -1041,7 +1215,7 @@ class ScanView(QWidget):
         self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Tempo di esposizione: {scan_config['exposure_time']} sec\n"
         self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Qualità: {scan_config['quality']}\n"
 
-        # CORREZIONE: Controlliamo se il test di capacità è già stato eseguito con successo
+        # Controlliamo se il test di capacità è già stato eseguito con successo
         has_capabilities = hasattr(self, '_scan_capabilities_verified') and self._scan_capabilities_verified
 
         if not has_capabilities:
@@ -1060,66 +1234,85 @@ class ScanView(QWidget):
             progress_dialog.setValue(20)
             QApplication.processEvents()
 
-            try:
-                check_success = self.scanner_controller.send_command(
-                    self.selected_scanner.device_id,
-                    "CHECK_SCAN_CAPABILITY"
-                )
+            # Usa thread separato per la verifica
+            class CapabilityCheckThread(QThread):
+                response_received = Signal(dict)
+                timeout_occurred = Signal()
+                command_failed = Signal()
 
-                if not check_success:
-                    progress_dialog.close()
-                    self._handle_scan_error("Impossibile verificare le capacità di scansione")
-                    return
+                def __init__(self, scanner_controller, device_id):
+                    super().__init__()
+                    self.scanner_controller = scanner_controller
+                    self.device_id = device_id
 
-                # Attendi la risposta della verifica con timeout aumentato (30s)
-                progress_dialog.setValue(40)
-                progress_dialog.setLabelText("Attendere risposta dal server...")
-                QApplication.processEvents()
+                def run(self):
+                    try:
+                        command_success = self.scanner_controller.send_command(
+                            self.device_id,
+                            "CHECK_SCAN_CAPABILITY"
+                        )
 
-                capability_response = self.scanner_controller.wait_for_response(
-                    self.selected_scanner.device_id,
-                    "CHECK_SCAN_CAPABILITY",
-                    timeout=30.0
-                )
+                        if not command_success:
+                            self.command_failed.emit()
+                            return
 
-                progress_dialog.setValue(60)
-                QApplication.processEvents()
+                        # Attendi la risposta con timeout di 30s
+                        response = self.scanner_controller.wait_for_response(
+                            self.device_id,
+                            "CHECK_SCAN_CAPABILITY",
+                            timeout=30.0
+                        )
 
-                if not capability_response or not capability_response.get("scan_capability", False):
-                    progress_dialog.close()
-                    error_details = "Unknown error"
-                    if capability_response and "scan_capability_details" in capability_response:
-                        if isinstance(capability_response["scan_capability_details"], dict):
-                            error_details = json.dumps(capability_response["scan_capability_details"], indent=2)
+                        if response:
+                            self.response_received.emit(response)
                         else:
-                            error_details = str(capability_response["scan_capability_details"])
+                            self.timeout_occurred.emit()
+                    except:
+                        self.command_failed.emit()
 
-                    error_msg = f"Lo scanner non supporta la scansione 3D: {error_details}\n\n"
-                    error_msg += "Verifica che:\n"
-                    error_msg += "1. Il proiettore DLP sia collegato e acceso\n"
-                    error_msg += "2. L'I2C sia abilitato sul Raspberry Pi\n"
-                    error_msg += "3. L'indirizzo I2C sia configurato correttamente\n"
-                    error_msg += "4. Il server sia stato avviato con i permessi appropriati"
+            # Crea e connetti thread
+            check_thread = CapabilityCheckThread(self.scanner_controller, self.selected_scanner.device_id)
 
-                    self._handle_scan_error(error_msg)
+            check_thread.response_received.connect(
+                lambda response: self._handle_capability_check_response(response, progress_dialog)
+            )
+
+            check_thread.timeout_occurred.connect(
+                lambda: self._handle_capability_check_timeout(progress_dialog)
+            )
+
+            check_thread.command_failed.connect(
+                lambda: self._handle_capability_check_failed(progress_dialog)
+            )
+
+            # Avvia il thread
+            check_thread.start()
+
+            # Loop di aggiornamento UI
+            while check_thread.isRunning():
+                QApplication.processEvents()
+                time.sleep(0.1)
+
+                # Verifica se l'utente ha annullato
+                if progress_dialog.wasCanceled():
+                    check_thread.quit()
+                    check_thread.wait(1000)
+                    progress_dialog.close()
+                    self._reset_ui_after_scan()
+                    self.status_label.setText("Operazione annullata")
                     return
 
-                # CORREZIONE: Segna che il test di capacità è stato completato con successo
-                self._scan_capabilities_verified = True
+            # Se arriviamo qui, il thread è terminato
+            # Verifica se abbiamo ottenuto la capacità
+            if not hasattr(self, '_scan_capabilities_verified') or not self._scan_capabilities_verified:
+                self._reset_ui_after_scan()
+                return
 
+            # Se il dialog è ancora aperto, continua l'avvio
+            if progress_dialog.isVisible():
                 progress_dialog.setValue(80)
                 progress_dialog.setLabelText("Avvio scansione...")
                 QApplication.processEvents()
-
-            except Exception as e:
-                if progress_dialog.isVisible():
-                    progress_dialog.close()
-                logger.error(f"Errore durante la verifica delle capacità: {str(e)}")
-                self._handle_scan_error(f"Errore nella verifica delle capacità: {str(e)}")
-                return
-
-            # Chiudi il dialog
-            progress_dialog.close()
         else:
             logger.info("Test di capacità già verificato, avvio diretto della scansione")
             self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Capacità di scansione già verificate, avvio diretto\n"
@@ -1128,7 +1321,7 @@ class ScanView(QWidget):
         try:
             logger.info(f"Avvio scansione: {self.current_scan_id}")
 
-            # CORREZIONE: Invia un ping prima del comando per verificare la connessione
+            # Invia un ping prima del comando per verificare la connessione
             ping_success = self.scanner_controller.send_command(
                 self.selected_scanner.device_id,
                 "PING",
@@ -1139,7 +1332,7 @@ class ScanView(QWidget):
                 logger.warning("Il server non risponde al ping")
                 self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Attenzione: il server non risponde al ping\n"
 
-            # Invia il comando di avvio scansione con un breve timeout
+            # Invia il comando di avvio scansione
             command_success = self.scanner_controller.send_command(
                 self.selected_scanner.device_id,
                 "START_SCAN",
@@ -1163,12 +1356,100 @@ class ScanView(QWidget):
             # Emetti il segnale di scansione avviata
             self.scan_started.emit(scan_config)
 
+            # Chiudi il dialog se ancora aperto
+            if 'progress_dialog' in locals() and progress_dialog.isVisible():
+                progress_dialog.close()
+
         except Exception as e:
             logger.error(f"Errore nell'avvio della scansione: {e}")
             self._handle_scan_error(str(e))
 
+            # Chiudi il dialog se ancora aperto
+            if 'progress_dialog' in locals() and progress_dialog.isVisible():
+                progress_dialog.close()
+
+    def _handle_capability_check_response(self, response, progress_dialog):
+        """Gestisce la risposta alla verifica delle capacità durante l'avvio della scansione."""
+        # Aggiorna il dialog
+        progress_dialog.setValue(60)
+        QApplication.processEvents()
+
+        # Verifica il risultato
+        capability_available = response.get("scan_capability", False)
+        capability_details = response.get("scan_capability_details", {})
+
+        if not capability_available:
+            progress_dialog.close()
+
+            error_details = "Unknown error"
+            if capability_details:
+                if isinstance(capability_details, dict):
+                    error_details = json.dumps(capability_details, indent=2)
+                else:
+                    error_details = str(capability_details)
+
+            error_msg = f"Lo scanner non supporta la scansione 3D: {error_details}\n\n"
+            error_msg += "Verifica che:\n"
+            error_msg += "1. Il proiettore DLP sia collegato e acceso\n"
+            error_msg += "2. L'I2C sia abilitato sul Raspberry Pi\n"
+            error_msg += "3. L'indirizzo I2C sia configurato correttamente\n"
+            error_msg += "4. Il server sia stato avviato con i permessi appropriati"
+
+            self._handle_scan_error(error_msg)
+            return
+
+        # Segna che il test delle capacità è stato completato con successo
+        self._scan_capabilities_verified = True
+
+        # Continua il dialog - non lo chiudiamo qui perché il metodo chiamante proseguirà con l'avvio scansione
+
+    def _handle_capability_check_timeout(self, progress_dialog):
+        """Gestisce il timeout nella verifica delle capacità durante l'avvio della scansione."""
+        progress_dialog.close()
+        self.status_label.setText("Server non ha risposto alla verifica delle capacità")
+
+        # Prova a verificare se il server è ancora connesso
+        ping_success = self.scanner_controller.send_command(
+            self.selected_scanner.device_id,
+            "PING",
+            {"timestamp": time.time()}
+        )
+
+        if ping_success:
+            # Il server è raggiungibile, ma potrebbe esserci un problema col proiettore
+            QMessageBox.warning(
+                self,
+                "Avviso",
+                "Il server è attivo ma non ha risposto alla verifica delle capacità 3D.\n\n"
+                "Potrebbe esserci un problema con il proiettore DLP. Verifica:\n"
+                "1. Che il proiettore sia collegato correttamente e acceso\n"
+                "2. Che l'I2C sia abilitato sul Raspberry Pi\n"
+                "3. Che l'indirizzo I2C sia configurato correttamente"
+            )
+        else:
+            QMessageBox.critical(
+                self,
+                "Errore",
+                "Il server non ha risposto ai tentativi di verifica."
+            )
+
+        self._reset_ui_after_scan()
+
+    def _handle_capability_check_failed(self, progress_dialog):
+        """Gestisce l'errore nell'invio del comando per la verifica delle capacità."""
+        progress_dialog.close()
+        self.status_label.setText("Errore nell'invio del comando di verifica")
+
+        QMessageBox.critical(
+            self,
+            "Errore",
+            "Impossibile inviare il comando di verifica capacità al server."
+        )
+
+        self._reset_ui_after_scan()
+
     def _start_status_polling_timer(self):
-        """Avvia un timer per il polling dello stato della scansione."""
+        """Avvia un timer per il polling dello stato della scansione con migliore gestione degli errori."""
         # Se esiste già un timer di polling, fermalo
         if hasattr(self, '_polling_timer') and self._polling_timer:
             try:
@@ -1178,15 +1459,18 @@ class ScanView(QWidget):
                 logger.debug(f"Errore nella pulizia del timer precedente: {e}")
 
         # Crea un nuovo timer
-        self._polling_timer = QTimer(self)  # CORREZIONE: Imposta il parent
+        self._polling_timer = QTimer(self)
         self._polling_timer.timeout.connect(self._poll_scan_status)
-        # Polling più frequente all'inizio (ogni 3 secondi)
-        self._polling_timer.start(3000)  # CORREZIONE: Aumentato da 2000 a 3000ms
+        # Polling frequente all'inizio (ogni 1 secondo)
+        self._polling_timer.start(1000)
 
         # Contatore per tenere traccia dei tentativi di polling
         self._polling_attempts = 0
 
-        # CORREZIONE: Imposta un timeout di sicurezza per la scansione (5 minuti)
+        # Contatore per errori consecutivi
+        self._polling_errors = 0
+
+        # Imposta un timeout di sicurezza per la scansione (5 minuti)
         self._scan_safety_timeout = QTimer(self)
         self._scan_safety_timeout.setSingleShot(True)
         self._scan_safety_timeout.timeout.connect(self._scan_safety_timeout_handler)
@@ -1217,7 +1501,7 @@ class ScanView(QWidget):
                 self._scan_safety_timeout.start(300000)
 
     def _poll_scan_status(self):
-        """Esegue il polling dello stato della scansione."""
+        """Esegue il polling dello stato della scansione in modo più robusto."""
         if not self.is_scanning or not self.selected_scanner:
             # Se la scansione è stata fermata o lo scanner non è più disponibile, ferma il polling
             if hasattr(self, '_polling_timer') and self._polling_timer:
@@ -1225,23 +1509,28 @@ class ScanView(QWidget):
             return
 
         self._polling_attempts += 1
-        logger.info(f"Polling dello stato scansione (tentativo {self._polling_attempts})")
+        logger.debug(f"Polling dello stato scansione (tentativo {self._polling_attempts})")
 
-        # CORREZIONE: Migliore gestione del backoff per il polling
-        if self._polling_attempts > 5 and self._polling_attempts <= 15:
-            # Dopo 5 tentativi, rallenta a 5 secondi
+        # Gestione del backoff per ridurre la frequenza di polling nel tempo
+        if self._polling_attempts > 10 and self._polling_attempts <= 30:
+            # Dopo 10 tentativi, rallenta a 2 secondi
+            if self._polling_timer.interval() != 2000:
+                self._polling_timer.setInterval(2000)
+                logger.info("Polling rallentato a 2 secondi")
+        elif self._polling_attempts > 30 and self._polling_attempts <= 60:
+            # Dopo 30 tentativi, rallenta a 5 secondi
             if self._polling_timer.interval() != 5000:
                 self._polling_timer.setInterval(5000)
                 logger.info("Polling rallentato a 5 secondi")
-        elif self._polling_attempts > 15:
-            # Dopo 15 tentativi, rallenta a 10 secondi
+        elif self._polling_attempts > 60:
+            # Dopo 60 tentativi, rallenta a 10 secondi
             if self._polling_timer.interval() != 10000:
                 self._polling_timer.setInterval(10000)
                 logger.info("Polling rallentato a 10 secondi")
 
         try:
-            # CORREZIONE: Prima invia un ping per verificare che il server sia ancora reattivo
-            if self._polling_attempts % 3 == 0:  # Ogni 3 tentativi
+            # Prima invia un ping per verificare che il server sia ancora reattivo
+            if self._polling_attempts % 5 == 0:  # Ogni 5 tentativi
                 ping_success = self.scanner_controller.send_command(
                     self.selected_scanner.device_id,
                     "PING",
@@ -1250,14 +1539,14 @@ class ScanView(QWidget):
 
                 if not ping_success:
                     logger.warning("Server non risponde al ping durante il polling")
-                    self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Server non risponde al ping\n"
+                    self._polling_errors += 1
 
-                    # Se il polling sta andando avanti da molto e il server non risponde, chiedere conferma
-                    if self._polling_attempts > 10:
+                    if self._polling_errors >= 3:
+                        # Solo dopo 3 errori consecutivi mostriamo un dialogo
                         reply = QMessageBox.question(
                             self,
                             "Server non risponde",
-                            "Il server non risponde. Vuoi continuare la scansione?",
+                            "Il server non risponde ai ping. Vuoi continuare la scansione?",
                             QMessageBox.Yes | QMessageBox.No,
                             QMessageBox.No
                         )
@@ -1265,6 +1554,15 @@ class ScanView(QWidget):
                         if reply == QMessageBox.No:
                             self._handle_scan_error("Server non risponde durante la scansione")
                             return
+                        else:
+                            # Reset del contatore di errori se l'utente vuole continuare
+                            self._polling_errors = 0
+
+                    # Non continuiamo con il polling in questo ciclo
+                    return
+                else:
+                    # Reset del contatore di errori se il ping ha successo
+                    self._polling_errors = 0
 
             # Invia il comando di stato scansione
             command_success = self.scanner_controller.send_command(
@@ -1274,13 +1572,9 @@ class ScanView(QWidget):
 
             if not command_success:
                 logger.warning("Impossibile inviare il comando GET_SCAN_STATUS")
-                # CORREZIONE: Incrementa un contatore di errori
-                if not hasattr(self, '_status_errors'):
-                    self._status_errors = 0
-                self._status_errors += 1
+                self._polling_errors += 1
 
-                # Se ci sono troppi errori consecutivi, chiedi all'utente
-                if self._status_errors >= 3:
+                if self._polling_errors >= 3:
                     reply = QMessageBox.question(
                         self,
                         "Problemi di comunicazione",
@@ -1294,27 +1588,67 @@ class ScanView(QWidget):
                         self._handle_scan_error("Troppi errori di comunicazione")
                         return
                     else:
-                        # Reset del contatore
-                        self._status_errors = 0
+                        # Reset del contatore di errori
+                        self._polling_errors = 0
 
-                # Non interrompiamo la scansione, continuiamo a provare
+                # Non continuiamo con il polling in questo ciclo
                 return
             else:
-                # CORREZIONE: Reset del contatore di errori se il comando ha successo
-                if hasattr(self, '_status_errors'):
-                    self._status_errors = 0
+                # Reset del contatore di errori
+                self._polling_errors = 0
 
-            # Attendi la risposta con un timeout più breve
-            response = self.scanner_controller.wait_for_response(
+            # Thread per attendere la risposta senza bloccare l'UI
+            class StatusResponseThread(QThread):
+                response_received = Signal(dict)
+                timeout_occurred = Signal()
+
+                def __init__(self, scanner_controller, device_id, command_type, timeout):
+                    super().__init__()
+                    self.scanner_controller = scanner_controller
+                    self.device_id = device_id
+                    self.command_type = command_type
+                    self.timeout = timeout
+
+                def run(self):
+                    # Usa un timeout breve per non bloccare l'UI
+                    response = self.scanner_controller.wait_for_response(
+                        self.device_id,
+                        self.command_type,
+                        timeout=self.timeout
+                    )
+
+                    if response:
+                        self.response_received.emit(response)
+                    else:
+                        self.timeout_occurred.emit()
+
+            # Crea e avvia il thread
+            response_thread = StatusResponseThread(
+                self.scanner_controller,
                 self.selected_scanner.device_id,
                 "GET_SCAN_STATUS",
-                timeout=5.0  # timeout breve per non bloccare l'UI
+                timeout=1.0  # Timeout molto breve (1s)
             )
 
-            if not response:
-                logger.warning("Nessuna risposta al comando GET_SCAN_STATUS")
-                return
+            # Connetti i segnali
+            response_thread.response_received.connect(self._handle_status_response)
+            response_thread.timeout_occurred.connect(self._handle_status_timeout)
 
+            # Avvia il thread
+            response_thread.start()
+
+            # Non blocchiamo l'esecuzione, continua con il ciclo di eventi Qt
+
+        except Exception as e:
+            logger.error(f"Errore nel polling dello stato: {str(e)}")
+            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nel polling: {str(e)}\n"
+
+            # Incrementa il contatore di errori
+            self._polling_errors += 1
+
+    def _handle_status_response(self, response):
+        """Gestisce la risposta allo stato della scansione."""
+        try:
             # Estrai lo stato della scansione
             scan_status = response.get("scan_status", {})
             state = scan_status.get("state", "UNKNOWN")
@@ -1325,33 +1659,64 @@ class ScanView(QWidget):
             self.status_label.setText(f"Stato: {state}")
             self.progress_bar.setValue(int(progress))
 
-            # Aggiungi al log
-            if self._polling_attempts % 3 == 0 or state != "SCANNING":  # Logga ogni 3 polling o se lo stato è cambiato
+            # Aggiungi al log ogni 5 polling o quando lo stato cambia
+            if self._polling_attempts % 5 == 0 or state != "SCANNING":
                 log_entry = f"[{datetime.now().strftime('%H:%M:%S')}] Stato: {state}, Progresso: {progress:.1f}%"
                 if error_message:
                     log_entry += f", Errore: {error_message}"
                 self.scan_log += log_entry + "\n"
 
-            # Aggiorna le anteprime delle immagini se possibile
-            if state == "SCANNING" and self._polling_attempts % 3 == 0:  # Aggiorna ogni 3 polling
+            # Aggiorna le anteprime delle immagini ogni 3 polling
+            if state == "SCANNING" and self._polling_attempts % 3 == 0:
                 self._update_preview_image()
 
             # Controlla se la scansione è completata o in errore
             if state == "COMPLETED":
                 self._handle_scan_completed()
-                self._polling_timer.stop()
+                if hasattr(self, '_polling_timer') and self._polling_timer:
+                    self._polling_timer.stop()
             elif state == "ERROR":
                 self._handle_scan_error(error_message)
-                self._polling_timer.stop()
-            elif state == "IDLE" and self._polling_attempts > 5:
+                if hasattr(self, '_polling_timer') and self._polling_timer:
+                    self._polling_timer.stop()
+            elif state == "IDLE" and self._polling_attempts > 10:
                 # Se dopo diversi tentativi lo stato è ancora IDLE, potrebbe esserci un problema
                 self._handle_scan_error("Lo scanner non ha avviato la scansione")
-                self._polling_timer.stop()
+                if hasattr(self, '_polling_timer') and self._polling_timer:
+                    self._polling_timer.stop()
+
+            # Reset del contatore di errori se abbiamo ricevuto una risposta valida
+            self._polling_errors = 0
 
         except Exception as e:
-            logger.error(f"Errore nel polling dello stato: {str(e)}")
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nel polling: {str(e)}\n"
+            logger.error(f"Errore nell'elaborazione della risposta di stato: {e}")
+            self._polling_errors += 1
 
+    def _handle_status_timeout(self):
+        """Gestisce il timeout nella risposta allo stato della scansione."""
+        logger.warning("Timeout nella richiesta dello stato della scansione")
+
+        # Incrementa il contatore di errori
+        self._polling_errors += 1
+
+        # Se ci sono troppi errori consecutivi, chiedi all'utente
+        if self._polling_errors >= 5:
+            reply = QMessageBox.question(
+                self,
+                "Problemi di comunicazione",
+                "Il server non risponde alle richieste di stato.\n"
+                "Vuoi continuare la scansione?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+
+            if reply == QMessageBox.No:
+                self._handle_scan_error("Troppi timeout consecutivi")
+                if hasattr(self, '_polling_timer') and self._polling_timer:
+                    self._polling_timer.stop()
+            else:
+                # Reset del contatore di errori
+                self._polling_errors = 0
     def _stop_scan(self):
         """Interrompe la scansione in corso."""
         if not self.is_scanning or not self.selected_scanner:
@@ -1496,11 +1861,42 @@ class ScanView(QWidget):
         self.scan_name_edit.setEnabled(True)
 
     def _update_preview_image(self, scan_dir=None):
-        """Aggiorna l'anteprima delle immagini durante la scansione."""
+        """
+        Aggiorna l'anteprima delle immagini durante la scansione in modo più efficiente.
+        Migliora la visualizzazione in tempo reale delle immagini catturate.
+
+        Args:
+            scan_dir: Directory della scansione (opzionale, usa la corrente se None)
+        """
         if scan_dir is None and self.current_scan_id:
             scan_dir = os.path.join(str(self.output_dir), self.current_scan_id)
 
         if not scan_dir or not os.path.isdir(scan_dir):
+            # Prova a trovare immagini direttamente sullo scanner
+            try:
+                if self.selected_scanner and self.scanner_controller:
+                    # Invia un comando per ottenere l'anteprima dell'ultima immagine
+                    preview_success = self.scanner_controller.send_command(
+                        self.selected_scanner.device_id,
+                        "GET_SCAN_PREVIEW",
+                        {"scan_id": self.current_scan_id if self.current_scan_id else "current"}
+                    )
+
+                    if preview_success:
+                        # Attendi la risposta con un timeout breve
+                        preview_response = self.scanner_controller.wait_for_response(
+                            self.selected_scanner.device_id,
+                            "GET_SCAN_PREVIEW",
+                            timeout=1.0
+                        )
+
+                        if preview_response and preview_response.get("status") == "ok":
+                            # Elabora le immagini di anteprima ricevute
+                            self._process_preview_images(preview_response)
+                            return
+            except Exception as e:
+                logger.debug(f"Errore nel tentativo di ottenere anteprime dallo scanner: {e}")
+
             return
 
         # Cerca le immagini più recenti
@@ -1548,50 +1944,174 @@ class ScanView(QWidget):
                     # Aggiungi il widget all'interfaccia
                     self.results_content_layout.insertWidget(0, self.preview_widget)
 
-                # Carica e mostra l'immagine sinistra
+                # Carica e mostra l'immagine sinistra con elaborazione efficiente
                 left_img = cv2.imread(left_image)
                 if left_img is not None:
-                    # Ridimensiona per la visualizzazione
-                    scale = min(320 / left_img.shape[1], 240 / left_img.shape[0])
-                    width = int(left_img.shape[1] * scale)
-                    height = int(left_img.shape[0] * scale)
-                    left_img_resized = cv2.resize(left_img, (width, height))
+                    try:
+                        # Ridimensiona per la visualizzazione
+                        scale = min(320 / left_img.shape[1], 240 / left_img.shape[0])
+                        width = int(left_img.shape[1] * scale)
+                        height = int(left_img.shape[0] * scale)
+                        left_img_resized = cv2.resize(left_img, (width, height), interpolation=cv2.INTER_AREA)
 
-                    # Converti in formato Qt
-                    left_img_rgb = cv2.cvtColor(left_img_resized, cv2.COLOR_BGR2RGB)
-                    h, w, c = left_img_rgb.shape
-                    left_qimg = QImage(left_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
-                    left_pixmap = QPixmap.fromImage(left_qimg)
+                        # Converti in formato Qt
+                        left_img_rgb = cv2.cvtColor(left_img_resized, cv2.COLOR_BGR2RGB)
+                        h, w, c = left_img_rgb.shape
+                        left_qimg = QImage(left_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
+                        left_pixmap = QPixmap.fromImage(left_qimg)
 
-                    # Mostra l'immagine
-                    self.left_preview.setPixmap(left_pixmap)
-                    self.left_preview.setText("")
+                        # Mostra l'immagine
+                        self.left_preview.setPixmap(left_pixmap)
+                        self.left_preview.setText("")
+                    except Exception as e:
+                        logger.debug(f"Errore elaborazione immagine sinistra: {e}")
 
                 # Carica e mostra l'immagine destra
                 right_img = cv2.imread(right_image)
                 if right_img is not None:
-                    # Ridimensiona per la visualizzazione
-                    scale = min(320 / right_img.shape[1], 240 / right_img.shape[0])
-                    width = int(right_img.shape[1] * scale)
-                    height = int(right_img.shape[0] * scale)
-                    right_img_resized = cv2.resize(right_img, (width, height))
+                    try:
+                        # Ridimensiona per la visualizzazione
+                        scale = min(320 / right_img.shape[1], 240 / right_img.shape[0])
+                        width = int(right_img.shape[1] * scale)
+                        height = int(right_img.shape[0] * scale)
+                        right_img_resized = cv2.resize(right_img, (width, height), interpolation=cv2.INTER_AREA)
 
-                    # Converti in formato Qt
-                    right_img_rgb = cv2.cvtColor(right_img_resized, cv2.COLOR_BGR2RGB)
-                    h, w, c = right_img_rgb.shape
-                    right_qimg = QImage(right_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
-                    right_pixmap = QPixmap.fromImage(right_qimg)
+                        # Converti in formato Qt
+                        right_img_rgb = cv2.cvtColor(right_img_resized, cv2.COLOR_BGR2RGB)
+                        h, w, c = right_img_rgb.shape
+                        right_qimg = QImage(right_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
+                        right_pixmap = QPixmap.fromImage(right_qimg)
 
-                    # Mostra l'immagine
-                    self.right_preview.setPixmap(right_pixmap)
-                    self.right_preview.setText("")
+                        # Mostra l'immagine
+                        self.right_preview.setPixmap(right_pixmap)
+                        self.right_preview.setText("")
+                    except Exception as e:
+                        logger.debug(f"Errore elaborazione immagine destra: {e}")
 
                 # Mostra il widget di anteprima
                 self.preview_widget.setVisible(True)
 
+                # Aggiorna la schermata
+                QApplication.processEvents()
+
         except Exception as e:
             logger.error(f"Errore nell'aggiornamento delle anteprime: {e}")
 
+    def _process_preview_images(self, preview_response):
+        """
+        Elabora le immagini di anteprima ricevute dal server.
+
+        Args:
+            preview_response: Risposta del server con le immagini di anteprima
+        """
+        try:
+            # Estrai le immagini di anteprima
+            preview_data = preview_response.get("preview_data", {})
+            left_data = preview_data.get("left")
+            right_data = preview_data.get("right")
+
+            if not left_data or not right_data:
+                return
+
+            # Il server potrebbe inviare i dati in formato base64
+            import base64
+            import numpy as np
+
+            # Crea o aggiorna il widget per l'anteprima
+            if not hasattr(self, 'preview_widget') or not self.preview_widget:
+                # Crea un nuovo widget
+                self.preview_widget = QWidget()
+                preview_layout = QHBoxLayout(self.preview_widget)
+
+                self.left_preview = QLabel("Camera sinistra")
+                self.left_preview.setAlignment(Qt.AlignCenter)
+                self.left_preview.setMinimumSize(320, 240)
+
+                self.right_preview = QLabel("Camera destra")
+                self.right_preview.setAlignment(Qt.AlignCenter)
+                self.right_preview.setMinimumSize(320, 240)
+
+                preview_layout.addWidget(self.left_preview)
+                preview_layout.addWidget(self.right_preview)
+
+                # Aggiungi il widget all'interfaccia
+                self.results_content_layout.insertWidget(0, self.preview_widget)
+
+            # Elabora l'immagine sinistra
+            if left_data and OPENCV_AVAILABLE:
+                try:
+                    # Decodifica l'immagine
+                    if isinstance(left_data, str):
+                        # Immagine in formato base64
+                        left_bytes = base64.b64decode(left_data)
+                        left_array = np.frombuffer(left_bytes, dtype=np.uint8)
+                        left_img = cv2.imdecode(left_array, cv2.IMREAD_COLOR)
+                    else:
+                        # Immagine in formato binario
+                        left_array = np.frombuffer(left_data, dtype=np.uint8)
+                        left_img = cv2.imdecode(left_array, cv2.IMREAD_COLOR)
+
+                    if left_img is not None:
+                        # Ridimensiona per la visualizzazione
+                        scale = min(320 / left_img.shape[1], 240 / left_img.shape[0])
+                        width = int(left_img.shape[1] * scale)
+                        height = int(left_img.shape[0] * scale)
+                        left_img_resized = cv2.resize(left_img, (width, height), interpolation=cv2.INTER_AREA)
+
+                        # Converti in formato Qt
+                        left_img_rgb = cv2.cvtColor(left_img_resized, cv2.COLOR_BGR2RGB)
+                        h, w, c = left_img_rgb.shape
+                        left_qimg = QImage(left_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
+                        left_pixmap = QPixmap.fromImage(left_qimg)
+
+                        # Mostra l'immagine
+                        self.left_preview.setPixmap(left_pixmap)
+                        self.left_preview.setText("")
+                except Exception as e:
+                    logger.debug(f"Errore elaborazione anteprima sinistra: {e}")
+
+            # Elabora l'immagine destra
+            if right_data and OPENCV_AVAILABLE:
+                try:
+                    # Decodifica l'immagine
+                    if isinstance(right_data, str):
+                        # Immagine in formato base64
+                        right_bytes = base64.b64decode(right_data)
+                        right_array = np.frombuffer(right_bytes, dtype=np.uint8)
+                        right_img = cv2.imdecode(right_array, cv2.IMREAD_COLOR)
+                    else:
+                        # Immagine in formato binario
+                        right_array = np.frombuffer(right_data, dtype=np.uint8)
+                        right_img = cv2.imdecode(right_array, cv2.IMREAD_COLOR)
+
+                    if right_img is not None:
+                        # Ridimensiona per la visualizzazione
+                        scale = min(320 / right_img.shape[1], 240 / right_img.shape[0])
+                        width = int(right_img.shape[1] * scale)
+                        height = int(right_img.shape[0] * scale)
+                        right_img_resized = cv2.resize(right_img, (width, height), interpolation=cv2.INTER_AREA)
+
+                        # Converti in formato Qt
+                        right_img_rgb = cv2.cvtColor(right_img_resized, cv2.COLOR_BGR2RGB)
+                        h, w, c = right_img_rgb.shape
+                        right_qimg = QImage(right_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
+                        right_pixmap = QPixmap.fromImage(right_qimg)
+
+                        # Mostra l'immagine
+                        self.right_preview.setPixmap(right_pixmap)
+                        self.right_preview.setText("")
+                except Exception as e:
+                    logger.debug(f"Errore elaborazione anteprima destra: {e}")
+
+            # Mostra il widget di anteprima
+            self.preview_widget.setVisible(True)
+
+            # Aggiorna la schermata
+            QApplication.processEvents()
+
+        except Exception as e:
+            logger.error(f"Errore nell'elaborazione delle anteprime: {e}")
+            
     def _process_scan(self):
         """Elabora i dati della scansione per generare la nuvola di punti 3D."""
         if not self.current_scan_id:

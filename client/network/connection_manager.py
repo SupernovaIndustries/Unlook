@@ -27,6 +27,7 @@ except ImportError:
 class ConnectionWorker(QThread):
     """
     Worker thread che gestisce una connessione ZMQ con uno scanner.
+    Versione migliorata con gestione errori più robusta e prevenzione race condition.
     """
     connection_ready = Signal(str)  # device_id
     connection_error = Signal(str, str)  # device_id, error_message
@@ -46,7 +47,7 @@ class ConnectionWorker(QThread):
         self._consecutive_errors = 0
 
     def run(self):
-        """Esegue il loop principale di connessione."""
+        """Esegue il loop principale di connessione con migliore gestione degli errori."""
         try:
             # Crea e configura il socket ZMQ
             self._context = zmq.Context()
@@ -55,9 +56,14 @@ class ConnectionWorker(QThread):
             # Connessione con timeout e opzioni migliorate
             endpoint = f"tcp://{self.host}:{self.port}"
             logger.info(f"Tentativo di connessione a {endpoint}")
-            self._socket.setsockopt(zmq.RCVTIMEO, 30000)  # 30 secondi timeout ricezione (era 5000)
-            self._socket.setsockopt(zmq.SNDTIMEO, 30000)  # 30 secondi timeout invio (era 5000)
+
+            # Configurazione socket con migliori opzioni per robustezza
+            self._socket.setsockopt(zmq.RCVTIMEO, 5000)  # 5 secondi timeout ricezione
+            self._socket.setsockopt(zmq.SNDTIMEO, 5000)  # 5 secondi timeout invio
             self._socket.setsockopt(zmq.LINGER, 1000)  # Attendi fino a 1 secondo alla chiusura
+            self._socket.setsockopt(zmq.RECONNECT_IVL, 500)  # Riconnetti ogni 500ms
+            self._socket.setsockopt(zmq.RECONNECT_IVL_MAX, 5000)  # Max intervallo riconnessione 5s
+
             self._socket.connect(endpoint)
 
             # Connessione riuscita
@@ -83,7 +89,7 @@ class ConnectionWorker(QThread):
             logger.error(f"Errore durante la connessione: {str(e)}")
             self.connection_error.emit(self.device_id, f"Errore: {str(e)}")
         finally:
-            # Chiudi il socket
+            # Chiudi il socket in modo sicuro
             self._cleanup()
             # Notifica la chiusura
             self.connection_closed.emit(self.device_id)
@@ -105,16 +111,13 @@ class ConnectionWorker(QThread):
             return True
 
     def _process_send_queue(self):
-        """Processa la coda dei messaggi da inviare."""
+        """Processa la coda dei messaggi da inviare con miglior gestione degli errori."""
         with QMutexLocker(self._mutex):
             if not self._send_queue:
                 return
 
             # Preleva un messaggio dalla coda (solo uno per volta con REQ/REP)
-            if self._send_queue:
-                data = self._send_queue.pop(0)
-            else:
-                return
+            data = self._send_queue.pop(0)
 
         # Invia il messaggio
         try:
@@ -136,10 +139,9 @@ class ConnectionWorker(QThread):
                     self.data_received.emit(self.device_id, reply_data)
                 except Exception as e:
                     logger.error(f"Errore nella decodifica della risposta: {e}")
-            except zmq.Again as e:
-                # Errore di timeout - normalmente significa che non c'è risposta
+            except zmq.ZMQError as e:
+                # Incrementa il contatore di errori consecutivi
                 self._consecutive_errors += 1
-                logger.warning(f"Timeout durante l'attesa della risposta: {e}")
 
                 # Se ci sono troppi errori consecutivi, segnala la disconnessione
                 if self._consecutive_errors >= 3:
@@ -147,17 +149,8 @@ class ConnectionWorker(QThread):
                     self._running = False
                     self.connection_closed.emit(self.device_id)
                     return
-            except zmq.ZMQError as e:
-                # Altri errori ZMQ
-                self._consecutive_errors += 1
-                logger.error(f"Errore ZMQ durante l'attesa di risposta: {e}")
 
-                # Se è un errore critico, segnala la disconnessione
-                if e.errno in [zmq.ETERM, zmq.ENOTSOCK, zmq.ENOTSUP]:
-                    logger.error("Errore fatale nella connessione ZMQ")
-                    self._running = False
-                    self.connection_closed.emit(self.device_id)
-                    return
+                logger.error(f"Errore ZMQ durante l'attesa di risposta: {e}")
         except zmq.ZMQError as e:
             logger.error(f"Errore ZMQ durante l'invio: {e}")
 
@@ -166,58 +159,43 @@ class ConnectionWorker(QThread):
                 logger.error("Errore fatale nella connessione ZMQ")
                 self._running = False
                 self.connection_closed.emit(self.device_id)
-                return
         except Exception as e:
             logger.error(f"Errore durante l'invio: {str(e)}")
 
-    def _get_local_ip(self):
-        """Ottiene l'indirizzo IP locale della macchina client."""
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except:
-            return "127.0.0.1"
-
-    def _send_keep_alive(self):
-        """
-        Invia un messaggio PING periodico al server per mantenere viva la connessione.
-        """
-        if hasattr(self, '_streaming') and self._streaming and hasattr(self, '_scanner') and self._scanner and hasattr(
-                self, '_connection_manager') and self._connection_manager:
-            try:
-                # Aggiungi l'IP del client nel messaggio per aiutare il server a tracciare
-                self._connection_manager.send_message(
-                    self._scanner.device_id,
-                    "PING",
-                    {"timestamp": time.time(), "client_ip": self._get_local_ip()}
-                )
-                logger.debug("Messaggio keep-alive inviato")
-            except Exception as e:
-                logger.warning(f"Errore nell'invio del messaggio keep-alive: {e}")
-
     def stop(self):
-        """Ferma il worker e chiude la connessione."""
+        """Ferma il worker e chiude la connessione in modo sicuro."""
         self._running = False
+        # Attendiamo un breve momento per permettere al thread di completare
+        # eventuali operazioni in corso
+        if self.isRunning():
+            # Se il thread è ancora in esecuzione dopo 10ms, proviamo a interromperlo
+            if not self.wait(10):
+                logger.warning("Thread di connessione non si ferma, forzando la chiusura")
         self._cleanup()
 
     def _cleanup(self):
-        """Pulisce le risorse del worker."""
-        if self._socket:
-            try:
-                self._socket.close()
-            except:
-                pass
-            self._socket = None
+        """Pulisce le risorse del worker in modo sicuro."""
+        try:
+            if self._socket:
+                try:
+                    # Chiusura sicura: prima impostiamo LINGER a 0
+                    self._socket.setsockopt(zmq.LINGER, 0)
+                    self._socket.close()
+                except:
+                    pass
+                self._socket = None
 
-        if self._context:
-            try:
-                self._context.term()
-            except:
-                pass
-            self._context = None
+            if self._context:
+                try:
+                    # Termina il contesto in modo sicuro
+                    self._context.term()
+                except:
+                    pass
+                self._context = None
+
+            logger.debug(f"Risorse ZMQ rilasciate per worker {self.device_id}")
+        except Exception as e:
+            logger.error(f"Errore nel rilascio delle risorse ZMQ: {e}")
 
 
 class ConnectionManager(QObject):

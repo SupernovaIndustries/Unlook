@@ -115,143 +115,204 @@ class ScanProcessor:
         self._progress_callback = progress_callback
         self._completion_callback = completion_callback
 
-    def _download_scan_data(self):
-        """Scarica i dati della scansione dal server con migliore gestione degli errori."""
-        if not self.selected_scanner or not self.scanner_controller:
-            QMessageBox.warning(
-                self,
-                "Errore",
-                "Nessuno scanner selezionato per il download."
-            )
+    def download_scan_data(self, scanner, scan_id) -> bool:
+        """
+        Scarica i dati della scansione dal server.
+
+        Args:
+            scanner: Oggetto scanner da cui scaricare i dati
+            scan_id: ID della scansione da scaricare
+
+        Returns:
+            True se il download è riuscito, False altrimenti
+        """
+        if not scanner or not scan_id:
+            logger.error("Scanner o scan_id non validi")
             return False
 
-        if not self.current_scan_id:
-            QMessageBox.warning(
-                self,
-                "Errore",
-                "Nessuna scansione disponibile per il download."
-            )
-            return False
-
-        # Aggiorna l'interfaccia
-        self.status_label.setText("Download dati in corso...")
-        self.progress_bar.setValue(0)
-
-        # Aggiorna il log
-        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Inizio download dei dati della scansione\n"
-
-        # Scarica i dati
         try:
-            # Assicura che il processor sia disponibile
-            if not hasattr(self, 'scan_processor') or not self.scan_processor:
-                self.scan_processor = ScanProcessor(str(self.output_dir))
+            # Crea la directory per la scansione se non esiste
+            scan_dir = self.output_dir / scan_id
+            scan_dir.mkdir(parents=True, exist_ok=True)
+            left_dir = scan_dir / "left"
+            right_dir = scan_dir / "right"
+            left_dir.mkdir(exist_ok=True)
+            right_dir.mkdir(exist_ok=True)
 
-            # Configura una callback per il progresso
-            def download_progress(progress, message):
-                self.progress_bar.setValue(int(progress))
-                self.status_label.setText(message)
+            # Importa il connection manager
+            from client.network.connection_manager import ConnectionManager
+            connection_manager = ConnectionManager()
 
-                # Aggiorna il log occasionalmente
-                if int(progress) % 10 == 0:
-                    self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Download: {int(progress)}%, {message}\n"
+            # Richiedi l'elenco dei file
+            logger.info(f"Richiesta elenco file per scansione {scan_id}")
+            if self._progress_callback:
+                self._progress_callback(10, "Richiesta elenco file...")
 
-            self.scan_processor.set_callbacks(download_progress, None)
-
-            # Prima chiediamo l'elenco dei file della scansione
-            command_success = self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "GET_SCAN_FILES",
-                {"scan_id": self.current_scan_id}
-            )
-
-            if not command_success:
-                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nella richiesta dell'elenco dei file\n"
-                self.status_label.setText("Errore nella richiesta dell'elenco dei file")
-                QMessageBox.critical(
-                    self,
-                    "Errore",
-                    "Impossibile richiedere l'elenco dei file della scansione."
-                )
+            # Invia il comando per ottenere l'elenco dei file
+            if not connection_manager.send_message(
+                    scanner.device_id,
+                    "GET_SCAN_FILES",
+                    {"scan_id": scan_id}
+            ):
+                logger.error("Impossibile inviare il comando GET_SCAN_FILES")
                 return False
 
-            # Attendi la risposta con timeout aumentato (60 secondi)
-            files_response = self.scanner_controller.wait_for_response(
-                self.selected_scanner.device_id,
-                "GET_SCAN_FILES",
-                timeout=60.0
-            )
+            # Attendi la risposta con un timeout di 30 secondi
+            files_response = None
+            start_time = time.time()
+
+            while time.time() - start_time < 30.0:
+                # Permetti all'interfaccia di processare eventi
+                if 'QApplication' in globals():
+                    QApplication.processEvents()
+
+                if connection_manager.has_response(scanner.device_id, "GET_SCAN_FILES"):
+                    files_response = connection_manager.get_response(scanner.device_id, "GET_SCAN_FILES")
+                    break
+                time.sleep(0.1)
 
             if not files_response or files_response.get("status") != "ok":
-                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nella risposta per l'elenco dei file\n"
-                self.status_label.setText("Errore nella risposta per l'elenco dei file")
-                QMessageBox.critical(
-                    self,
-                    "Errore",
-                    "Impossibile ottenere l'elenco dei file della scansione dal server."
-                )
+                logger.error("Nessuna risposta valida alla richiesta GET_SCAN_FILES")
+                if self._progress_callback:
+                    self._progress_callback(0, "Errore nella richiesta dell'elenco dei file")
                 return False
 
-            # Ottieni la lista dei file
+            # Estrai la lista dei file
             files = files_response.get("files", [])
             if not files:
-                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Nessun file disponibile per la scansione\n"
-                self.status_label.setText("Nessun file disponibile per la scansione")
-                QMessageBox.warning(
-                    self,
-                    "Avviso",
-                    "Nessun file disponibile per la scansione."
-                )
+                logger.error("Nessun file disponibile per la scansione")
+                if self._progress_callback:
+                    self._progress_callback(0, "Nessun file disponibile per la scansione")
                 return False
 
-            # Ora possiamo eseguire il download
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] {len(files)} file disponibili per il download\n"
+            logger.info(f"Trovati {len(files)} file da scaricare")
 
-            # Esegui il download
-            success = self.scan_processor.download_scan_data(
-                self.selected_scanner,
-                self.current_scan_id
-            )
+            # Inizializza contatore per il progresso
+            total_files = len(files)
+            downloaded_files = 0
 
-            if not success:
-                # Aggiorna il log
-                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nel download dei dati\n"
+            # Scarica ogni file
+            for i, file_info in enumerate(files):
+                if self._processing_cancelled.is_set():
+                    logger.info("Download annullato dall'utente")
+                    return False
 
-                # Aggiorna l'interfaccia
-                self.status_label.setText("Errore nel download dei dati")
+                remote_path = file_info.get("path")
+                # Crea il percorso locale in base al percorso remoto
+                rel_path = file_info.get("relative_path", os.path.basename(remote_path))
+                local_path = scan_dir / rel_path
 
-                # Mostra un messaggio di errore
-                QMessageBox.critical(
-                    self,
-                    "Errore",
-                    "Impossibile scaricare i dati della scansione dal server."
+                # Crea le directory intermedie se necessario
+                os.makedirs(os.path.dirname(str(local_path)), exist_ok=True)
+
+                # Aggiorna il progresso
+                progress = 10 + (i / total_files) * 80  # Da 10% a 90%
+                if self._progress_callback:
+                    self._progress_callback(progress,
+                                            f"Download file {i + 1}/{total_files}: {os.path.basename(remote_path)}")
+
+                # Invia la richiesta per ottenere il file
+                logger.debug(f"Richiesta file: {remote_path}")
+                if not connection_manager.send_message(
+                        scanner.device_id,
+                        "GET_FILE",
+                        {"path": remote_path}
+                ):
+                    logger.warning(f"Impossibile inviare richiesta per il file: {remote_path}")
+                    continue
+
+                # Attendi la risposta con un timeout di 30 secondi
+                file_response = None
+                file_start_time = time.time()
+
+                while time.time() - file_start_time < 30.0:
+                    # Permetti all'interfaccia di processare eventi
+                    if 'QApplication' in globals():
+                        QApplication.processEvents()
+
+                    if connection_manager.has_response(scanner.device_id, "GET_FILE"):
+                        file_response = connection_manager.get_response(scanner.device_id, "GET_FILE")
+                        break
+                    time.sleep(0.1)
+
+                if not file_response or file_response.get("status") != "ok":
+                    logger.warning(f"Errore nel download del file: {remote_path}")
+                    continue
+
+                # Salva il file
+                file_data = file_response.get("data")
+                if file_data:
+                    try:
+                        # Il server potrebbe inviare i dati in formato base64
+                        if isinstance(file_data, str):
+                            import base64
+                            file_data = base64.b64decode(file_data)
+
+                        with open(str(local_path), "wb") as f:
+                            f.write(file_data)
+
+                        downloaded_files += 1
+                        logger.debug(f"File salvato: {local_path}")
+                    except Exception as e:
+                        logger.error(f"Errore nel salvataggio del file {local_path}: {e}")
+                else:
+                    logger.warning(f"Dati file vuoti per: {remote_path}")
+
+            # Download della calibrazione
+            if self._progress_callback:
+                self._progress_callback(90, "Download dati di calibrazione...")
+
+            try:
+                # Invia richiesta per i dati di calibrazione
+                connection_manager.send_message(
+                    scanner.device_id,
+                    "GET_CALIBRATION"
                 )
-                return False
 
-            # Aggiorna il log
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Download completato con successo\n"
+                # Attendi la risposta
+                calib_response = None
+                calib_start_time = time.time()
 
-            # Aggiorna l'interfaccia
-            self.status_label.setText("Download completato")
-            self.progress_bar.setValue(100)
+                while time.time() - calib_start_time < 20.0:
+                    # Permetti all'interfaccia di processare eventi
+                    if 'QApplication' in globals():
+                        QApplication.processEvents()
 
-            return True
+                    if connection_manager.has_response(scanner.device_id, "GET_CALIBRATION"):
+                        calib_response = connection_manager.get_response(scanner.device_id, "GET_CALIBRATION")
+                        break
+                    time.sleep(0.1)
+
+                if calib_response and calib_response.get("status") == "ok":
+                    calib_data = calib_response.get("data")
+                    if calib_data:
+                        calib_file = scan_dir / "calibration.npz"
+                        with open(str(calib_file), "wb") as f:
+                            # Il server potrebbe inviare i dati in formato base64
+                            if isinstance(calib_data, str):
+                                import base64
+                                calib_data = base64.b64decode(calib_data)
+                            f.write(calib_data)
+                        logger.info("Dati di calibrazione salvati")
+            except Exception as e:
+                logger.warning(f"Errore nel download dei dati di calibrazione: {e}")
+
+            # Completamento
+            if self._progress_callback:
+                self._progress_callback(100, f"Download completato: {downloaded_files}/{total_files} file")
+
+            # Imposta la directory corrente e carica le immagini
+            self.scan_dir = scan_dir
+            self.scan_id = scan_id
+            self._find_scan_images()
+
+            logger.info(f"Download completato: {downloaded_files}/{total_files} file scaricati")
+            return downloaded_files > 0
 
         except Exception as e:
-            logger.error(f"Errore nel download dei dati: {e}")
-
-            # Aggiorna il log
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nel download: {str(e)}\n"
-
-            # Aggiorna l'interfaccia
-            self.status_label.setText(f"Errore nel download: {str(e)}")
-
-            # Mostra un messaggio di errore
-            QMessageBox.critical(
-                self,
-                "Errore",
-                f"Si è verificato un errore durante il download dei dati:\n{str(e)}"
-            )
-
+            logger.error(f"Errore nel download dei dati della scansione: {e}")
+            if self._progress_callback:
+                self._progress_callback(0, f"Errore: {str(e)}")
             return False
 
     def _request_scan_config(self, connection_manager, device_id):
