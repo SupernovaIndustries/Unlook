@@ -148,26 +148,40 @@ class ScannerController(QObject):
 
     def is_connected(self, device_id: str) -> bool:
         """
-        Verifica se un determinato scanner è connesso con controllo migliorato.
+        Verifica se un determinato scanner è connesso.
+        CORREZIONE: Migliorata con controllo diretto del connection manager.
         """
         scanner = self._scanner_manager.get_scanner(device_id)
         if not scanner:
             return False
 
-        # Verifica lo stato della connessione
-        is_connected = scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
+        # Controllo su due livelli:
+        # 1. Verifica lo stato memorizzato nello scanner
+        scanner_state_connected = scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
 
-        # Verifica anche con il connection manager
-        if is_connected and hasattr(self, '_connection_manager'):
-            is_connected = self._connection_manager.is_connected(device_id)
+        # 2. Verifica anche con il connection manager per conferma diretta
+        connection_manager_connected = False
+        try:
+            # Evita creazione non necessaria dell'istanza se esistente
+            if hasattr(self, '_connection_manager'):
+                connection_manager = self._connection_manager
+            else:
+                from client.network.connection_manager import ConnectionManager
+                connection_manager = ConnectionManager()
 
-            # Se c'è discrepanza, aggiorna lo stato dello scanner
-            if not is_connected and scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING):
-                scanner.status = ScannerStatus.DISCONNECTED
+            connection_manager_connected = connection_manager.is_connected(device_id)
+
+            # Se c'è una discrepanza tra lo stato memorizzato e quello reale, aggiorna
+            if scanner_state_connected and not connection_manager_connected:
                 logger.warning(
-                    f"Discrepanza rilevata: scanner {scanner.name} considerato connesso ma non è raggiungibile")
+                    f"Rilevata discrepanza: scanner {scanner.device_id} considerato connesso ma connessione non attiva")
+                scanner.status = ScannerStatus.DISCONNECTED
+                return False
+        except Exception as e:
+            logger.error(f"Errore nel controllo della connessione: {e}")
 
-        return is_connected
+        # La connessione è valida solo se entrambi i livelli confermano
+        return scanner_state_connected and connection_manager_connected
 
     def send_command(self, device_id: str, command_type: str, payload: Dict[str, Any] = None) -> bool:
         """

@@ -105,25 +105,41 @@ class MainWindow(QMainWindow):
         self._autopair_timer.start(2000)  # 2 secondi dopo l'avvio
 
         logger.info("Interfaccia utente principale inizializzata")
-        # Aggiungi un timer per il keepalive globale
-        self._keepalive_timer = QTimer(self)
-        self._keepalive_timer.timeout.connect(self._send_global_keepalive)
-        self._keepalive_timer.start(5000)  # Invia un keepalive ogni 5 secondi
+        self._global_keepalive_timer = QTimer(self)
+        self._global_keepalive_timer.timeout.connect(self._send_global_keepalive)
+        self._global_keepalive_timer.start(2000)  # Invia un keepalive ogni 2 secondi
 
     def _send_global_keepalive(self):
-        """Invia un keepalive al server se c'è uno scanner connesso."""
+        """
+        Invia un ping globale al server se c'è uno scanner connesso.
+        Questo mantiene viva la connessione indipendentemente dalla tab attiva.
+        """
         if self.scanner_controller and self.scanner_controller.selected_scanner:
             scanner = self.scanner_controller.selected_scanner
-            if self.scanner_controller.is_connected(scanner.device_id):
-                try:
+            try:
+                # Verifica lo stato di connessione prima di inviare
+                is_connected = self.scanner_controller.is_connected(scanner.device_id)
+
+                if is_connected:
+                    import socket
+                    # Ottieni l'IP locale
+                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    s.connect(("8.8.8.8", 80))
+                    local_ip = s.getsockname()[0]
+                    s.close()
+
+                    # Invia il ping con l'IP del client
                     self.scanner_controller.send_command(
                         scanner.device_id,
                         "PING",
-                        {"timestamp": time.time()}
+                        {
+                            "timestamp": time.time(),
+                            "client_ip": local_ip
+                        }
                     )
-                    logger.debug(f"Keepalive globale inviato a {scanner.name}")
-                except Exception as e:
-                    logger.error(f"Errore nell'invio del keepalive globale: {e}")
+                    logger.debug(f"Global keepalive inviato a {scanner.name}")
+            except Exception as e:
+                logger.error(f"Errore nell'invio del keepalive globale: {e}")
     def _attempt_autopair(self):
         """
         Tenta di connettersi automaticamente all'ultimo scanner utilizzato.

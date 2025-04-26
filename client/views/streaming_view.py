@@ -1072,13 +1072,40 @@ class DualStreamView(QWidget):
     def _send_keep_alive(self):
         """
         Invia un messaggio PING periodico al server per mantenere viva la connessione.
+        CORREZIONE: Migliorato con informazioni client e gestione errori.
         """
-        if self._streaming and self._scanner and self._connection_manager:
+        if self._scanner and self._connection_manager:
             try:
-                self._connection_manager.send_message(self._scanner.device_id, "PING")
-                logger.debug("Messaggio keep-alive inviato")
+                import socket
+                # Ottieni l'IP locale
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+
+                # Invia il ping con l'IP del client
+                success = self._connection_manager.send_message(
+                    self._scanner.device_id,
+                    "PING",
+                    {
+                        "timestamp": time.time(),
+                        "client_ip": local_ip
+                    }
+                )
+
+                if success:
+                    logger.debug("Ping inviato con successo")
+                else:
+                    logger.warning("Impossibile inviare ping - probabile disconnessione")
+
+                    # Se non riusciamo a inviare il ping, verifichiamo la connessione
+                    if not self._connection_manager.is_connected(self._scanner.device_id):
+                        logger.warning("Connessione persa durante lo streaming")
+                        # Ferma lo streaming se attivo
+                        if self._streaming:
+                            self.stop_streaming()
             except Exception as e:
-                logger.warning(f"Errore nell'invio del messaggio keep-alive: {e}")
+                logger.error(f"Errore nell'invio del keepalive: {e}")
 
     def start_streaming(self, scanner: Scanner) -> bool:
         """
@@ -1114,14 +1141,20 @@ class DualStreamView(QWidget):
             self._retry_count = 0
             self._retry_timer.start()
 
+            # CORREZIONE: Avvia un timer per il keepalive
             self._keep_alive_timer = QTimer(self)
             self._keep_alive_timer.timeout.connect(self._send_keep_alive)
-            self._keep_alive_timer.start(5000)  # Invia ping ogni 5 secondi
+            self._keep_alive_timer.start(2000)  # Invia ping ogni 2 secondi (più frequente)
 
             # Ritorna True per indicare che il processo è iniziato (anche se lo streaming non è ancora attivo)
             return True
         else:
             # Scanner già connesso, avvia subito lo streaming
+            # CORREZIONE: Avvia un timer per il keepalive anche qui
+            self._keep_alive_timer = QTimer(self)
+            self._keep_alive_timer.timeout.connect(self._send_keep_alive)
+            self._keep_alive_timer.start(2000)  # Invia ping ogni 2 secondi
+
             return self._start_actual_streaming()
 
     def _start_actual_streaming(self) -> bool:

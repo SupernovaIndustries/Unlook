@@ -103,6 +103,63 @@ class ConnectionWorker(QThread):
             self._send_queue.append(data)
             return True
 
+    def _process_send_queue(self):
+        """Processa la coda dei messaggi da inviare."""
+        with QMutexLocker(self._mutex):
+            if not self._send_queue:
+                return
+
+            # Preleva un messaggio dalla coda (solo uno per volta con REQ/REP)
+            if self._send_queue:
+                data = self._send_queue.pop(0)
+            else:
+                return
+
+        # Invia il messaggio
+        try:
+            # Invia il messaggio
+            self._socket.send(data)
+
+            # Attendi la risposta (pattern REQ/REP: req->rep->req->rep...)
+            try:
+                # Impostiamo un timeout più breve per rilevare disconnessioni più rapidamente
+                reply = self._socket.recv()
+
+                # Reset del flag di errore se c'era stato un problema precedente
+                if hasattr(self, '_consecutive_errors'):
+                    self._consecutive_errors = 0
+
+                try:
+                    # Decodifica e processa la risposta
+                    reply_json = reply.decode('utf-8')
+                    reply_data = json.loads(reply_json)
+                    self.data_received.emit(self.device_id, reply_data)
+                except Exception as e:
+                    logger.error(f"Errore nella decodifica della risposta: {e}")
+            except zmq.ZMQError as e:
+                # Incrementa il contatore di errori consecutivi
+                if not hasattr(self, '_consecutive_errors'):
+                    self._consecutive_errors = 0
+                self._consecutive_errors += 1
+
+                # Se ci sono troppi errori consecutivi, segnala la disconnessione
+                if self._consecutive_errors >= 3:
+                    logger.error(f"Troppe risposte mancate: ZMQ socket probabilmente disconnesso")
+                    self._running = False
+                    self.connection_closed.emit(self.device_id)
+                    return
+
+                logger.error(f"Errore ZMQ durante l'attesa di risposta: {e}")
+        except zmq.ZMQError as e:
+            logger.error(f"Errore ZMQ durante l'invio: {e}")
+
+            # Se è un errore critico, segnala la disconnessione
+            if e.errno in [zmq.ETERM, zmq.ENOTSOCK, zmq.ENOTSUP]:
+                logger.error("Errore fatale nella connessione ZMQ")
+                self._running = False
+                self.connection_closed.emit(self.device_id)
+        except Exception as e:
+            logger.error(f"Errore durante l'invio: {str(e)}")
     def _send_keep_alive(self):
         """
         Invia un messaggio PING periodico al server per mantenere viva la connessione.

@@ -732,16 +732,34 @@ class ScanView(QWidget):
             logger.error(f"Errore nell'aggiornamento dello stato della scansione: {e}")
 
     def refresh_scanner_state(self):
-        """Aggiorna lo stato dello scanner quando la tab diventa attiva."""
+        """
+        Aggiorna lo stato dello scanner quando la tab diventa attiva.
+        CORREZIONE: Aggiunto ping esplicito e verifica della connessione.
+        """
         if self.scanner_controller and self.scanner_controller.selected_scanner:
             self.selected_scanner = self.scanner_controller.selected_scanner
 
-            # Invia un ping esplicito per verificare la connessione e aggiornare lo stato
-            self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "PING",
-                {"timestamp": time.time()}
-            )
+            # CORREZIONE: Invia un ping esplicito per verificare la connessione
+            if self.selected_scanner:
+                try:
+                    import socket
+                    # Ottieni l'IP locale
+                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    s.connect(("8.8.8.8", 80))
+                    local_ip = s.getsockname()[0]
+                    s.close()
+
+                    # Invia un ping con l'IP del client
+                    self.scanner_controller.send_command(
+                        self.selected_scanner.device_id,
+                        "PING",
+                        {
+                            "timestamp": time.time(),
+                            "client_ip": local_ip
+                        }
+                    )
+                except Exception as e:
+                    logger.error(f"Errore nell'invio del ping di refresh: {e}")
 
             # Aggiorna la UI in base allo stato corrente della connessione
             connected = self.scanner_controller.is_connected(self.selected_scanner.device_id)

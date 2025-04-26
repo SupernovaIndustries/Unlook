@@ -780,14 +780,14 @@ class UnLookServer:
                 response['timestamp'] = time.time()
                 # Aggiorna timestamp di attività client
                 self._last_client_activity = time.time()
-                # Assicurati di salvare l'IP del client
+                # CORREZIONE: Aggiorna la connessione e salva l'IP del client
+                self.client_connected = True
+
+                # Usa l'IP del client se fornito nel messaggio
                 if 'client_ip' in command:
                     self.client_ip = command.get('client_ip')
-                else:
-                    # Se non fornito, estrai dall'indirizzo remoto
-                    # (questo potrebbe richiedere modifiche appropriate al sistema di messaggistica)
-                    self.client_ip = "client_addr"  # Sostituisci con l'indirizzo remoto effettivo
-                self.client_connected = True
+                    logger.debug(f"Ping ricevuto dal client {self.client_ip}, aggiornato timestamp attività")
+
 
             elif command_type == 'GET_STATUS':
                 # Aggiorna lo stato
@@ -1010,7 +1010,7 @@ class UnLookServer:
     def _check_client_activity(self):
         """
         Verifica se il client è ancora attivo e, in caso contrario, rilascia le risorse.
-        Da chiamare periodicamente nel loop principale.
+        CORREZIONE: Aumentato timeout e migliorata identificazione client.
         """
         if not self.client_connected:
             return
@@ -1018,10 +1018,11 @@ class UnLookServer:
         current_time = time.time()
         time_since_last_activity = current_time - self._last_client_activity
 
-        # Aumentiamo il timeout da 10 a 30 secondi
+        # CORREZIONE: Aumentato timeout da 10 a 30 secondi
         if time_since_last_activity > 30.0:
+            client_id = self.client_ip if self.client_ip else "sconosciuto"
             logger.info(
-                f"Il client {self.client_ip} risulta inattivo da {time_since_last_activity:.1f} secondi, considerato disconnesso.")
+                f"Il client {client_id} risulta inattivo da {time_since_last_activity:.1f} secondi, considerato disconnesso.")
 
             # Ferma lo streaming se attivo
             if self.state["streaming"]:
