@@ -6,9 +6,10 @@ Controller per la gestione degli scanner UnLook.
 """
 
 import logging
-from typing import List, Optional, Callable
+import time
+from typing import List, Optional, Callable, Dict, Any
 
-from PySide6.QtCore import QObject, Signal, Slot, Property
+from PySide6.QtCore import QObject, Signal, Slot, Property, QSettings
 
 # Importa i moduli del progetto in modo che funzionino sia con esecuzione diretta che tramite launcher
 try:
@@ -138,6 +139,86 @@ class ScannerController(QObject):
             return False
         return scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
 
+    def send_command(self, device_id: str, command_type: str, payload: Dict[str, Any] = None) -> bool:
+        """
+        Invia un comando allo scanner specificato.
+
+        Args:
+            device_id: ID univoco dello scanner
+            command_type: Tipo di comando da inviare
+            payload: Dati aggiuntivi per il comando (opzionale)
+
+        Returns:
+            True se il comando è stato inviato, False altrimenti
+        """
+        if not self.is_connected(device_id):
+            logger.error(f"Impossibile inviare comando: scanner {device_id} non connesso")
+            return False
+
+        try:
+            return self._connection_manager.send_message(device_id, command_type, payload)
+        except Exception as e:
+            logger.error(f"Errore nell'invio del comando {command_type}: {e}")
+            return False
+
+    def wait_for_response(self, device_id: str, command_type: str, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
+        """
+        Attende la risposta a un comando inviato.
+
+        Args:
+            device_id: ID univoco dello scanner
+            command_type: Tipo di comando per cui si attende la risposta
+            timeout: Timeout in secondi (default: 5 secondi)
+
+        Returns:
+            Dizionario con la risposta o None se non ricevuta entro il timeout
+        """
+        if not self.is_connected(device_id):
+            logger.error(f"Impossibile attendere risposta: scanner {device_id} non connesso")
+            return None
+
+        try:
+            # Attendi che la risposta sia disponibile
+            start_time = time.time()
+            while (time.time() - start_time) < timeout:
+                if self._connection_manager.has_response(device_id, command_type):
+                    return self._connection_manager.get_response(device_id, command_type)
+                time.sleep(0.1)  # Piccola pausa per evitare di sovraccaricare la CPU
+
+            logger.warning(f"Timeout nell'attesa della risposta a {command_type}")
+            return None
+        except Exception as e:
+            logger.error(f"Errore nell'attesa della risposta a {command_type}: {e}")
+            return None
+
+    def try_autoconnect_last_scanner(self) -> bool:
+        """
+        Tenta di connettersi automaticamente all'ultimo scanner utilizzato.
+
+        Returns:
+            True se la connessione è stata avviata, False altrimenti
+        """
+        try:
+            # Cerca nell'elenco degli scanner recenti
+            settings = QSettings()
+            last_device_id = settings.value("scanner/last_device_id")
+
+            if not last_device_id:
+                logger.info("Nessun ultimo scanner trovato nelle impostazioni")
+                return False
+
+            # Verifica se lo scanner è disponibile
+            for scanner in self.scanners:
+                if scanner.device_id == last_device_id:
+                    logger.info(f"Tentativo di connessione automatica a {scanner.name}")
+                    return self.connect_to_scanner(scanner.device_id)
+
+            logger.info(f"L'ultimo scanner utilizzato (ID: {last_device_id}) non è disponibile")
+            return False
+        except Exception as e:
+            logger.error(f"Errore nella connessione automatica: {e}")
+            return False
+
     @Slot(Scanner)
     def _on_scanner_discovered(self, scanner: Scanner):
         """Gestisce l'evento di scoperta di un nuovo scanner."""
@@ -163,6 +244,14 @@ class ScannerController(QObject):
             scanner.status = ScannerStatus.CONNECTED
             logger.info(f"Connessione stabilita con {scanner.name}")
             self.scanner_connected.emit(scanner)
+
+            # Salva l'ultimo scanner connesso
+            try:
+                from PySide6.QtCore import QSettings
+                settings = QSettings()
+                settings.setValue("scanner/last_device_id", device_id)
+            except Exception as e:
+                logger.error(f"Errore nel salvataggio dell'ultimo scanner: {e}")
 
     @Slot(str, str)
     def _on_connection_failed(self, device_id: str, error: str):

@@ -3,7 +3,7 @@
 
 """
 Gestisce le connessioni con gli scanner UnLook.
-Versione semplificata senza controlli di connessione aggiuntivi.
+Versione migliorata senza controlli di connessione aggiuntivi.
 """
 
 import json
@@ -11,6 +11,7 @@ import logging
 import socket
 import time
 from typing import Dict, Optional, Tuple, Any, Callable
+from collections import defaultdict
 
 from PySide6.QtCore import QObject, Signal, QThread, QMutex, QMutexLocker
 
@@ -179,6 +180,8 @@ class ConnectionManager(QObject):
         super().__init__()
         self._connections: Dict[str, ConnectionWorker] = {}
         self._message_handlers: Dict[str, Callable] = {}
+        self._responses: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        self._responses_mutex = QMutex()
         self._initialized = True
 
     def connect(self, device_id: str, host: str, port: int) -> bool:
@@ -314,6 +317,37 @@ class ConnectionManager(QObject):
         worker = self._connections[device_id]
         return worker.isRunning()
 
+    def has_response(self, device_id: str, command_type: str) -> bool:
+        """
+        Verifica se è disponibile una risposta per un comando specifico.
+
+        Args:
+            device_id: ID univoco dello scanner
+            command_type: Tipo di comando
+
+        Returns:
+            True se è disponibile una risposta, False altrimenti
+        """
+        with QMutexLocker(self._responses_mutex):
+            return device_id in self._responses and command_type in self._responses[device_id]
+
+    def get_response(self, device_id: str, command_type: str) -> Optional[Dict[str, Any]]:
+        """
+        Restituisce la risposta per un comando specifico e la rimuove dalla coda.
+
+        Args:
+            device_id: ID univoco dello scanner
+            command_type: Tipo di comando
+
+        Returns:
+            Dizionario con la risposta o None se non disponibile
+        """
+        with QMutexLocker(self._responses_mutex):
+            if device_id in self._responses and command_type in self._responses[device_id]:
+                response = self._responses[device_id].pop(command_type)
+                return response
+            return None
+
     def _cleanup_connection(self, device_id: str):
         """Rimuove una connessione dalla gestione."""
         if device_id in self._connections:
@@ -326,6 +360,11 @@ class ConnectionManager(QObject):
                 worker.data_received.disconnect()
             except:
                 pass
+
+        # Rimuovi anche le risposte in sospeso
+        with QMutexLocker(self._responses_mutex):
+            if device_id in self._responses:
+                del self._responses[device_id]
 
     def _on_connection_ready(self, device_id: str):
         """Gestisce l'evento di connessione pronta."""
@@ -347,11 +386,19 @@ class ConnectionManager(QObject):
         try:
             # Estrai il tipo di messaggio
             message_type = message.get('type', '')
+            original_type = None
+
             if message_type.endswith('_response'):
-                # Rimuovi il suffisso "_response" per gestire più facilmente i tipi di risposta
-                message_type = message_type[:-9]
+                # Estrai il tipo originale del comando (rimuovendo "_response")
+                original_type = message_type[:-9]
 
             logger.debug(f"Messaggio ricevuto da {device_id}: {message_type}")
+
+            # Archivia la risposta per il comando originale
+            if original_type:
+                with QMutexLocker(self._responses_mutex):
+                    self._responses[device_id][original_type] = message
+                logger.debug(f"Risposta archiviata per comando {original_type}")
 
             # Emetti il segnale generico di dati ricevuti
             self.data_received.emit(device_id, message)
@@ -360,5 +407,11 @@ class ConnectionManager(QObject):
             if message_type in self._message_handlers:
                 handler = self._message_handlers[message_type]
                 handler(device_id, message)
+
+            # Gestisci anche con l'handler del tipo originale se esiste
+            if original_type and original_type in self._message_handlers:
+                handler = self._message_handlers[original_type]
+                handler(device_id, message)
+
         except Exception as e:
             logger.error(f"Errore nella gestione dei dati ricevuti: {str(e)}")
