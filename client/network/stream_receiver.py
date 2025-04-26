@@ -82,7 +82,7 @@ class StreamReceiverThread(QThread):
                     except zmq.Again:
                         # Controlla l'inattività
                         current_time = time.time()
-                        if current_time - self._last_activity > 3.0 and self._connected:
+                        if current_time - self._last_activity > 60.0 and self._connected:
                             self._connected = False
                             logger.warning("Connessione persa - nessuna attività per 3 secondi")
                             self.connection_state_changed.emit(False)
@@ -376,8 +376,15 @@ class StreamReceiver(QObject):
 
     @Slot(str)
     def _on_error(self, error_msg: str):
-        """Gestisce errori dal thread di ricezione."""
+        """Gestisce errori dal thread di ricezione con maggiore tolleranza."""
         logger.error(f"Errore nel ricevitore: {error_msg}")
+
+        # Verifica se è un errore critico o temporaneo
+        is_critical = "fatale" in error_msg.lower() or "impossibile" in error_msg.lower()
+
         # Notifica errore a tutte le camere attive
         for camera_idx in list(self._cameras_active):
+            # Per errori non critici, usa warning invece di error per evitare disconnessioni immediate
+            if not is_critical:
+                logger.warning(f"Errore temporaneo nello stream della camera {camera_idx}: {error_msg}")
             self.stream_error.emit(camera_idx, error_msg)

@@ -161,7 +161,7 @@ class ScannerController(QObject):
             logger.error(f"Errore nell'invio del comando {command_type}: {e}")
             return False
 
-    def wait_for_response(self, device_id: str, command_type: str, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
+    def wait_for_response(self, device_id: str, command_type: str, timeout: float = 30.0) -> Optional[Dict[str, Any]]:
         """
         Attende la risposta a un comando inviato.
 

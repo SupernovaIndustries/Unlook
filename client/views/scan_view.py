@@ -850,7 +850,7 @@ class ScanView(QWidget):
             response = self.scanner_controller.wait_for_response(
                 self.selected_scanner.device_id,
                 "STOP_SCAN",
-                timeout=5.0
+                timeout=15.0
             )
 
             # Aggiorna il log

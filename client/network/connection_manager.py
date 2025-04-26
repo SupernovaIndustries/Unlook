@@ -51,9 +51,12 @@ class ConnectionWorker(QThread):
             self._context = zmq.Context()
             self._socket = self._context.socket(zmq.REQ)  # Usiamo REQ che corrisponde a REP del server
 
-            # Connessione
+            # Connessione con timeout e opzioni migliorate
             endpoint = f"tcp://{self.host}:{self.port}"
             logger.info(f"Tentativo di connessione a {endpoint}")
+            self._socket.setsockopt(zmq.RCVTIMEO, 5000)  # 5 secondi timeout ricezione
+            self._socket.setsockopt(zmq.SNDTIMEO, 5000)  # 5 secondi timeout invio
+            self._socket.setsockopt(zmq.LINGER, 1000)  # Attendi fino a 1 secondo alla chiusura
             self._socket.connect(endpoint)
 
             # Connessione riuscita
