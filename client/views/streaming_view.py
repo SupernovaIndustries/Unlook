@@ -453,11 +453,6 @@ class DualStreamView(QWidget):
         self.toggle_stream_button.clicked.connect(self._on_toggle_stream_clicked)
         self.toggle_stream_button.setEnabled(False)
 
-        # Pulsante avvia scansione
-        self.start_scan_button = QPushButton("Avvia Scansione")
-        self.start_scan_button.clicked.connect(self._on_start_scan_clicked)
-        self.start_scan_button.setEnabled(False)
-
         # Pulsante cattura frame
         self.capture_button = QPushButton("Acquisisci Frame")
         self.capture_button.clicked.connect(self.capture_frame)
@@ -466,7 +461,12 @@ class DualStreamView(QWidget):
         control_buttons.addWidget(self.toggle_stream_button)
         control_buttons.addWidget(self.capture_button)
         control_buttons.addStretch(1)
-        control_buttons.addWidget(self.start_scan_button)
+
+        # Rimuoviamo il pulsante "Avvia Scansione"
+        # self.start_scan_button = QPushButton("Avvia Scansione")
+        # self.start_scan_button.clicked.connect(self._on_start_scan_clicked)
+        # self.start_scan_button.setEnabled(False)
+        # control_buttons.addWidget(self.start_scan_button)
 
         main_layout.addLayout(control_buttons)
 
@@ -522,73 +522,14 @@ class DualStreamView(QWidget):
         camera_layout.addWidget(self.camera_tabs)
         camera_layout.addLayout(apply_layout)
 
-        # Tab per i controlli di scansione
-        scan_controls = QWidget()
-        scan_layout = QVBoxLayout(scan_controls)
+        # Rimuoviamo la tab per i controlli di scansione
+        # scan_controls = QWidget()
+        # scan_layout = QVBoxLayout(scan_controls)
+        # ...
+        # control_panel.addTab(scan_controls, "Scansione")
 
-        # Gruppo di controlli per la scansione
-        scan_group = QGroupBox("Parametri di Scansione")
-        scan_form = QFormLayout(scan_group)
-
-        # Nome scansione
-        self.scan_name_edit = QLineEdit("Nuova scansione")
-        scan_form.addRow("Nome scansione:", self.scan_name_edit)
-
-        # Tipo di scansione
-        scan_type_layout = QHBoxLayout()
-        self.scan_type_group = QButtonGroup(self)
-        self.scan_type_structured = QRadioButton("Luce strutturata")
-        self.scan_type_tof = QRadioButton("Time-of-Flight")
-        self.scan_type_structured.setChecked(True)
-        self.scan_type_group.addButton(self.scan_type_structured)
-        self.scan_type_group.addButton(self.scan_type_tof)
-        scan_type_layout.addWidget(self.scan_type_structured)
-        scan_type_layout.addWidget(self.scan_type_tof)
-        scan_form.addRow("Tipo di scansione:", scan_type_layout)
-
-        # Risoluzione
-        self.resolution_combo = QComboBox()
-        self.resolution_combo.addItem("Bassa (1mm)", 1.0)
-        self.resolution_combo.addItem("Media (0.5mm)", 0.5)
-        self.resolution_combo.addItem("Alta (0.2mm)", 0.2)
-        scan_form.addRow("Risoluzione:", self.resolution_combo)
-
-        # Qualità
-        quality_layout = QHBoxLayout()
-        self.quality_slider = QSlider(Qt.Horizontal)
-        self.quality_slider.setRange(1, 5)
-        self.quality_slider.setValue(3)
-        self.quality_slider.setTickPosition(QSlider.TicksBelow)
-        self.quality_slider.setTickInterval(1)
-
-        self.quality_label = QLabel("3")
-        self.quality_slider.valueChanged.connect(lambda v: self.quality_label.setText(str(v)))
-
-        quality_layout.addWidget(self.quality_slider)
-        quality_layout.addWidget(self.quality_label)
-        scan_form.addRow("Qualità:", quality_layout)
-
-        # Acquisizione colore
-        self.color_checkbox = QCheckBox()
-        scan_form.addRow("Acquisizione colore:", self.color_checkbox)
-
-        scan_layout.addWidget(scan_group)
-
-        # Pulsanti di azione per la scansione
-        scan_buttons_layout = QHBoxLayout()
-
-        self.save_scan_button = QPushButton("Salva Scansione")
-        self.save_scan_button.setEnabled(False)
-        self.save_scan_button.clicked.connect(self._on_save_scan_clicked)
-
-        scan_buttons_layout.addStretch(1)
-        scan_buttons_layout.addWidget(self.save_scan_button)
-
-        scan_layout.addLayout(scan_buttons_layout)
-
-        # Aggiungi le schede al pannello di controllo
+        # Aggiungi solo la tab Fotocamera al pannello di controllo
         control_panel.addTab(camera_controls, "Fotocamera")
-        control_panel.addTab(scan_controls, "Scansione")
 
         main_layout.addWidget(control_panel)
 
@@ -873,8 +814,8 @@ class DualStreamView(QWidget):
                 if success:
                     self.toggle_stream_button.setText("Ferma Streaming")
 
-    def _on_start_scan_clicked(self):
-        """Gestisce il clic sul pulsante Avvia Scansione."""
+    """def _on_start_scan_clicked(self):
+        #Gestisce il clic sul pulsante Avvia Scansione.
         if not self._scanner or not self._streaming:
             QMessageBox.warning(
                 self,
@@ -901,7 +842,7 @@ class DualStreamView(QWidget):
         )
 
         # Abilita il pulsante di salvataggio
-        self.save_scan_button.setEnabled(True)
+        self.save_scan_button.setEnabled(True)"""
 
     def _on_save_scan_clicked(self):
         """Gestisce il clic sul pulsante Salva Scansione."""
@@ -1355,8 +1296,8 @@ class DualStreamView(QWidget):
         self.toggle_stream_button.setText("Ferma Streaming" if is_streaming else "Avvia Streaming")
 
         self.capture_button.setEnabled(is_streaming)
-        self.start_scan_button.setEnabled(is_streaming)
-        self.save_scan_button.setEnabled(False)
+        """self.start_scan_button.setEnabled(is_streaming)
+        self.save_scan_button.setEnabled(False)"""
         self.apply_settings_button.setEnabled(is_connected)
 
     def stop_streaming(self):
