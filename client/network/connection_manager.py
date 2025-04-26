@@ -43,6 +43,7 @@ class ConnectionWorker(QThread):
         self._running = False
         self._mutex = QMutex()
         self._send_queue = []
+        self._consecutive_errors = 0
 
     def run(self):
         """Esegue il loop principale di connessione."""
@@ -126,8 +127,7 @@ class ConnectionWorker(QThread):
                 reply = self._socket.recv()
 
                 # Reset del flag di errore se c'era stato un problema precedente
-                if hasattr(self, '_consecutive_errors'):
-                    self._consecutive_errors = 0
+                self._consecutive_errors = 0
 
                 try:
                     # Decodifica e processa la risposta
@@ -138,8 +138,6 @@ class ConnectionWorker(QThread):
                     logger.error(f"Errore nella decodifica della risposta: {e}")
             except zmq.ZMQError as e:
                 # Incrementa il contatore di errori consecutivi
-                if not hasattr(self, '_consecutive_errors'):
-                    self._consecutive_errors = 0
                 self._consecutive_errors += 1
 
                 # Se ci sono troppi errori consecutivi, segnala la disconnessione
@@ -160,11 +158,24 @@ class ConnectionWorker(QThread):
                 self.connection_closed.emit(self.device_id)
         except Exception as e:
             logger.error(f"Errore durante l'invio: {str(e)}")
+
+    def _get_local_ip(self):
+        """Ottiene l'indirizzo IP locale della macchina client."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except:
+            return "127.0.0.1"
+
     def _send_keep_alive(self):
         """
         Invia un messaggio PING periodico al server per mantenere viva la connessione.
         """
-        if self._streaming and self._scanner and self._connection_manager:
+        if hasattr(self, '_streaming') and self._streaming and hasattr(self, '_scanner') and self._scanner and hasattr(
+                self, '_connection_manager') and self._connection_manager:
             try:
                 # Aggiungi l'IP del client nel messaggio per aiutare il server a tracciare
                 self._connection_manager.send_message(
@@ -175,50 +186,6 @@ class ConnectionWorker(QThread):
                 logger.debug("Messaggio keep-alive inviato")
             except Exception as e:
                 logger.warning(f"Errore nell'invio del messaggio keep-alive: {e}")
-
-        # Metodo helper per ottenere l'IP locale
-        def _get_local_ip(self):
-            """Ottiene l'indirizzo IP locale della macchina client."""
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                ip = s.getsockname()[0]
-                s.close()
-                return ip
-            except:
-                return "127.0.0.1"
-
-    def _process_send_queue(self):
-        """Processa la coda dei messaggi da inviare."""
-        with QMutexLocker(self._mutex):
-            if not self._send_queue:
-                return
-
-            # Preleva un messaggio dalla coda (solo uno per volta con REQ/REP)
-            if self._send_queue:
-                data = self._send_queue.pop(0)
-            else:
-                return
-
-        # Invia il messaggio
-        try:
-            # Invia il messaggio
-            self._socket.send(data)
-
-            # Attendi la risposta (pattern REQ/REP: req->rep->req->rep...)
-            reply = self._socket.recv()
-
-            try:
-                # Decodifica e processa la risposta
-                reply_json = reply.decode('utf-8')
-                reply_data = json.loads(reply_json)
-                self.data_received.emit(self.device_id, reply_data)
-            except Exception as e:
-                logger.error(f"Errore nella decodifica della risposta: {e}")
-        except zmq.ZMQError as e:
-            logger.error(f"Errore ZMQ durante l'invio: {e}")
-        except Exception as e:
-            logger.error(f"Errore durante l'invio: {str(e)}")
 
     def stop(self):
         """Ferma il worker e chiude la connessione."""
