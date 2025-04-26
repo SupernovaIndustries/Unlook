@@ -340,71 +340,63 @@ class ScannerDiscoveryWidget(QWidget):
         self.scanner_info.disconnect_requested.connect(self._on_disconnect_requested)
 
     @Slot()
+    @Slot()
     def _update_scanner_list(self):
         """Aggiorna la lista degli scanner disponibili."""
-        # Memorizza lo scanner selezionato corrente
+        # Memorizza l'ID dello scanner selezionato corrente
         current_device_id = None
-        if self.scanner_selector.currentIndex() >= 0:
-            current_device_id = self.scanner_selector.currentData()
+        current_item = self.scanner_list.currentItem()
+        if current_item:
+            current_device_id = current_item.data(Qt.UserRole)
 
         # Blocca i segnali per evitare attivazioni durante l'aggiornamento
-        self.scanner_selector.blockSignals(True)
+        self.scanner_list.blockSignals(True)
+
+        # Memorizza gli scanner attualmente nella lista
+        old_scanner_items = {}
+        for i in range(self.scanner_list.count()):
+            item = self.scanner_list.item(i)
+            if item:
+                scanner_id = item.data(Qt.UserRole)
+                old_scanner_items[scanner_id] = item
 
         # Svuota la lista
-        self.scanner_selector.clear()
+        self.scanner_list.clear()
+        self._scanner_items.clear()
 
         # Aggiungi gli scanner disponibili
         scanners = self.scanner_controller.scanners
-        if scanners:
-            for scanner in scanners:
-                # CORREZIONE: Verifica in modo più affidabile lo stato di connessione
-                is_connected = scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
-                is_streaming = scanner.status == ScannerStatus.STREAMING
+        for scanner in scanners:
+            # CORREZIONE: Verifica in modo più affidabile lo stato di connessione
+            is_connected = scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
+            is_streaming = scanner.status == ScannerStatus.STREAMING
 
-                # Verifica anche direttamente con il connection manager
-                direct_connection = self.scanner_controller.is_connected(scanner.device_id)
+            # Verifica anche direttamente con il connection manager
+            direct_connection = self.scanner_controller.is_connected(scanner.device_id)
 
-                # Un dispositivo è considerato connesso se è nello stato di connessione
-                # o se è in streaming o se la connessione diretta è attiva
-                is_really_connected = is_connected or is_streaming or direct_connection
+            # Un dispositivo è considerato connesso se è nello stato di connessione
+            # o se è in streaming o se la connessione diretta è attiva
+            is_really_connected = is_connected or is_streaming or direct_connection
 
-                # Aggiorna lo stato dello scanner se necessario
-                if is_really_connected and scanner.status == ScannerStatus.DISCONNECTED:
-                    scanner.status = ScannerStatus.CONNECTED
+            # Aggiorna lo stato dello scanner se necessario
+            if is_really_connected and scanner.status == ScannerStatus.DISCONNECTED:
+                scanner.status = ScannerStatus.CONNECTED
 
-                # Aggiungi lo scanner al menu a tendina con stato aggiornato
-                status_text = ""
-                if is_streaming:
-                    status_text = " (Streaming)"
-                elif is_really_connected:
-                    status_text = " (Connesso)"
-                elif scanner.status == ScannerStatus.CONNECTING:
-                    status_text = " (Connessione...)"
+            # Crea o riutilizza un item per lo scanner
+            item = ScannerListItem(scanner)
+            self.scanner_list.addItem(item)
+            self._scanner_items[scanner.device_id] = item
 
-                self.scanner_selector.addItem(f"{scanner.name}{status_text}", scanner.device_id)
-
-            # Riseleziona lo scanner precedente se ancora disponibile
-            if current_device_id:
-                index = self.scanner_selector.findData(current_device_id)
-                if index >= 0:
-                    self.scanner_selector.setCurrentIndex(index)
-
-            # Abilita il selettore
-            self.scanner_selector.setEnabled(True)
-
-            # Abilita il pulsante di connessione se c'è uno scanner selezionato
-            self.action_toggle_connection.setEnabled(True)
-        else:
-            # Nessuno scanner disponibile
-            self.scanner_selector.addItem("Nessuno scanner disponibile", None)
-            self.scanner_selector.setEnabled(False)
-            self.action_toggle_connection.setEnabled(False)
+        # Restituisci il focus all'elemento precedentemente selezionato
+        if current_device_id:
+            for i in range(self.scanner_list.count()):
+                item = self.scanner_list.item(i)
+                if item.data(Qt.UserRole) == current_device_id:
+                    self.scanner_list.setCurrentItem(item)
+                    break
 
         # Ripristina i segnali
-        self.scanner_selector.blockSignals(False)
-
-        # Aggiorna l'interfaccia in base allo scanner selezionato
-        self._update_ui_for_selected_scanner()
+        self.scanner_list.blockSignals(False)
 
     @Slot()
     def _update_last_seen_times(self):

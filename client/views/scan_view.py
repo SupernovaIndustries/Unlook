@@ -10,6 +10,7 @@ import logging
 import time
 import os
 import json
+import glob
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -533,6 +534,8 @@ class ScanView(QWidget):
         self.options_button.clicked.connect(self._show_options_dialog)
         config_layout.addRow("", self.options_button)
 
+
+
         top_layout.addWidget(config_group)
 
         # Riquadro destro: Controlli
@@ -561,8 +564,13 @@ class ScanView(QWidget):
         self.stop_scan_button.clicked.connect(self._stop_scan)
         self.stop_scan_button.setEnabled(False)  # Disabilitato finché non è in corso una scansione
 
+        self.test_scan_button = QPushButton("Test Capacità 3D")
+        self.test_scan_button.clicked.connect(self._test_scan_capability)
+        self.test_scan_button.setEnabled(False)  # Disabilitato finché non è selezionato uno scanner
+
         action_layout.addWidget(self.start_scan_button)
         action_layout.addWidget(self.stop_scan_button)
+        action_layout.addWidget(self.test_scan_button)  # Aggiungi il bottone al layout
 
         controls_layout.addLayout(action_layout)
 
@@ -653,6 +661,113 @@ class ScanView(QWidget):
         }
         return pattern_names.get(pattern_type, pattern_type)
 
+    def _test_scan_capability(self):
+        """Testa la capacità di scansione 3D del server."""
+        if not self.scanner_controller or not self.selected_scanner:
+            QMessageBox.warning(
+                self,
+                "Errore",
+                "Nessuno scanner selezionato. Seleziona uno scanner prima di eseguire il test."
+            )
+            return
+
+        # Aggiorna lo scanner selezionato
+        self.selected_scanner = self.scanner_controller.selected_scanner
+
+        # Verifica che lo scanner sia connesso
+        if not self.scanner_controller.is_connected(self.selected_scanner.device_id):
+            QMessageBox.warning(
+                self,
+                "Errore",
+                "Lo scanner selezionato non è connesso. Connettiti prima di eseguire il test."
+            )
+            return
+
+        # Aggiorna l'interfaccia
+        self.status_label.setText("Test delle capacità 3D in corso...")
+        self.progress_bar.setValue(10)
+
+        # Invia il comando di test capacità
+        try:
+            logger.info("Esecuzione test capacità 3D")
+
+            command_success = self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "CHECK_SCAN_CAPABILITY"
+            )
+
+            if not command_success:
+                self.status_label.setText("Errore nell'invio del comando di test")
+                QMessageBox.critical(
+                    self,
+                    "Errore",
+                    "Impossibile inviare il comando di test al server."
+                )
+                return
+
+            # Aggiorna la barra di progresso
+            self.progress_bar.setValue(50)
+
+            # Attendi la risposta
+            response = self.scanner_controller.wait_for_response(
+                self.selected_scanner.device_id,
+                "CHECK_SCAN_CAPABILITY",
+                timeout=10.0
+            )
+
+            if not response:
+                self.status_label.setText("Nessuna risposta dal server")
+                QMessageBox.critical(
+                    self,
+                    "Errore",
+                    "Il server non ha risposto al comando di test."
+                )
+                return
+
+            # Aggiorna la barra di progresso
+            self.progress_bar.setValue(100)
+
+            # Verifica lo stato della risposta
+            capability_available = response.get("scan_capability", False)
+            capability_details = response.get("scan_capability_details", {})
+
+            # Costruisci un messaggio dettagliato
+            if capability_available:
+                msg = "Il sistema dispone delle capacità di scansione 3D!\n\nDettagli:\n"
+
+                for key, value in capability_details.items():
+                    msg += f"- {key}: {value}\n"
+
+                self.status_label.setText("Capacità di scansione 3D disponibili")
+                QMessageBox.information(
+                    self,
+                    "Test Completato",
+                    msg
+                )
+
+                # Abilita il pulsante di avvio scansione
+                self.start_scan_button.setEnabled(True)
+            else:
+                error_msg = "Il sistema NON dispone delle capacità di scansione 3D.\n\nDettagli:\n"
+
+                for key, value in capability_details.items():
+                    error_msg += f"- {key}: {value}\n"
+
+                self.status_label.setText("Capacità di scansione 3D NON disponibili")
+                QMessageBox.warning(
+                    self,
+                    "Test Fallito",
+                    error_msg
+                )
+
+        except Exception as e:
+            logger.error(f"Errore nell'esecuzione del test: {e}")
+            self.status_label.setText(f"Errore: {str(e)}")
+            QMessageBox.critical(
+                self,
+                "Errore",
+                f"Si è verificato un errore durante il test:\n{str(e)}"
+            )
     def _select_output_dir(self):
         """Mostra un dialogo per selezionare la directory di output."""
         directory = QFileDialog.getExistingDirectory(
@@ -1513,8 +1628,9 @@ class ScanView(QWidget):
                         self.scanner_controller and
                         self.scanner_controller.is_connected(scanner.device_id))
 
-        # Abilita/disabilita il pulsante di avvio scansione
+        # Abilita/disabilita i pulsanti
         self.start_scan_button.setEnabled(is_connected)
+        self.test_scan_button.setEnabled(is_connected)  # Abilita/disabilita anche il pulsante di test
 
         # Aggiorna l'etichetta di stato
         if is_connected:

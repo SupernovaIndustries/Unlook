@@ -86,11 +86,19 @@ class ScanManager:
             logger.error(f"Errore nell'inizializzazione del controller di scansione: {e}")
 
     def _initialize_scan_controller(self):
-        """Inizializza il controller di luce strutturata."""
+        """
+        Inizializza il controller di luce strutturata.
+
+        Returns:
+            bool: True se inizializzazione riuscita, False altrimenti
+        """
         try:
             # Ottieni i parametri I2C dalla configurazione del server
             i2c_bus = int(os.environ.get("UNLOOK_I2C_BUS", 3))
-            i2c_address = int(os.environ.get("UNLOOK_I2C_ADDRESS", "0x36"), 16)
+            i2c_address = int(os.environ.get("UNLOOK_I2C_ADDRESS", "0x1b"), 16)  # Default a 0x1b per il tuo scanner
+
+            logger.info(
+                f"Tentativo di inizializzazione controller di scansione con bus={i2c_bus}, address=0x{i2c_address:02X}")
 
             # Crea il controller
             self._scan_controller = StructuredLightController(
@@ -101,11 +109,27 @@ class ScanManager:
             # Imposta la callback per l'acquisizione dei frame
             self._scan_controller.set_frame_capture_callback(self._capture_frame_callback)
 
-            logger.info(f"Controller di scansione inizializzato (bus={i2c_bus}, address=0x{i2c_address:02X})")
-            return True
+            # Verifica che il controller sia stato creato correttamente
+            if self._scan_controller:
+                logger.info(
+                    f"Controller di scansione inizializzato con successo (bus={i2c_bus}, address=0x{i2c_address:02X})")
+
+                # Prova a inizializzare il proiettore per verificare che funzioni
+                projector_test = self._scan_controller.initialize_projector()
+                if projector_test:
+                    logger.info("Test proiettore riuscito: proiettore inizializzato con successo")
+                else:
+                    logger.error(f"Test proiettore fallito: {self._scan_controller.error_message}")
+
+                return True
+            else:
+                logger.error("Errore: controller di scansione non inizializzato correttamente")
+                return False
 
         except Exception as e:
             logger.error(f"Errore nell'inizializzazione del controller di scansione: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
     def start_scan(self, scan_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -136,19 +160,25 @@ class ScanManager:
         try:
             # Verifica che il controller di scansione sia disponibile
             if not self._scan_controller:
+                logger.error("Il controller di scansione non è inizializzato")
                 success = self._initialize_scan_controller()
                 if not success:
+                    error_msg = "Impossibile inizializzare il controller di scansione"
+                    logger.error(error_msg)
                     return {
                         'status': 'error',
-                        'message': 'Impossibile inizializzare il controller di scansione',
+                        'message': error_msg,
                         'scan_id': None
                     }
 
             # Inizializza il controller proiettore se necessario
+            logger.info("Inizializzazione proiettore...")
             if not self._scan_controller.initialize_projector():
+                error_msg = f"Errore nell'inizializzazione del proiettore: {self._scan_controller.error_message}"
+                logger.error(error_msg)
                 return {
                     'status': 'error',
-                    'message': f'Errore nell\'inizializzazione del proiettore: {self._scan_controller.error_message}',
+                    'message': error_msg,
                     'scan_id': None
                 }
 
@@ -165,12 +195,23 @@ class ScanManager:
             }
 
             # Avvia la scansione in un thread separato
+            logger.info(f"Avvio scansione {scan_id} con configurazione: {self._scan_config}")
             self._scan_thread = threading.Thread(
                 target=self._scan_thread_function,
                 args=(scan_id, scan_dir)
             )
             self._scan_thread.daemon = True
             self._scan_thread.start()
+
+            # Verifica che il thread sia partito
+            if not self._scan_thread.is_alive():
+                logger.error("Il thread di scansione non è partito")
+                self._is_scanning = False
+                return {
+                    'status': 'error',
+                    'message': 'Errore nell\'avvio del thread di scansione',
+                    'scan_id': None
+                }
 
             return {
                 'status': 'success',
@@ -180,6 +221,8 @@ class ScanManager:
 
         except Exception as e:
             logger.error(f"Errore nell'avvio della scansione: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             self._is_scanning = False
 
             return {
@@ -265,6 +308,47 @@ class ScanManager:
         """
         return self._scan_config
 
+    def check_scan_capability(self) -> Dict[str, Any]:
+        """
+        Verifica la capacità di scansione 3D del sistema.
+
+        Returns:
+            Dizionario con lo stato delle capacità di scansione
+        """
+        result = {
+            'capability_available': self._scan_controller is not None,
+            'details': {}
+        }
+
+        if not self._scan_controller:
+            # Prova a inizializzare il controller
+            init_success = self._initialize_scan_controller()
+            result['capability_available'] = init_success
+            result['details']['controller_initialized'] = init_success
+
+            if not init_success:
+                result['details']['error'] = "Impossibile inizializzare il controller di scansione"
+                return result
+        else:
+            result['details']['controller_initialized'] = True
+
+        # Verifica il proiettore
+        try:
+            projector_success = self._scan_controller.initialize_projector()
+            result['details']['projector_initialized'] = projector_success
+
+            if not projector_success:
+                result['details']['projector_error'] = self._scan_controller.error_message
+        except Exception as e:
+            result['details']['projector_initialized'] = False
+            result['details']['projector_error'] = str(e)
+
+        # Verifica le camere
+        result['details']['cameras_available'] = len(self.server.cameras) > 0
+        result['details']['dual_camera'] = len(self.server.cameras) > 1
+
+        return result
+
     def _update_scan_config(self, scan_config: Dict[str, Any]):
         """
         Aggiorna la configurazione della scansione.
@@ -312,6 +396,7 @@ class ScanManager:
             )
 
             # Avvia la scansione
+            logger.info(f"Avvio scansione effettiva con pattern {pattern_type.name}")
             success = self._scan_controller.start_scan(
                 pattern_type=pattern_type,
                 num_patterns=self._scan_config['num_patterns'],
@@ -399,6 +484,8 @@ class ScanManager:
 
         except Exception as e:
             logger.error(f"Errore nel thread di scansione: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
             # Aggiorna le statistiche
             self._scan_stats['end_time'] = time.time()

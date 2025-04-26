@@ -927,6 +927,56 @@ class UnLookServer:
 
             # --- COMANDI DI SCANSIONE 3D ---
 
+            elif command_type == 'CHECK_SCAN_CAPABILITY':
+
+                # Aggiorna timestamp di attività client
+
+                self._last_client_activity = time.time()
+
+                self.client_connected = True
+
+                # Verifica le capacità di scansione 3D
+
+                has_scan_capability = self.scan_manager is not None
+
+                # Più dettagli sullo stato
+
+                scan_capability_details = {}
+
+                if has_scan_capability:
+
+                    try:
+
+                        # Ottieni informazioni dettagliate sulle capacità
+
+                        capability_result = self.scan_manager.check_scan_capability()
+
+                        response["scan_capability"] = capability_result["capability_available"]
+
+                        response["scan_capability_details"] = capability_result["details"]
+
+                    except Exception as e:
+
+                        logger.error(f"Errore nella verifica delle capacità di scansione: {e}")
+
+                        response["scan_capability"] = False
+
+                        response["scan_capability_details"] = {"error": str(e)}
+
+                else:
+
+                    response["scan_capability"] = False
+
+                    response["scan_capability_details"] = {
+
+                        "error": "Gestore di scansione 3D non disponibile",
+
+                        "i2c_bus": os.environ.get("UNLOOK_I2C_BUS", "non impostato"),
+
+                        "i2c_address": os.environ.get("UNLOOK_I2C_ADDRESS", "non impostato")
+
+                    }
+
             elif command_type == 'START_SCAN':
                 # Aggiorna timestamp di attività client
                 self._last_client_activity = time.time()
