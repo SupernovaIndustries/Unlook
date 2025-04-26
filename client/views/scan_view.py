@@ -455,6 +455,29 @@ class ScanView(QWidget):
         self.status_timer.timeout.connect(self._update_scan_status)
         self.status_timer.start(1000)  # Aggiorna ogni secondo
 
+        # Aggiungi un timer per il controllo della connessione
+        self.connection_timer = QTimer(self)
+        self.connection_timer.timeout.connect(self._check_connection_status)
+        self.connection_timer.start(2000)  # Controlla ogni 2 secondi
+
+    def _check_connection_status(self):
+        """Controlla periodicamente lo stato della connessione."""
+        if self.scanner_controller and self.selected_scanner:
+            # Verifica direttamente con il connection manager invece di usare scanner.status
+            is_connected = self.scanner_controller.is_connected(self.selected_scanner.device_id)
+
+            # Aggiorna l'interfaccia solo se lo stato è cambiato
+            if self.start_scan_button.isEnabled() != is_connected:
+                self.start_scan_button.setEnabled(is_connected)
+
+                if is_connected:
+                    self.status_label.setText(f"Connesso a {self.selected_scanner.name}")
+                else:
+                    self.status_label.setText("Scanner non connesso")
+
+                    # Se stiamo eseguendo una scansione ma lo scanner è disconnesso, ferma la scansione
+                    if self.is_scanning:
+                        self._handle_scan_error("Connessione con lo scanner persa")
     def _setup_ui(self):
         """Configura l'interfaccia utente."""
         # Layout principale

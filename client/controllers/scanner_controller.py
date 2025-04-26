@@ -9,7 +9,7 @@ import logging
 import time
 from typing import List, Optional, Callable, Dict, Any
 
-from PySide6.QtCore import QObject, Signal, Slot, Property, QSettings
+from PySide6.QtCore import QObject, Signal, Slot, Property, QSettings, QTimer
 
 # Importa i moduli del progetto in modo che funzionino sia con esecuzione diretta che tramite launcher
 try:
@@ -48,6 +48,20 @@ class ScannerController(QObject):
         self._connection_manager.connection_established.connect(self._on_connection_established)
         self._connection_manager.connection_failed.connect(self._on_connection_failed)
         self._connection_manager.connection_closed.connect(self._on_connection_closed)
+
+        # Aggiungi un timer per il keep-alive
+        self._keepalive_timer = QTimer(self)
+        self._keepalive_timer.timeout.connect(self._send_keepalive)
+        self._keepalive_timer.start(5000)  # Invia un ping ogni 5 secondi
+
+    def _send_keepalive(self):
+        """Invia un ping per mantenere attiva la connessione."""
+        if self._selected_scanner and self.is_connected(self._selected_scanner.device_id):
+            try:
+                self.send_command(self._selected_scanner.device_id, "PING", {"timestamp": time.time()})
+                logger.debug(f"Inviato ping a {self._selected_scanner.name}")
+            except Exception as e:
+                logger.error(f"Errore nell'invio del ping: {e}")
 
     def start_discovery(self):
         """Avvia la scoperta degli scanner nella rete locale."""
