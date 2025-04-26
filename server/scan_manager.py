@@ -68,8 +68,23 @@ class ScanManager:
         }
 
         # Directory per i dati di scansione
-        self._scan_data_dir = Path("/var/lib/unlook/scans")
+        scan_dir_env = os.environ.get("UNLOOK_SCAN_DIR")
+        if scan_dir_env:
+            self._scan_data_dir = Path(scan_dir_env)
+        else:
+            # Fallback alla directory relativa al progetto
+            self._scan_data_dir = Path(__file__).parent / "scans"  # server/scans
+
         self._scan_data_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Directory scansioni impostata a: {self._scan_data_dir}")
+
+        # Statistiche di scansione
+        self._scan_stats = {
+            'start_time': 0,
+            'end_time': 0,
+            'total_frames': 0,
+            'errors': 0
+        }
 
         # Statistiche di scansione
         self._scan_stats = {
