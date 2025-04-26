@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QTextEdit
 )
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QSize, QSettings
-from PySide6.QtGui import QIcon, QFont, QColor, QPixmap
+from PySide6.QtGui import QIcon, QFont, QColor, QPixmap, QImage
 
 # Importa il modulo di triangolazione
 try:
@@ -707,6 +707,20 @@ class ScanView(QWidget):
 
         except Exception as e:
             logger.error(f"Errore nell'aggiornamento dello stato della scansione: {e}")
+
+    def refresh_scanner_state(self):
+        """Aggiorna lo stato dello scanner quando la tab diventa attiva."""
+        if self.scanner_controller and self.scanner_controller.selected_scanner:
+            self.selected_scanner = self.scanner_controller.selected_scanner
+
+            # Aggiorna la UI in base allo stato corrente della connessione
+            connected = self.scanner_controller.is_connected(self.selected_scanner.device_id)
+            self.start_scan_button.setEnabled(connected)
+
+            if connected:
+                self.status_label.setText(f"Connesso a {self.selected_scanner.name}")
+            else:
+                self.status_label.setText("Scanner non connesso")
 
     def _start_scan(self):
         """Avvia una nuova scansione."""
@@ -1402,9 +1416,16 @@ class ScanView(QWidget):
         """Aggiorna lo scanner selezionato."""
         self.selected_scanner = scanner
 
+        # Verifica se lo scanner è connesso
+        is_connected = (scanner is not None and
+                        self.scanner_controller and
+                        self.scanner_controller.is_connected(scanner.device_id))
+
         # Abilita/disabilita il pulsante di avvio scansione
-        self.start_scan_button.setEnabled(
-            scanner is not None and
-            self.scanner_controller and
-            self.scanner_controller.is_connected(scanner.device_id)
-        )
+        self.start_scan_button.setEnabled(is_connected)
+
+        # Aggiorna l'etichetta di stato
+        if is_connected:
+            self.status_label.setText(f"Connesso a {scanner.name}")
+        else:
+            self.status_label.setText("Scanner non connesso")
