@@ -461,22 +461,31 @@ class ScanView(QWidget):
         self.connection_timer.start(2000)  # Controlla ogni 2 secondi
 
     def _check_connection_status(self):
-        """Controlla periodicamente lo stato della connessione."""
+        """
+        Controlla periodicamente lo stato della connessione.
+        Versione migliorata per non fermare la scansione se lo streaming è attivo.
+        """
         if self.scanner_controller and self.selected_scanner:
-            # Verifica direttamente con il connection manager invece di usare scanner.status
-            is_connected = self.scanner_controller.is_connected(self.selected_scanner.device_id)
+            # Verifica se lo scanner è in streaming (stato più affidabile)
+            streaming_active = self.selected_scanner.status == ScannerStatus.STREAMING
+
+            # Verifica la connessione con priorità allo streaming
+            is_connected = streaming_active or self.scanner_controller.is_connected(self.selected_scanner.device_id)
 
             # Aggiorna l'interfaccia solo se lo stato è cambiato
             if self.start_scan_button.isEnabled() != is_connected:
                 self.start_scan_button.setEnabled(is_connected)
 
                 if is_connected:
-                    self.status_label.setText(f"Connesso a {self.selected_scanner.name}")
+                    if streaming_active:
+                        self.status_label.setText(f"Connesso a {self.selected_scanner.name} (Streaming attivo)")
+                    else:
+                        self.status_label.setText(f"Connesso a {self.selected_scanner.name}")
                 else:
                     self.status_label.setText("Scanner non connesso")
 
-                    # Se stiamo eseguendo una scansione ma lo scanner è disconnesso, ferma la scansione
-                    if self.is_scanning:
+                    # Non fermare la scansione se lo streaming è ancora attivo
+                    if self.is_scanning and not streaming_active:
                         self._handle_scan_error("Connessione con lo scanner persa")
     def _setup_ui(self):
         """Configura l'interfaccia utente."""
@@ -734,7 +743,7 @@ class ScanView(QWidget):
     def refresh_scanner_state(self):
         """
         Aggiorna lo stato dello scanner quando la tab diventa attiva.
-        CORREZIONE: Aggiunto ping esplicito e verifica della connessione.
+        Versione migliorata per dare priorità allo streaming attivo.
         """
         if self.scanner_controller and self.scanner_controller.selected_scanner:
             self.selected_scanner = self.scanner_controller.selected_scanner
@@ -759,14 +768,22 @@ class ScanView(QWidget):
                         }
                     )
                 except Exception as e:
-                    logger.error(f"Errore nell'invio del ping di refresh: {e}")
+                    logger.debug(f"Errore nell'invio del ping di refresh: {e}")
 
-            # Aggiorna la UI in base allo stato corrente della connessione
-            connected = self.scanner_controller.is_connected(self.selected_scanner.device_id)
+            # Verifica se lo scanner è in streaming (stato più affidabile)
+            streaming_active = self.selected_scanner.status == ScannerStatus.STREAMING
+
+            # Usa la connessione effettiva o lo stato di streaming
+            connected = streaming_active or self.scanner_controller.is_connected(self.selected_scanner.device_id)
+
+            # Aggiorna la UI in base allo stato più affidabile
             self.start_scan_button.setEnabled(connected)
 
             if connected:
-                self.status_label.setText(f"Connesso a {self.selected_scanner.name}")
+                if streaming_active:
+                    self.status_label.setText(f"Connesso a {self.selected_scanner.name} (Streaming attivo)")
+                else:
+                    self.status_label.setText(f"Connesso a {self.selected_scanner.name}")
             else:
                 self.status_label.setText("Scanner non connesso")
 
