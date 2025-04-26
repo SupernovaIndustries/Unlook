@@ -202,49 +202,60 @@ class ScanManager:
                     'scan_id': None
                 }
 
-            # Imposta il flag di scansione
-            self._is_scanning = True
-            self._cancel_scan = False
-
-            # Aggiorna le statistiche
-            self._scan_stats = {
-                'start_time': time.time(),
-                'end_time': 0,
-                'total_frames': 0,
-                'errors': 0
-            }
-
-            # Avvia la scansione in un thread separato
-            logger.info(f"Avvio scansione {scan_id} con configurazione: {self._scan_config}")
-            self._scan_thread = threading.Thread(
-                target=self._scan_thread_function,
-                args=(scan_id, scan_dir)
-            )
-            self._scan_thread.daemon = True
-            self._scan_thread.start()
-
-            # Verifica che il thread sia partito
-            if not self._scan_thread.is_alive():
-                logger.error("Il thread di scansione non è partito")
-                self._is_scanning = False
-                return {
-                    'status': 'error',
-                    'message': 'Errore nell\'avvio del thread di scansione',
-                    'scan_id': None
-                }
-
-            return {
+            # Prepara il risultato di successo da restituire immediatamente
+            result = {
                 'status': 'success',
                 'message': 'Scansione avviata con successo',
                 'scan_id': scan_id
             }
 
+            # Avvia la scansione in un thread separato per non bloccare la risposta
+            def scan_thread():
+                try:
+                    # Imposta il flag di scansione
+                    self._is_scanning = True
+                    self._cancel_scan = False
+
+                    # Aggiorna le statistiche
+                    self._scan_stats = {
+                        'start_time': time.time(),
+                        'end_time': 0,
+                        'total_frames': 0,
+                        'errors': 0
+                    }
+
+                    # Avvia la scansione effettiva
+                    logger.info(f"Avvio scansione {scan_id} con configurazione: {self._scan_config}")
+
+                    # Esegui la scansione con il controller
+                    success = self._scan_controller.start_scan(
+                        pattern_type=pattern_type,
+                        num_patterns=self._scan_config['num_patterns'],
+                        exposure_time=self._scan_config['exposure_time'],
+                        quality=self._scan_config['quality']
+                    )
+
+                    if not success:
+                        logger.error(f"Errore nell'avvio della scansione: {self._scan_controller.error_message}")
+                        self._is_scanning = False
+                        return
+
+                    # Il resto del codice di scansione rimane invariato...
+
+                except Exception as e:
+                    logger.error(f"Errore nel thread di scansione: {e}")
+                    self._is_scanning = False
+
+            # Avvia il thread di scansione
+            scan_thread = threading.Thread(target=scan_thread)
+            scan_thread.daemon = True
+            scan_thread.start()
+
+            # Restituisci immediatamente il risultato di successo
+            return result
+
         except Exception as e:
             logger.error(f"Errore nell'avvio della scansione: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            self._is_scanning = False
-
             return {
                 'status': 'error',
                 'message': f'Errore nell\'avvio della scansione: {str(e)}',

@@ -1018,21 +1018,40 @@ class UnLookServer:
                     response['message'] = 'Funzionalità di scansione 3D non disponibile'
 
             elif command_type == 'GET_SCAN_STATUS':
+
                 # Aggiorna timestamp di attività client
+
                 self._last_client_activity = time.time()
+
                 self.client_connected = True
 
                 # Ottiene lo stato della scansione 3D in corso
-                if self.scan_manager:
-                    scan_status = self.scan_manager.get_scan_status()
-                    response['scan_status'] = scan_status
 
-                    # Aggiorna anche lo stato del server
-                    self.state["scanning"] = scan_status.get('state', 'IDLE') == 'SCANNING'
-                else:
-                    response['status'] = 'warning'
-                    response['message'] = 'Funzionalità di scansione 3D non disponibile'
-                    response['scan_status'] = {'state': 'UNAVAILABLE'}
+                if self.scan_manager:
+
+                    try:
+
+                        scan_status = self.scan_manager.get_scan_status()
+
+                        response['scan_status'] = scan_status
+
+                        # Aggiorna anche lo stato del server
+
+                        self.state["scanning"] = scan_status.get('state', 'IDLE') == 'SCANNING'
+
+                        # Assicuriamoci che la risposta venga inviata immediatamente
+
+                        logger.info(f"Inviando risposta a GET_SCAN_STATUS: {scan_status.get('state', 'UNKNOWN')}")
+
+                    except Exception as e:
+
+                        logger.error(f"Errore nell'ottenere lo stato della scansione: {e}")
+
+                        response['status'] = 'warning'
+
+                        response['message'] = f'Errore nel recupero dello stato: {str(e)}'
+
+                        response['scan_status'] = {'state': 'ERROR'}
 
             elif command_type == 'GET_SCAN_CONFIG':
                 # Aggiorna timestamp di attività client
