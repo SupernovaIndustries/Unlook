@@ -13,6 +13,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+from client.models.scanner_model import Scanner, ScannerStatus
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
@@ -866,10 +867,36 @@ class ScanView(QWidget):
             response = self.scanner_controller.wait_for_response(
                 self.selected_scanner.device_id,
                 "START_SCAN",
-                timeout=5.0
+                timeout=15.0
             )
 
             if not response:
+                # Aggiungiamo un'ulteriore verifica per vedere se la scansione è in corso comunque
+                time.sleep(1.0)  # Breve pausa
+
+                # Verifica lo stato attuale
+                check_status_success = self.scanner_controller.send_command(
+                    self.selected_scanner.device_id,
+                    "GET_SCAN_STATUS"
+                )
+
+                if check_status_success:
+                    status_response = self.scanner_controller.wait_for_response(
+                        self.selected_scanner.device_id,
+                        "GET_SCAN_STATUS",
+                        timeout=3.0
+                    )
+
+                    if status_response and status_response.get("scan_status", {}).get("state") == "SCANNING":
+                        # La scansione è iniziata nonostante il timeout
+                        self.current_scan_id = f"scan_{int(time.time())}"  # ID generico
+                        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Scansione avviata, ma nessuna conferma ricevuta\n"
+                        self.is_scanning = True
+                        self.scan_started.emit(scan_config)
+                        self.view_log_button.setEnabled(True)
+                        return
+
+                # Se non siamo riusciti a confermare lo stato
                 self._handle_scan_error("Nessuna risposta dal server")
                 return
 

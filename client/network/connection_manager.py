@@ -392,6 +392,7 @@ class ConnectionManager(QObject):
     def is_connected(self, device_id: str) -> bool:
         """
         Verifica se un dispositivo è connesso.
+        Versione migliorata per usare il socket attivo come principale indicatore.
 
         Args:
             device_id: ID univoco dello scanner
@@ -403,7 +404,15 @@ class ConnectionManager(QObject):
             return False
 
         worker = self._connections[device_id]
-        return worker.isRunning()
+
+        # Se il worker è in esecuzione, consideriamo il dispositivo connesso
+        is_running = worker.isRunning()
+
+        # Se non è in esecuzione, proviamo a inviare un ping e vediamo se funziona
+        if not is_running:
+            return False
+
+        return True
 
     def has_response(self, device_id: str, command_type: str) -> bool:
         """

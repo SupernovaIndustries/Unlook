@@ -1334,7 +1334,7 @@ class DualStreamView(QWidget):
         self.apply_settings_button.setEnabled(is_connected)
 
     def stop_streaming(self):
-        """Ferma lo streaming video."""
+        """Ferma lo streaming video con gestione migliorata dello stato del dispositivo."""
         if not self._streaming:
             return
 
@@ -1358,13 +1358,21 @@ class DualStreamView(QWidget):
             if self._connection_manager.is_connected(self._scanner.device_id):
                 self._connection_manager.send_message(self._scanner.device_id, "STOP_STREAM")
 
+                # Invia un PING esplicito per verificare che la connessione sia ancora attiva
+                time.sleep(0.5)  # Breve pausa
+                ping_success = self._connection_manager.send_message(
+                    self._scanner.device_id,
+                    "PING",
+                    {"timestamp": time.time()}
+                )
+
+                # Se il ping ha successo, mantieni lo stato CONNECTED
+                if ping_success and self._scanner.status == ScannerStatus.STREAMING:
+                    self._scanner.status = ScannerStatus.CONNECTED
+
         # Pulisci le viste
         for view in self.stream_views:
             view.clear()
-
-        # Reimposta lo stato dello scanner se presente
-        if self._scanner and self._scanner.status == ScannerStatus.STREAMING:
-            self._scanner.status = ScannerStatus.CONNECTED
 
         # Reimposta lo stato di streaming
         self._streaming = False
@@ -1372,6 +1380,11 @@ class DualStreamView(QWidget):
 
         # Aggiorna i pulsanti dell'interfaccia
         self._update_ui_buttons()
+
+        # Notifica il controller dello scanner del cambio di stato
+        if self._scanner and hasattr(self, 'scanner_controller') and self.scanner_controller:
+            # Forza un aggiornamento dell'interfaccia utente
+            self.scanner_controller.scanners_changed.emit()
 
     def is_streaming(self) -> bool:
         """Verifica se lo streaming è attivo."""
