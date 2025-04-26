@@ -209,6 +209,19 @@ class ScanManager:
                 'scan_id': scan_id
             }
 
+            # Converti il tipo di pattern
+            pattern_type_map = {
+                'PROGRESSIVE': ScanPatternType.PROGRESSIVE,
+                'GRAY_CODE': ScanPatternType.GRAY_CODE,
+                'BINARY_CODE': ScanPatternType.BINARY_CODE,
+                'PHASE_SHIFT': ScanPatternType.PHASE_SHIFT
+            }
+
+            pattern_type = pattern_type_map.get(
+                self._scan_config['pattern_type'],
+                ScanPatternType.PROGRESSIVE
+            )
+
             # Avvia la scansione in un thread separato per non bloccare la risposta
             def scan_thread():
                 try:
