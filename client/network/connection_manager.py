@@ -417,6 +417,7 @@ class ConnectionManager(QObject):
     def has_response(self, device_id: str, command_type: str) -> bool:
         """
         Verifica se è disponibile una risposta per un comando specifico.
+        Versione migliorata per cercare anche risposte con suffissi o con original_type.
 
         Args:
             device_id: ID univoco dello scanner
@@ -426,11 +427,29 @@ class ConnectionManager(QObject):
             True se è disponibile una risposta, False altrimenti
         """
         with QMutexLocker(self._responses_mutex):
-            return device_id in self._responses and command_type in self._responses[device_id]
+            if device_id not in self._responses:
+                return False
+
+            # Verifica diretta
+            if command_type in self._responses[device_id]:
+                return True
+
+            # Verifica con suffisso "_response"
+            response_type = f"{command_type}_response"
+            if response_type in self._responses[device_id]:
+                return True
+
+            # Verifica basata sul campo original_type
+            for resp_data in self._responses[device_id].values():
+                if isinstance(resp_data, dict) and resp_data.get("original_type") == command_type:
+                    return True
+
+            return False
 
     def get_response(self, device_id: str, command_type: str) -> Optional[Dict[str, Any]]:
         """
         Restituisce la risposta per un comando specifico e la rimuove dalla coda.
+        Versione migliorata per una ricerca più flessibile.
 
         Args:
             device_id: ID univoco dello scanner
@@ -440,9 +459,24 @@ class ConnectionManager(QObject):
             Dizionario con la risposta o None se non disponibile
         """
         with QMutexLocker(self._responses_mutex):
-            if device_id in self._responses and command_type in self._responses[device_id]:
-                response = self._responses[device_id].pop(command_type)
-                return response
+            if device_id in self._responses:
+                # Prima verifica per il tipo esatto
+                if command_type in self._responses[device_id]:
+                    response = self._responses[device_id].pop(command_type)
+                    return response
+
+                # Poi controlla se c'è una risposta con il suffisso "_response"
+                response_type = f"{command_type}_response"
+                if response_type in self._responses[device_id]:
+                    response = self._responses[device_id].pop(response_type)
+                    return response
+
+                # Infine verifica se c'è una risposta con original_type che corrisponde
+                for resp_type, resp_data in list(self._responses[device_id].items()):
+                    if isinstance(resp_data, dict) and resp_data.get("original_type") == command_type:
+                        response = self._responses[device_id].pop(resp_type)
+                        return response
+
             return None
 
     def _cleanup_connection(self, device_id: str):

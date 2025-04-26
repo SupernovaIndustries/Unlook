@@ -18,7 +18,7 @@ try:
 except ImportError:
     # Fallback per esecuzione diretta
     from client.models.scanner_model import Scanner, ScannerManager, ScannerStatus
-    from network.connection_manager import ConnectionManager
+    from client.network.connection_manager import ConnectionManager
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +216,7 @@ class ScannerController(QObject):
         Args:
             device_id: ID univoco dello scanner
             command_type: Tipo di comando per cui si attende la risposta
-            timeout: Timeout in secondi (default: 5 secondi)
+            timeout: Timeout in secondi (default: 30 secondi)
 
         Returns:
             Dizionario con la risposta o None se non ricevuta entro il timeout
@@ -228,12 +228,47 @@ class ScannerController(QObject):
         try:
             # Attendi che la risposta sia disponibile
             start_time = time.time()
+            check_interval = 0.2  # Controlla ogni 200ms
             while (time.time() - start_time) < timeout:
                 if self._connection_manager.has_response(device_id, command_type):
-                    return self._connection_manager.get_response(device_id, command_type)
-                time.sleep(0.1)  # Piccola pausa per evitare di sovraccaricare la CPU
+                    response = self._connection_manager.get_response(device_id, command_type)
+                    logger.info(f"Risposta ricevuta per comando {command_type}: {response}")
+                    return response
+
+                # Aggiungiamo un tentativo di ping esplicito ogni 3 secondi
+                elapsed = time.time() - start_time
+                if elapsed > 3 and elapsed % 3 < check_interval:
+                    try:
+                        self.send_command(device_id, "PING", {"timestamp": time.time(), "waiting_for": command_type})
+                        logger.debug(f"Inviato ping durante attesa risposta a {command_type}")
+                    except Exception as ping_err:
+                        logger.debug(f"Errore ping durante attesa: {ping_err}")
+
+                time.sleep(check_interval)
 
             logger.warning(f"Timeout nell'attesa della risposta a {command_type}")
+
+            # Verifica se lo scanner è ancora connesso
+            is_still_connected = self.is_connected(device_id)
+            logger.info(f"Controllo connessione dopo timeout: connesso={is_still_connected}")
+
+            # Prova un'ultima richiesta diretta
+            if is_still_connected:
+                try:
+                    if command_type == "START_SCAN":
+                        # Per START_SCAN, verifica lo stato della scansione
+                        status_result = self.send_command(device_id, "GET_SCAN_STATUS")
+                        if status_result:
+                            logger.info("Richiesto stato scansione dopo timeout di START_SCAN")
+                    elif command_type == "GET_SCAN_STATUS":
+                        # Per GET_SCAN_STATUS, aspetta un po' e riprova
+                        time.sleep(1.0)
+                        status_result = self.send_command(device_id, "GET_SCAN_STATUS")
+                        if status_result:
+                            logger.info("Ritentata richiesta stato scansione dopo timeout")
+                except Exception as retry_err:
+                    logger.debug(f"Errore nel tentativo aggiuntivo: {retry_err}")
+
             return None
         except Exception as e:
             logger.error(f"Errore nell'attesa della risposta a {command_type}: {e}")

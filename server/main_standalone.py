@@ -766,12 +766,16 @@ class UnLookServer:
             Dizionario di risposta
         """
         command_type = command.get('type', '')
-        logger.info(f"Comando ricevuto: {command_type}")
+        command_id = command.get('id', str(time.time()))  # Usa un ID per tracciare la richiesta
+        logger.info(f"Comando ricevuto: {command_type} (ID: {command_id})")
 
         # Prepara una risposta base
         response = {
             "status": "ok",
-            "type": f"{command_type}_response"
+            "type": f"{command_type}_response",
+            "original_type": command_type,
+            "id": command_id,
+            "timestamp": time.time()
         }
 
         try:
@@ -787,7 +791,6 @@ class UnLookServer:
                 if 'client_ip' in command:
                     self.client_ip = command.get('client_ip')
                     logger.debug(f"Ping ricevuto dal client {self.client_ip}, aggiornato timestamp attività")
-
 
             elif command_type == 'GET_STATUS':
                 # Aggiorna lo stato
@@ -1050,12 +1053,16 @@ class UnLookServer:
                 response['status'] = 'error'
                 response['error'] = f'Comando sconosciuto: {command_type}'
 
+            logger.debug(f"Risposta a {command_type} (ID: {command_id}): {json.dumps(response)[:200]}...")
+            return response
+
         except Exception as e:
             logger.error(f"Errore nell'elaborazione del comando {command_type}: {e}")
             response['status'] = 'error'
             response['error'] = str(e)
+            return response
 
-        return response
+
 
     def _check_client_activity(self):
         """
