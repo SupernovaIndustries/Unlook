@@ -726,12 +726,20 @@ class ScanView(QWidget):
 
         # Verifica che lo scanner sia connesso
         if not self.scanner_controller.is_connected(self.selected_scanner.device_id):
-            QMessageBox.warning(
-                self,
-                "Errore",
-                "Lo scanner selezionato non è connesso. Connettiti prima di avviare la scansione."
-            )
-            return
+            # Se lo scanner non è connesso, proviamo a riconnetterci
+            logger.info(f"Scanner {self.selected_scanner.name} non connesso, tentativo di riconnessione automatico")
+            success = self.scanner_controller.connect_to_scanner(self.selected_scanner.device_id)
+
+            if not success:
+                QMessageBox.warning(
+                    self,
+                    "Errore",
+                    "Lo scanner selezionato non è connesso. Connettiti prima di avviare la scansione."
+                )
+                return
+
+            # Breve pausa per assicurarsi che la connessione sia stabilita
+            time.sleep(0.5)
 
         # Prepara il percorso della scansione
         scan_name = self.scan_name_edit.text()

@@ -489,6 +489,10 @@ class MainWindow(QMainWindow):
                 if hasattr(self,
                            'streaming_widget') and self.streaming_widget and not self.streaming_widget.is_streaming():
                     self.streaming_widget.start_streaming(selected_scanner)
+        elif index == self.TabIndex.SCANNING.value:
+            # Aggiorna lo stato dello scanner nella tab di scansione
+            if hasattr(self, 'scanning_widget') and self.scanning_widget:
+                self.scanning_widget.refresh_scanner_state()
 
     @Slot()
     def _toggle_discovery(self):
