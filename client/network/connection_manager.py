@@ -103,6 +103,34 @@ class ConnectionWorker(QThread):
             self._send_queue.append(data)
             return True
 
+    def _send_keep_alive(self):
+        """
+        Invia un messaggio PING periodico al server per mantenere viva la connessione.
+        """
+        if self._streaming and self._scanner and self._connection_manager:
+            try:
+                # Aggiungi l'IP del client nel messaggio per aiutare il server a tracciare
+                self._connection_manager.send_message(
+                    self._scanner.device_id,
+                    "PING",
+                    {"timestamp": time.time(), "client_ip": self._get_local_ip()}
+                )
+                logger.debug("Messaggio keep-alive inviato")
+            except Exception as e:
+                logger.warning(f"Errore nell'invio del messaggio keep-alive: {e}")
+
+        # Metodo helper per ottenere l'IP locale
+        def _get_local_ip(self):
+            """Ottiene l'indirizzo IP locale della macchina client."""
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+                s.close()
+                return ip
+            except:
+                return "127.0.0.1"
+
     def _process_send_queue(self):
         """Processa la coda dei messaggi da inviare."""
         with QMutexLocker(self._mutex):

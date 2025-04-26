@@ -780,7 +780,13 @@ class UnLookServer:
                 response['timestamp'] = time.time()
                 # Aggiorna timestamp di attività client
                 self._last_client_activity = time.time()
-                self.client_ip = command.get('client_ip')
+                # Assicurati di salvare l'IP del client
+                if 'client_ip' in command:
+                    self.client_ip = command.get('client_ip')
+                else:
+                    # Se non fornito, estrai dall'indirizzo remoto
+                    # (questo potrebbe richiedere modifiche appropriate al sistema di messaggistica)
+                    self.client_ip = "client_addr"  # Sostituisci con l'indirizzo remoto effettivo
                 self.client_connected = True
 
             elif command_type == 'GET_STATUS':
@@ -1012,8 +1018,8 @@ class UnLookServer:
         current_time = time.time()
         time_since_last_activity = current_time - self._last_client_activity
 
-        # Se non si hanno notizie dal client per più di 10 secondi, considerarlo disconnesso
-        if time_since_last_activity > 10.0:
+        # Aumentiamo il timeout da 10 a 30 secondi
+        if time_since_last_activity > 30.0:
             logger.info(
                 f"Il client {self.client_ip} risulta inattivo da {time_since_last_activity:.1f} secondi, considerato disconnesso.")
 

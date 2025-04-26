@@ -736,6 +736,13 @@ class ScanView(QWidget):
         if self.scanner_controller and self.scanner_controller.selected_scanner:
             self.selected_scanner = self.scanner_controller.selected_scanner
 
+            # Invia un ping esplicito per verificare la connessione e aggiornare lo stato
+            self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "PING",
+                {"timestamp": time.time()}
+            )
+
             # Aggiorna la UI in base allo stato corrente della connessione
             connected = self.scanner_controller.is_connected(self.selected_scanner.device_id)
             self.start_scan_button.setEnabled(connected)

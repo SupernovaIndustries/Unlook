@@ -147,11 +147,27 @@ class ScannerController(QObject):
         return self._selected_scanner
 
     def is_connected(self, device_id: str) -> bool:
-        """Verifica se un determinato scanner è connesso."""
+        """
+        Verifica se un determinato scanner è connesso con controllo migliorato.
+        """
         scanner = self._scanner_manager.get_scanner(device_id)
         if not scanner:
             return False
-        return scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
+
+        # Verifica lo stato della connessione
+        is_connected = scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
+
+        # Verifica anche con il connection manager
+        if is_connected and hasattr(self, '_connection_manager'):
+            is_connected = self._connection_manager.is_connected(device_id)
+
+            # Se c'è discrepanza, aggiorna lo stato dello scanner
+            if not is_connected and scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING):
+                scanner.status = ScannerStatus.DISCONNECTED
+                logger.warning(
+                    f"Discrepanza rilevata: scanner {scanner.name} considerato connesso ma non è raggiungibile")
+
+        return is_connected
 
     def send_command(self, device_id: str, command_type: str, payload: Dict[str, Any] = None) -> bool:
         """
