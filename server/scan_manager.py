@@ -110,7 +110,14 @@ class ScanManager:
         try:
             # Ottieni i parametri I2C dalla configurazione del server
             i2c_bus = int(os.environ.get("UNLOOK_I2C_BUS", 3))
-            i2c_address = int(os.environ.get("UNLOOK_I2C_ADDRESS", "0x1b"), 16)  # Default a 0x1b per il tuo scanner
+
+            # Gestisci correttamente l'indirizzo I2C in formato stringa esadecimale
+            i2c_address_str = os.environ.get("UNLOOK_I2C_ADDRESS", "0x1b")
+            try:
+                i2c_address = int(i2c_address_str, 16) if i2c_address_str.startswith("0x") else int(i2c_address_str)
+            except ValueError:
+                logger.error(f"Indirizzo I2C non valido: {i2c_address_str}, uso il valore predefinito 0x1b")
+                i2c_address = 0x1b
 
             logger.info(
                 f"Tentativo di inizializzazione controller di scansione con bus={i2c_bus}, address=0x{i2c_address:02X}")
@@ -133,14 +140,6 @@ class ScanManager:
             if self._scan_controller:
                 logger.info(
                     f"Controller di scansione inizializzato con successo (bus={i2c_bus}, address=0x{i2c_address:02X})")
-
-                # Prova a inizializzare il proiettore per verificare che funzioni
-                projector_test = self._scan_controller.initialize_projector()
-                if projector_test:
-                    logger.info("Test proiettore riuscito: proiettore inizializzato con successo")
-                else:
-                    logger.error(f"Test proiettore fallito: {self._scan_controller.error_message}")
-
                 return True
             else:
                 logger.error("Errore: controller di scansione non inizializzato correttamente")
@@ -547,39 +546,69 @@ class ScanManager:
         Returns:
             Dizionario con lo stato delle capacità di scansione
         """
-        result = {
-            'capability_available': self._scan_controller is not None,
-            'details': {}
-        }
-
-        if not self._scan_controller:
-            # Prova a inizializzare il controller
-            init_success = self._initialize_scan_controller()
-            result['capability_available'] = init_success
-            result['details']['controller_initialized'] = init_success
-
-            if not init_success:
-                result['details']['error'] = "Impossibile inizializzare il controller di scansione"
-                return result
-        else:
-            result['details']['controller_initialized'] = True
-
-        # Verifica il proiettore
         try:
-            projector_success = self._scan_controller.initialize_projector()
-            result['details']['projector_initialized'] = projector_success
+            # Verifica le capacità di scansione
+            result = {
+                "capability_available": False,  # Sarà True solo se tutte le verifiche passano
+                "details": {
+                    "i2c_bus": os.environ.get("UNLOOK_I2C_BUS", "non impostato"),
+                    "i2c_address": os.environ.get("UNLOOK_I2C_ADDRESS", "non impostato")
+                }
+            }
 
-            if not projector_success:
-                result['details']['projector_error'] = self._scan_controller.error_message
+            # Verifica il controller
+            if not self._scan_controller:
+                logger.info("Tentativo di inizializzazione controller di scansione")
+                try:
+                    init_success = self._initialize_scan_controller()
+                    result["details"]["controller_initialized"] = init_success
+                    if not init_success:
+                        result["details"]["error"] = "Impossibile inizializzare il controller di scansione"
+                        return result
+                except Exception as e:
+                    logger.error(f"Errore nell'inizializzazione del controller: {e}")
+                    result["details"]["controller_initialized"] = False
+                    result["details"]["error"] = f"Errore nell'inizializzazione del controller: {str(e)}"
+                    return result
+            else:
+                result["details"]["controller_initialized"] = True
+
+            # Verifica il proiettore
+            try:
+                logger.info("Tentativo di inizializzazione proiettore")
+                projector_success = self._scan_controller.initialize_projector()
+                result["details"]["projector_initialized"] = projector_success
+
+                if not projector_success:
+                    result["details"]["projector_error"] = self._scan_controller.error_message
+                    return result
+            except Exception as e:
+                logger.error(f"Errore nell'inizializzazione del proiettore: {e}")
+                result["details"]["projector_initialized"] = False
+                result["details"]["projector_error"] = str(e)
+                return result
+
+            # Verifica le camere
+            cameras_available = len(self.server.cameras) > 0
+            result["details"]["cameras_available"] = cameras_available
+            result["details"]["dual_camera"] = len(self.server.cameras) > 1
+
+            if not cameras_available:
+                result["details"]["camera_error"] = "Nessuna camera disponibile"
+                return result
+
+            # Se tutto è OK, imposta capability_available a True
+            result["capability_available"] = True
+            return result
+
         except Exception as e:
-            result['details']['projector_initialized'] = False
-            result['details']['projector_error'] = str(e)
-
-        # Verifica le camere
-        result['details']['cameras_available'] = len(self.server.cameras) > 0
-        result['details']['dual_camera'] = len(self.server.cameras) > 1
-
-        return result
+            logger.error(f"Errore nella verifica delle capacità di scansione: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {
+                "capability_available": False,
+                "details": {"error": str(e)}
+            }
 
     def _update_scan_config(self, scan_config: Dict[str, Any]):
         """

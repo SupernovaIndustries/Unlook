@@ -981,23 +981,95 @@ class UnLookServer:
                     }
 
             elif command_type == 'START_SCAN':
+
                 # Aggiorna timestamp di attività client
+
                 self._last_client_activity = time.time()
+
                 self.client_connected = True
 
                 # Avvia una scansione 3D
+
                 if self.scan_manager:
-                    scan_config = command.get('scan_config', None)
-                    scan_result = self.scan_manager.start_scan(scan_config)
 
-                    # Aggiorna lo stato del server
-                    self.state["scanning"] = scan_result['status'] == 'success'
+                    try:
 
-                    # Restituisci il risultato
-                    response.update(scan_result)
+                        # Prima verifica se la scansione 3D è supportata
+
+                        capability_check = self.scan_manager.check_scan_capability()
+
+                        if not capability_check.get('capability_available', False):
+
+                            # Scansione non supportata
+
+                            error_details = capability_check.get('details', {})
+
+                            error_msg = "Lo scanner non supporta la scansione 3D"
+
+                            if 'error' in error_details:
+
+                                error_msg += f": {error_details['error']}"
+
+                            elif 'projector_error' in error_details:
+
+                                error_msg += f": {error_details['projector_error']}"
+
+                            response['status'] = 'error'
+
+                            response['message'] = error_msg
+
+                            logger.error(f"Tentativo di scansione fallito: {error_msg}")
+
+                            return response
+
+                        # Se siamo qui, la scansione è supportata
+
+                        scan_config = command.get('scan_config', None)
+
+                        scan_result = self.scan_manager.start_scan(scan_config)
+
+                        # Aggiorna lo stato del server
+
+                        self.state["scanning"] = scan_result['status'] == 'success'
+
+                        # Restituisci il risultato
+
+                        response.update(scan_result)
+
+                        # Log di successo o fallimento
+
+                        if scan_result['status'] == 'success':
+
+                            logger.info(f"Scansione avviata con ID: {scan_result.get('scan_id')}")
+
+                        else:
+
+                            logger.error(f"Avvio scansione fallito: {scan_result.get('message')}")
+
+
+                    except Exception as e:
+
+                        # Log dettagliato dell'errore
+
+                        logger.error(f"Errore nell'avvio della scansione: {str(e)}")
+
+                        import traceback
+
+                        logger.error(f"Traceback: {traceback.format_exc()}")
+
+                        # Aggiorna la risposta con l'errore
+
+                        response['status'] = 'error'
+
+                        response['message'] = f"Errore nell'avvio della scansione: {str(e)}"
+
                 else:
+
                     response['status'] = 'error'
+
                     response['message'] = 'Funzionalità di scansione 3D non disponibile'
+
+                    logger.error("Tentativo di avvio scansione senza scan_manager disponibile")
 
             elif command_type == 'STOP_SCAN':
                 # Aggiorna timestamp di attività client

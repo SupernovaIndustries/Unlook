@@ -227,8 +227,10 @@ class ScannerController(QObject):
 
         try:
             # Per i comandi di scansione, usiamo un timeout più lungo
-            if command_type in ["START_SCAN", "STOP_SCAN", "GET_SCAN_STATUS"]:
+            if command_type.startswith("START_SCAN") or command_type.startswith("STOP_SCAN") or command_type.startswith(
+                    "GET_SCAN") or command_type == "CHECK_SCAN_CAPABILITY":
                 effective_timeout = max(60.0, timeout)  # Minimo 60 secondi per comandi di scansione
+                logger.info(f"Usando timeout esteso di {effective_timeout}s per comando {command_type}")
             else:
                 effective_timeout = timeout
 
@@ -238,7 +240,7 @@ class ScannerController(QObject):
             while (time.time() - start_time) < effective_timeout:
                 if self._connection_manager.has_response(device_id, command_type):
                     response = self._connection_manager.get_response(device_id, command_type)
-                    logger.info(f"Risposta ricevuta per comando {command_type}: {response}")
+                    logger.info(f"Risposta ricevuta per comando {command_type}")
                     return response
 
                 # Aggiungiamo un tentativo di ping esplicito ogni 3 secondi
