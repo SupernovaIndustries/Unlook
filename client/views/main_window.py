@@ -87,9 +87,6 @@ class MainWindow(QMainWindow):
 
         # Carica le impostazioni
         self._load_settings()
-        
-        # Disabilita la scheda di scansione all'avvio
-        self.central_tabs.setTabEnabled(self.TabIndex.SCANNING.value, False)
 
         # Inizializza l'interfaccia utente
         self._setup_ui()
@@ -146,10 +143,11 @@ class MainWindow(QMainWindow):
         # Aggiungi le schede
         self.central_tabs.addTab(self.scanner_widget, "Scanner")
         self.central_tabs.addTab(self.streaming_widget, "Streaming")
-        self.central_tabs.addTab(self.scanning_widget, "Scansione 3D")
+        self.central_tabs.addTab(self.scanning_widget, "Scansione 3D")  # Nuova scheda
 
         # Disabilita le schede che richiedono una connessione attiva
         self.central_tabs.setTabEnabled(self.TabIndex.STREAMING.value, False)
+        self.central_tabs.setTabEnabled(self.TabIndex.SCANNING.value, False)
 
         # Configura la barra di stato
         self.status_bar = QStatusBar()
@@ -407,13 +405,16 @@ class MainWindow(QMainWindow):
 
         # Abilita le schede che richiedono una connessione
         self.central_tabs.setTabEnabled(self.TabIndex.STREAMING.value, True)
-        self.central_tabs.setTabEnabled(self.TabIndex.SCANNING.value, True)
+        self.central_tabs.setTabEnabled(self.TabIndex.SCANNING.value, True)  # Abilita la scheda di scansione
 
         # Cambia il testo del pulsante di connessione
         self.action_toggle_connection.setText("Disconnetti")
 
         # Passa alla scheda di streaming
         self.central_tabs.setCurrentIndex(self.TabIndex.STREAMING.value)
+
+        # Aggiorna lo scanner selezionato nella vista di scansione
+        self.scanning_widget.update_selected_scanner(scanner)
 
     @Slot(Scanner)
     def _on_scanner_disconnected(self, scanner: Scanner):
