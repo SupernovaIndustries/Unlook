@@ -56,14 +56,14 @@ class StructuredLightController:
 
     def __init__(self,
                  i2c_bus: int = 3,
-                 i2c_address: int = 0x36,
+                 i2c_address: int = 0x1b,
                  capture_dir: str = None):
         """
         Inizializza il controller di scansione a luce strutturata.
 
         Args:
             i2c_bus: Bus I2C per il proiettore (default: 3)
-            i2c_address: Indirizzo I2C del proiettore (default: 0x36)
+            i2c_address: Indirizzo I2C del proiettore (default: 0x1b)
             capture_dir: Directory per salvare i frame acquisiti
         """
         # Stato della scansione
@@ -77,7 +77,8 @@ class StructuredLightController:
 
         # Directory per i frame acquisiti
         if capture_dir is None:
-            self.capture_dir = Path("/var/lib/unlook/scans") / time.strftime("%Y%m%d_%H%M%S")
+            base_dir = Path(__file__).parent.parent.parent / "scans"
+            self.capture_dir = base_dir / time.strftime("%Y%m%d_%H%M%S")
         else:
             self.capture_dir = Path(capture_dir)
 

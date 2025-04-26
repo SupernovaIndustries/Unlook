@@ -115,10 +115,15 @@ class ScanManager:
             logger.info(
                 f"Tentativo di inizializzazione controller di scansione con bus={i2c_bus}, address=0x{i2c_address:02X}")
 
-            # Crea il controller
+            # Crea una nuova directory per questa scansione
+            scan_id = time.strftime("%Y%m%d_%H%M%S")
+            scan_dir = self._scan_data_dir / scan_id
+
+            # Crea il controller passando la directory
             self._scan_controller = StructuredLightController(
                 i2c_bus=i2c_bus,
-                i2c_address=i2c_address
+                i2c_address=i2c_address,
+                capture_dir=str(scan_dir)
             )
 
             # Imposta la callback per l'acquisizione dei frame
