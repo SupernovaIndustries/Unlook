@@ -9,7 +9,7 @@ import logging
 import time
 from typing import List, Optional, Callable, Dict, Any
 
-from PySide6.QtCore import QObject, Signal, Slot, Property, QSettings, QTimer
+from PySide6.QtCore import QObject, Signal, Slot, Property, QSettings, QTimer, QCoreApplication
 
 # Importa i moduli del progetto in modo che funzionino sia con esecuzione diretta che tramite launcher
 try:
@@ -149,7 +149,14 @@ class ScannerController(QObject):
     def is_connected(self, device_id: str) -> bool:
         """
         Verifica se un determinato scanner è connesso.
-        Versione migliorata per dare priorità allo stato di streaming.
+        Versione migliorata per dare priorità allo stato di streaming e
+        garantire consistenza tra diversi componenti dell'applicazione.
+
+        Args:
+            device_id: ID univoco dello scanner
+
+        Returns:
+            True se il dispositivo è connesso, False altrimenti
         """
         scanner = self._scanner_manager.get_scanner(device_id)
         if not scanner:
@@ -166,26 +173,27 @@ class ScannerController(QObject):
         # 2. Verifica anche con il connection manager per conferma diretta
         connection_manager_connected = False
         try:
-            # Evita creazione non necessaria dell'istanza se esistente
-            if hasattr(self, '_connection_manager'):
-                connection_manager = self._connection_manager
-            else:
-                from client.network.connection_manager import ConnectionManager
-                connection_manager = ConnectionManager()
+            # Usa l'istanza esistente del connection manager
+            connection_manager_connected = self._connection_manager.is_connected(device_id)
 
-            connection_manager_connected = connection_manager.is_connected(device_id)
-
-            # Se c'è una discrepanza tra lo stato memorizzato e quello reale, non aggiorniamo
-            # immediatamente lo stato a DISCONNECTED, specialmente se è in streaming
-            if scanner_state_connected and not connection_manager_connected:
-                logger.warning(
-                    f"Rilevata discrepanza: scanner {scanner.device_id} considerato connesso ma connessione non attiva")
-                # Non aggiorniamo lo stato immediatamente a DISCONNECTED
+            # Sincronizza lo stato se c'è una discrepanza
+            if connection_manager_connected and scanner.status == ScannerStatus.DISCONNECTED:
+                # Aggiorna lo stato dello scanner a connesso
+                scanner.status = ScannerStatus.CONNECTED
+                logger.info(f"Correzione automatica stato scanner {device_id}: impostato a CONNECTED")
+            elif not connection_manager_connected and scanner.status == ScannerStatus.CONNECTED:
+                # Se lo scanner non è in streaming, aggiorna lo stato a disconnesso
+                if scanner.status != ScannerStatus.STREAMING:
+                    scanner.status = ScannerStatus.DISCONNECTED
+                    logger.info(f"Correzione automatica stato scanner {device_id}: impostato a DISCONNECTED")
+                    # Emetti il segnale di disconnessione
+                    self.scanner_disconnected.emit(scanner)
         except Exception as e:
             logger.error(f"Errore nel controllo della connessione: {e}")
 
-        # La connessione è valida se uno dei due controlli è positivo
-        return scanner_state_connected or connection_manager_connected
+        # La connessione è valida se uno dei due controlli è positivo,
+        # ma diamo priorità allo stato dello scanner se è in streaming
+        return scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
 
     def send_command(self, device_id: str, command_type: str, payload: Dict[str, Any] = None) -> bool:
         """
@@ -208,6 +216,47 @@ class ScannerController(QObject):
         except Exception as e:
             logger.error(f"Errore nell'invio del comando {command_type}: {e}")
             return False
+
+    def synchronize_scanner_states(self):
+        """
+        Sincronizza lo stato degli scanner tra i vari componenti dell'applicazione.
+        Risolve inconsistenze di stato verificando la connettività effettiva.
+        """
+        # Ottieni tutti gli scanner attualmente gestiti
+        scanners = self._scanner_manager.scanners
+
+        for scanner in scanners:
+            try:
+                # Verifica la connettività effettiva con il server
+                connection_active = self._connection_manager.is_connected(scanner.device_id)
+
+                # Lo stato memorizzato nello scanner
+                current_state = scanner.status
+
+                # Risolvi le inconsistenze
+                if connection_active and current_state == ScannerStatus.DISCONNECTED:
+                    # La connessione è attiva ma lo scanner risulta disconnesso
+                    logger.info(f"Correzione stato scanner {scanner.name}: da DISCONNECTED a CONNECTED")
+                    scanner.status = ScannerStatus.CONNECTED
+                    self.scanner_connected.emit(scanner)
+
+                elif not connection_active and current_state in (ScannerStatus.CONNECTED, ScannerStatus.CONNECTING):
+                    # La connessione non è attiva ma lo scanner risulta connesso
+                    logger.info(f"Correzione stato scanner {scanner.name}: da {current_state.name} a DISCONNECTED")
+                    scanner.status = ScannerStatus.DISCONNECTED
+                    self.scanner_disconnected.emit(scanner)
+
+                # Non modifichiamo lo stato STREAMING a meno che non ci sia una disconnessione evidente
+                elif not connection_active and current_state == ScannerStatus.STREAMING:
+                    # Verifica ulteriore con un ping esplicito
+                    ping_result = self.send_command(scanner.device_id, "PING", {"timestamp": time.time()})
+                    if not ping_result:
+                        logger.info(f"Correzione stato scanner {scanner.name}: da STREAMING a DISCONNECTED")
+                        scanner.status = ScannerStatus.DISCONNECTED
+                        self.scanner_disconnected.emit(scanner)
+
+            except Exception as e:
+                logger.error(f"Errore nella sincronizzazione dello stato di {scanner.name}: {e}")
 
     def wait_for_response(self, device_id: str, command_type: str, timeout: float = 30.0) -> Optional[Dict[str, Any]]:
         """

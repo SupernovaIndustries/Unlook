@@ -10,6 +10,7 @@ import os
 import sys
 import subprocess
 import logging
+import shutil
 from pathlib import Path
 
 # Configura logging
@@ -63,17 +64,67 @@ def verify_dependencies():
 
 def fix_stream_receiver_filename(project_root):
     """
-    Corregge il nome del file stream_reciever.py in stream_receiver.py se necessario.
+    Controlla e corregge il file stream_receiver.py, verificando che non ci siano
+    problemi di naming o duplicazioni.
     """
+    receiver_path = project_root / 'client' / 'network' / 'stream_receiver.py'
     wrong_filename = project_root / 'client' / 'network' / 'stream_reciever.py'
-    correct_filename = project_root / 'client' / 'network' / 'stream_receiver.py'
 
-    if wrong_filename.exists() and not correct_filename.exists():
-        try:
-            wrong_filename.rename(correct_filename)
-            logger.info(f"File rinominato: {wrong_filename} -> {correct_filename}")
-        except Exception as e:
-            logger.error(f"Errore nel rinominare il file: {e}")
+    # Verifica se il file con nome sbagliato esiste
+    if wrong_filename.exists():
+        logger.info(f"Trovato file con nome errato: {wrong_filename}")
+
+        # Se il file corretto non esiste, rinominalo
+        if not receiver_path.exists():
+            try:
+                wrong_filename.rename(receiver_path)
+                logger.info(f"File rinominato: {wrong_filename} -> {receiver_path}")
+            except Exception as e:
+                logger.error(f"Errore nel rinominare il file: {e}")
+                # Se non possiamo rinominare, proviamo a copiare
+                try:
+                    shutil.copy2(str(wrong_filename), str(receiver_path))
+                    logger.info(f"File copiato: {wrong_filename} -> {receiver_path}")
+                except Exception as copy_err:
+                    logger.error(f"Errore anche nella copia del file: {copy_err}")
+        else:
+            # Entrambi i file esistono, verifichiamo se sono identici
+            try:
+                with open(wrong_filename, 'r') as f1, open(receiver_path, 'r') as f2:
+                    content1 = f1.read()
+                    content2 = f2.read()
+
+                if content1 == content2:
+                    # I file sono identici, possiamo rimuovere quello sbagliato
+                    wrong_filename.unlink()
+                    logger.info(f"File duplicato rimosso: {wrong_filename}")
+                else:
+                    # I file sono diversi, manteniamo quello corretto ma salviamo backup
+                    backup_path = wrong_filename.with_suffix('.py.bak')
+                    wrong_filename.rename(backup_path)
+                    logger.info(f"File con nome errato rinominato come backup: {wrong_filename} -> {backup_path}")
+            except Exception as e:
+                logger.error(f"Errore nella gestione dei file duplicati: {e}")
+
+    # Verifica se il file corretto esiste
+    if not receiver_path.exists():
+        logger.error(f"File essenziale mancante: {receiver_path}")
+        logger.error("Sarà necessario creare manualmente il file stream_receiver.py nella directory client/network")
+        return False
+
+    # Verifica che il file contenga la classe StreamReceiver
+    try:
+        with open(receiver_path, 'r') as f:
+            content = f.read()
+            if 'class StreamReceiver' not in content:
+                logger.error(f"Il file {receiver_path} non contiene la classe StreamReceiver necessaria!")
+                logger.error("Sarà necessario aggiornare manualmente il file con l'implementazione corretta")
+                return False
+    except Exception as e:
+        logger.error(f"Errore nella verifica del contenuto di {receiver_path}: {e}")
+        return False
+
+    return True
 
 
 def create_missing_init_files(project_root):
@@ -117,8 +168,14 @@ def main():
         logger.error("Impossibile avviare l'applicazione a causa di dipendenze mancanti.")
         sys.exit(1)
 
-    # Corregge il nome del file stream_reciever.py se necessario
-    fix_stream_receiver_filename(project_root)
+    # Corregge il nome del file stream_receiver.py se necessario
+    if not fix_stream_receiver_filename(project_root):
+        logger.warning("Problemi con il modulo stream_receiver. L'applicazione potrebbe non funzionare correttamente.")
+        # Chiediamo conferma all'utente se continuare
+        user_input = input("Continuare comunque? (s/n): ")
+        if user_input.lower() != 's':
+            logger.info("Avvio annullato dall'utente.")
+            sys.exit(1)
 
     # Crea file __init__.py mancanti
     create_missing_init_files(project_root)

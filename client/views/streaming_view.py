@@ -1107,55 +1107,98 @@ class DualStreamView(QWidget):
             except Exception as e:
                 logger.error(f"Errore nell'invio del keepalive: {e}")
 
-    def start_streaming(self, scanner: Scanner) -> bool:
+    def start_streaming(self, scanner: Optional[Scanner] = None):
         """
-        Avvia lo streaming video dalle due camere dello scanner.
-        Versione ottimizzata per garantire che entrambe le camere siano attive.
+        Avvia lo streaming del video.
 
         Args:
-            scanner: Scanner da cui ricevere lo streaming
-
-        Returns:
-            True se il processo di streaming è stato avviato, False altrimenti
+            scanner: Scanner da cui ricevere lo stream (opzionale se già impostato)
         """
-        if self._streaming:
-            logger.warning("Streaming già attivo")
-            return True
+        if self.is_streaming():
+            logger.info("Streaming già attivo")
+            return
 
-        # Memorizza lo scanner
-        self._scanner = scanner
+        # Imposta lo scanner se specificato
+        if scanner:
+            self.selected_scanner = scanner
 
-        # Importa qui per evitare problemi di importazione circolare
-        from client.network.connection_manager import ConnectionManager
+        if not self.selected_scanner:
+            self.status_label.setText("Nessuno scanner selezionato")
+            return
 
-        self._connection_manager = ConnectionManager()
+        # Verifica che lo scanner sia connesso
+        is_connected = (self.scanner_controller and
+                        self.scanner_controller.is_connected(self.selected_scanner.device_id))
 
-        # Verifica che lo scanner sia connesso prima di avviare lo streaming
-        if not self._connection_manager.is_connected(scanner.device_id):
-            logger.warning(f"Scanner {scanner.name} non connesso, tentativo di connessione")
+        if not is_connected:
+            self.status_label.setText("Scanner non connesso")
+            return
 
-            # Connetti allo scanner
-            self._connection_manager.connect(scanner.device_id, scanner.ip_address, scanner.port)
+        try:
+            # Imposta lo stato di avvio
+            self.status_label.setText(f"Avvio streaming da {self.selected_scanner.name}...")
+            self.progress_indicator.setVisible(True)
 
-            # Imposta il timer per controllare se la connessione viene stabilita
-            self._retry_count = 0
-            self._retry_timer.start()
+            # Avvia lo streaming sul server
+            stream_command_success = self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "START_STREAM",
+                {"dual_camera": True}
+            )
 
-            # CORREZIONE: Avvia un timer per il keepalive
-            self._keep_alive_timer = QTimer(self)
-            self._keep_alive_timer.timeout.connect(self._send_keep_alive)
-            self._keep_alive_timer.start(2000)  # Invia ping ogni 2 secondi (più frequente)
+            if not stream_command_success:
+                self.status_label.setText("Errore nell'avvio dello streaming")
+                self.progress_indicator.setVisible(False)
+                return
 
-            # Ritorna True per indicare che il processo è iniziato (anche se lo streaming non è ancora attivo)
-            return True
-        else:
-            # Scanner già connesso, avvia subito lo streaming
-            # CORREZIONE: Avvia un timer per il keepalive anche qui
-            self._keep_alive_timer = QTimer(self)
-            self._keep_alive_timer.timeout.connect(self._send_keep_alive)
-            self._keep_alive_timer.start(2000)  # Invia ping ogni 2 secondi
+            # Ottieni le informazioni sul server
+            server_port = None
+            server_address = self.selected_scanner.ip_address
 
-            return self._start_actual_streaming()
+            # Attendi la risposta con le informazioni sulla porta di streaming
+            response = self.scanner_controller.wait_for_response(
+                self.selected_scanner.device_id,
+                "START_STREAM",
+                timeout=5.0
+            )
+
+            if response and response.get("status") == "ok":
+                server_port = response.get("stream_port", 5681)  # Porta predefinita 5681
+                logger.info(f"Porta di streaming ricevuta: {server_port}")
+            else:
+                # Se non riusciamo a ottenere la porta dalla risposta, usiamo quella predefinita
+                server_port = 5681
+                logger.warning(f"Impossibile ottenere la porta di streaming, uso la porta predefinita: {server_port}")
+
+            # Imposta il selected_scanner in STREAMING
+            if self.selected_scanner:
+                self.selected_scanner.status = ScannerStatus.STREAMING
+
+            # Crea e avvia il ricevitore di stream
+            self.stream_receiver = StreamReceiver(ip_address=server_address, port=server_port)
+            self.stream_receiver.frame_received.connect(self._on_frame_received)
+            self.stream_receiver.connected.connect(self._on_stream_connected)
+            self.stream_receiver.disconnected.connect(self._on_stream_disconnected)
+            self.stream_receiver.error.connect(self._on_stream_error)
+            self.stream_receiver.start()
+
+            # Imposta lo stato di streaming attivo
+            self._streaming_active = True
+            self.stop_streaming_btn.setEnabled(True)
+            self.take_snapshot_btn.setEnabled(True)
+
+            # Avvia il timer di controllo FPS
+            self._reset_fps_counters()
+            self._fps_timer.start()
+            self._stats_timer.start()
+
+            logger.info(f"Streaming avviato da {server_address}:{server_port}")
+
+        except Exception as e:
+            logger.error(f"Errore nell'avvio dello streaming: {e}")
+            self.status_label.setText(f"Errore: {str(e)}")
+            self.progress_indicator.setVisible(False)
+            self._streaming_active = False
 
     def _start_actual_streaming(self) -> bool:
         """

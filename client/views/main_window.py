@@ -16,10 +16,10 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QStatusBar, QToolBar, QDockWidget, QSplitter, QFrame,
-    QTabWidget, QMessageBox, QMenu, QFileDialog, QDialog, QApplication
+    QTabWidget, QMessageBox, QMenu, QFileDialog, QDialog, QApplication, QProgressDialog,
 )
-from PySide6.QtCore import Qt, Slot, QSettings, QSize, QPoint, QTimer, QEvent, QCoreApplication
-from PySide6.QtGui import QIcon, QPixmap, QFont, QAction, QCloseEvent
+from PySide6.QtCore import *
+from PySide6.QtGui import *
 
 from client.controllers.scanner_controller import ScannerController
 from client.models.scanner_model import Scanner, ScannerStatus
@@ -104,10 +104,43 @@ class MainWindow(QMainWindow):
         self._autopair_timer.timeout.connect(self._attempt_autopair)
         self._autopair_timer.start(2000)  # 2 secondi dopo l'avvio
 
+        # Timer per la sincronizzazione periodica degli stati
+        self._sync_state_timer = QTimer(self)
+        self._sync_state_timer.timeout.connect(self._periodic_state_sync)
+        self._sync_state_timer.start(5000)  # Sincronizza ogni 5 secondi
+
         logger.info("Interfaccia utente principale inizializzata")
         self._global_keepalive_timer = QTimer(self)
         self._global_keepalive_timer.timeout.connect(self._send_global_keepalive)
         self._global_keepalive_timer.start(2000)  # Invia un keepalive ogni 2 secondi
+
+    def _periodic_state_sync(self):
+        """
+        Esegue la sincronizzazione periodica degli stati degli scanner.
+        Questa funzione viene chiamata periodicamente per mantenere coerenza
+        tra i diversi componenti dell'applicazione.
+        """
+        try:
+            self.scanner_controller.synchronize_scanner_states()
+
+            # Aggiorna anche lo stato nelle varie schede
+            current_tab = self.central_tabs.currentIndex()
+
+            # Aggiorna la scheda corrente in modo specifico
+            if current_tab == self.TabIndex.STREAMING.value and hasattr(self, 'streaming_widget'):
+                # Se siamo nella scheda streaming, verifica che lo streaming sia attivo se lo scanner è connesso
+                selected_scanner = self.scanner_controller.selected_scanner
+                if selected_scanner and selected_scanner.status == ScannerStatus.CONNECTED:
+                    if hasattr(self.streaming_widget, 'is_streaming') and not self.streaming_widget.is_streaming():
+                        logger.debug("Scheda streaming attiva con scanner connesso ma streaming inattivo")
+
+            elif current_tab == self.TabIndex.SCANNING.value and hasattr(self, 'scanning_widget'):
+                # Se siamo nella scheda scansione, aggiorna lo stato dello scanner
+                if hasattr(self.scanning_widget, 'refresh_scanner_state'):
+                    self.scanning_widget.refresh_scanner_state()
+
+        except Exception as e:
+            logger.error(f"Errore nella sincronizzazione periodica degli stati: {e}")
 
     def _send_global_keepalive(self):
         """
@@ -333,27 +366,50 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent):
         """
         Gestisce l'evento di chiusura della finestra.
-        Versione migliorata con gestione completa del rilascio delle risorse.
+        Versione completamente rivista per garantire una chiusura pulita e prevenire crash.
         """
         logger.info("Chiusura dell'applicazione in corso...")
 
-        # Mostra un dialog di progresso durante la chiusura per evitare che l'applicazione sembri bloccata
-        from PySide6.QtWidgets import QProgressDialog, QApplication
-        progress = QProgressDialog("Chiusura in corso...", "Attendi", 0, 100, self)
+        # Mostra un dialog di progresso per evitare che l'applicazione sembri bloccata
+        progress = QProgressDialog("Chiusura in corso...", None, 0, 100, self)
         progress.setWindowTitle("Chiusura applicazione")
         progress.setWindowModality(Qt.WindowModal)
         progress.setAutoClose(True)
-        progress.setMinimumDuration(500)  # Mostra solo se la chiusura richiede più di 500ms
-        progress.setValue(10)
+        progress.setMinimumDuration(300)  # Mostra solo se la chiusura richiede più di 300ms
+        progress.setCancelButton(None)  # Rimuove il pulsante di annullamento
+        progress.setValue(5)
+        progress.show()
 
         try:
+            # Processa eventi per mostrare la dialog
+            QApplication.processEvents()
+
             # Salva le impostazioni
             self._save_settings()
-            progress.setValue(20)
+            progress.setValue(10)
+            QApplication.processEvents()
+
+            # Ferma esplicitamente lo streaming se attivo
+            if hasattr(self, 'streaming_widget') and self.streaming_widget:
+                try:
+                    if hasattr(self.streaming_widget, 'is_streaming') and self.streaming_widget.is_streaming():
+                        progress.setLabelText("Arresto dello streaming in corso...")
+                        logger.info("Arresto dello streaming...")
+                        self.streaming_widget.stop_streaming()
+                        # Pausa per permettere allo streaming di fermarsi
+                        QApplication.processEvents()
+                        time.sleep(0.3)
+                except Exception as e:
+                    logger.error(f"Errore nell'arresto dello streaming: {e}")
+
+            progress.setValue(30)
+            QApplication.processEvents()
 
             # Ferma la scoperta degli scanner
+            progress.setLabelText("Arresto della scoperta scanner...")
             self.scanner_controller.stop_discovery()
-            progress.setValue(30)
+            progress.setValue(40)
+            QApplication.processEvents()
 
             # Controlla se c'è una scansione in corso e fermala
             if hasattr(self, 'scanning_widget') and self.scanning_widget:
@@ -365,84 +421,94 @@ class MainWindow(QMainWindow):
                         self.scanning_widget._stop_scan()
                         # Attendi un po' per consentire l'arresto della scansione
                         QApplication.processEvents()
-                        time.sleep(0.5)
+                        time.sleep(0.3)
                 except Exception as e:
                     logger.error(f"Errore nell'arresto della scansione: {e}")
 
-            progress.setValue(40)
+            progress.setValue(50)
+            QApplication.processEvents()
 
             # Invia un comando di arresto streaming esplicito se connesso
             selected_scanner = self.scanner_controller.selected_scanner
-            if selected_scanner and self.scanner_controller.is_connected(selected_scanner.device_id):
-                logger.info(f"Scanner connesso trovato: {selected_scanner.name}")
-                progress.setLabelText(f"Disconnessione dallo scanner {selected_scanner.name}...")
-
-                # Importa qui per evitare problemi di importazione circolare
-                from client.network.connection_manager import ConnectionManager
-                connection_manager = ConnectionManager()
-
+            if selected_scanner:
                 try:
-                    # Ferma lo streaming se attivo
-                    if hasattr(self, 'streaming_widget') and self.streaming_widget:
-                        logger.info("Arresto dello streaming...")
-                        progress.setLabelText("Arresto dello streaming in corso...")
-                        self.streaming_widget.stop_streaming()
-                        # Piccola pausa per consentire il completamento dell'operazione
-                        QApplication.processEvents()
-                        time.sleep(0.3)
-
-                    # Invia esplicitamente il comando STOP_STREAM
                     logger.info(f"Invio comando STOP_STREAM a {selected_scanner.name}...")
-                    connection_manager.send_message(selected_scanner.device_id, "STOP_STREAM")
-                    # Breve pausa per assicurarsi che il comando venga processato
-                    QApplication.processEvents()
-                    time.sleep(0.3)
+                    progress.setLabelText(f"Invio comandi di arresto a {selected_scanner.name}...")
+
+                    # Invia un PING prima come verifica della connettività
+                    ping_result = self.scanner_controller.send_command(
+                        selected_scanner.device_id,
+                        "PING",
+                        {"timestamp": time.time()}
+                    )
+
+                    if ping_result:
+                        # Invia esplicitamente il comando STOP_STREAM
+                        self.scanner_controller.send_command(
+                            selected_scanner.device_id,
+                            "STOP_STREAM"
+                        )
+                        # Breve pausa per assicurarsi che il comando venga processato
+                        QApplication.processEvents()
+                        time.sleep(0.2)
                 except Exception as e:
                     logger.error(f"Errore nell'invio del comando STOP_STREAM: {e}")
 
-            progress.setValue(60)
+            progress.setValue(70)
+            QApplication.processEvents()
 
             # Disconnetti tutti gli scanner in modo sicuro
             logger.info("Disconnessione da tutti gli scanner...")
             progress.setLabelText("Disconnessione da tutti gli scanner...")
-            self._disconnect_all()
+            self._disconnect_all_safely()
+
+            progress.setValue(80)
+            QApplication.processEvents()
 
             # Arresta eventuali timer attivi
             try:
-                if hasattr(self, "connection_timer") and self.connection_timer.isActive():
-                    self.connection_timer.stop()
-
-                # Ferma il timer di keepalive se presente in scanner_controller
-                if hasattr(self.scanner_controller,
-                           "_keepalive_timer") and self.scanner_controller._keepalive_timer.isActive():
-                    self.scanner_controller._keepalive_timer.stop()
+                for attr_name in dir(self):
+                    attr = getattr(self, attr_name)
+                    if isinstance(attr, QTimer) and attr.isActive():
+                        attr.stop()
             except Exception as e:
                 logger.error(f"Errore nell'arresto dei timer: {e}")
 
-            progress.setValue(80)
+            progress.setValue(90)
+            QApplication.processEvents()
 
-            # Rilascia esplicitamente alcune risorse critiche
+            # Rilascia esplicitamente le risorse di rete
             try:
                 # Chiudi eventuali socket ZMQ aperti
                 from client.network.connection_manager import ConnectionManager
                 connection_manager = ConnectionManager()
+
+                # Ottieni un elenco di device_id prima della modifica del dizionario
+                device_ids = list(connection_manager._connections.keys())
+
                 # Esegui la disconnessione di tutti i device
-                for device_id in list(connection_manager._connections.keys()):
-                    connection_manager.disconnect(device_id)
+                for device_id in device_ids:
+                    try:
+                        connection_manager.disconnect(device_id)
+                    except Exception as e:
+                        logger.error(f"Errore nella disconnessione di {device_id}: {e}")
             except Exception as e:
                 logger.error(f"Errore nel rilascio delle risorse di rete: {e}")
 
             # Attendi un momento per permettere alle disconnessioni di completarsi
             progress.setLabelText("Finalizzazione chiusura...")
             QApplication.processEvents()
-            time.sleep(0.8)
+            time.sleep(0.5)
 
             progress.setValue(100)
+            QApplication.processEvents()
+
         except Exception as e:
             logger.error(f"Errore durante la chiusura dell'applicazione: {e}")
         finally:
-            # Nasconde la dialog di progresso
+            # Nasconde e distrugge la dialog di progresso
             progress.close()
+            progress.deleteLater()
 
         # Forza il rilascio di alcune risorse critiche
         import gc
@@ -451,6 +517,49 @@ class MainWindow(QMainWindow):
         # Accetta l'evento di chiusura
         logger.info("Applicazione chiusa con successo")
         event.accept()
+
+    def _disconnect_all_safely(self):
+        """
+        Disconnette tutti gli scanner connessi in modo sicuro e robusto.
+        Versione migliorata per gestire ogni scanner individualmente e tollerare errori.
+        """
+        try:
+            # Ottieni una copia della lista degli scanner per evitare problemi
+            # se la lista viene modificata durante l'iterazione
+            scanners = list(self.scanner_controller.scanners)
+
+            for scanner in scanners:
+                try:
+                    # Prima verifica che lo scanner sia effettivamente connesso
+                    if self.scanner_controller.is_connected(scanner.device_id):
+                        logger.info(f"Disconnessione da {scanner.name} in corso...")
+
+                        # Prima invia un comando di ping per verificare la connettività
+                        ping_result = self.scanner_controller.send_command(
+                            scanner.device_id,
+                            "PING",
+                            {"timestamp": time.time()}
+                        )
+
+                        # Se il ping ha successo, procedi con la disconnessione esplicita
+                        if ping_result:
+                            self.scanner_controller.disconnect_from_scanner(scanner.device_id)
+                            # Piccola pausa tra disconnessioni consecutive
+                            time.sleep(0.2)
+                        else:
+                            logger.warning(f"Scanner {scanner.name} non risponde, forzando lo stato disconnesso")
+                            # Forza lo stato a disconnesso
+                            scanner.status = ScannerStatus.DISCONNECTED
+
+                except Exception as e:
+                    # Cattura le eccezioni per singolo scanner, così se uno fallisce
+                    # possiamo comunque provare con gli altri
+                    logger.error(f"Errore durante la disconnessione da {scanner.name}: {e}")
+                    # Forza comunque lo stato a disconnesso
+                    scanner.status = ScannerStatus.DISCONNECTED
+
+        except Exception as e:
+            logger.error(f"Errore nella disconnessione da tutti gli scanner: {e}")
 
     @Slot()
     def _update_scanner_list(self):
@@ -524,27 +633,52 @@ class MainWindow(QMainWindow):
 
     @Slot(Scanner)
     def _on_scanner_disconnected(self, scanner: Scanner):
-        """Gestisce l'evento di disconnessione da uno scanner."""
+        """
+        Gestisce l'evento di disconnessione da uno scanner.
+        Versione migliorata che garantisce coerenza tra tutti i componenti
+        e ferma esplicitamente lo streaming.
+        """
+        logger.info(f"Disconnessione rilevata da {scanner.name}")
+
         # Aggiorna la lista degli scanner
         self._update_scanner_list()
 
         # Aggiorna lo stato della connessione
         self.connection_status_label.setText("Non connesso")
 
-        # Disabilita le schede che richiedono una connessione
+        # Ferma esplicitamente lo streaming se attivo
+        streaming_was_active = False
+        if hasattr(self, 'streaming_widget') and self.streaming_widget:
+            try:
+                if hasattr(self.streaming_widget, 'is_streaming') and self.streaming_widget.is_streaming():
+                    logger.info("Arresto dello streaming in seguito a disconnessione")
+                    streaming_was_active = True
+                    self.streaming_widget.stop_streaming()
+            except Exception as e:
+                logger.error(f"Errore nell'arresto dello streaming: {e}")
+
+        # Disabilita le schede che richiedono una connessione attiva
         self.central_tabs.setTabEnabled(self.TabIndex.STREAMING.value, False)
         self.central_tabs.setTabEnabled(self.TabIndex.SCANNING.value, False)
 
         # Cambia il testo del pulsante di connessione
         self.action_toggle_connection.setText("Connetti")
 
-        # Ferma lo streaming se attivo
-        if hasattr(self, 'streaming_widget') and self.streaming_widget:
-            self.streaming_widget.stop_streaming()
-
         # Passa alla scheda degli scanner
-        self.central_tabs.setCurrentIndex(self.TabIndex.SCANNER.value)
+        if self.central_tabs.currentIndex() in [self.TabIndex.STREAMING.value, self.TabIndex.SCANNING.value]:
+            logger.info("Passaggio alla scheda scanner dopo disconnessione")
+            self.central_tabs.setCurrentIndex(self.TabIndex.SCANNER.value)
 
+        # Se lo streaming era attivo e c'è stato un problema di comunicazione,
+        # mostra un messaggio informativo
+        if streaming_was_active and scanner.status == ScannerStatus.ERROR:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self,
+                "Connessione persa",
+                f"La connessione con {scanner.name} è stata persa durante lo streaming.\n"
+                "Lo streaming è stato interrotto automaticamente."
+            )
     @Slot(str, str)
     def _on_connection_error(self, device_id: str, error: str):
         """Gestisce l'evento di errore di connessione."""
@@ -567,21 +701,54 @@ class MainWindow(QMainWindow):
 
     @Slot(int)
     def _on_scanner_selected(self, index: int):
-        """Gestisce la selezione di uno scanner."""
+        """
+        Gestisce la selezione di uno scanner.
+        Versione migliorata con verifica di selezione valida e aggiornamento
+        di tutti i componenti interessati.
+        """
         # Verifica se c'è uno scanner valido selezionato
         if index < 0:
+            logger.debug("Nessuno scanner selezionato")
             return
 
         # Ottieni l'ID dello scanner selezionato
         device_id = self.scanner_selector.currentData()
         if not device_id:
+            logger.debug("ID scanner nullo")
             return
 
         # Seleziona lo scanner nel controller
-        self.scanner_controller.select_scanner(device_id)
+        selection_success = self.scanner_controller.select_scanner(device_id)
+
+        if not selection_success:
+            logger.warning(f"Impossibile selezionare lo scanner con ID {device_id}")
+            return
+
+        # Ottieni il riferimento allo scanner selezionato
+        selected_scanner = self.scanner_controller.selected_scanner
+
+        if not selected_scanner:
+            logger.warning("selected_scanner è None dopo la selezione")
+            return
+
+        # Aggiorna lo scanner selezionato in tutte le viste attive
+        if hasattr(self, 'scanning_widget') and self.scanning_widget:
+            self.scanning_widget.update_selected_scanner(selected_scanner)
+
+        if hasattr(self, 'streaming_widget') and self.streaming_widget:
+            # Assicurati che il parametro scanner_controller sia sempre impostato
+            self.streaming_widget.scanner_controller = self.scanner_controller
+            self.streaming_widget.selected_scanner = selected_scanner
 
         # Aggiorna l'interfaccia in base allo scanner selezionato
         self._update_ui_for_selected_scanner()
+
+        # Aggiorna lo stato della connessione visualizzato
+        is_connected = self.scanner_controller.is_connected(device_id)
+        status_text = f"Connesso a {selected_scanner.name}" if is_connected else "Non connesso"
+        self.connection_status_label.setText(status_text)
+
+        logger.info(f"Scanner selezionato: {selected_scanner.name}, connesso: {is_connected}")
 
     @Slot(int)
     def _on_tab_changed(self, index: int):
