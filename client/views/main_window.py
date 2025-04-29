@@ -204,7 +204,7 @@ class MainWindow(QMainWindow):
 
         # Crea i widget delle schede
         self.scanner_widget = ScannerDiscoveryWidget(self.scanner_controller)
-        self.streaming_widget = DualStreamView()
+        self.streaming_widget = DualStreamView(self.scanner_controller)  # Passa il controller qui
         self.scanning_widget = ScanView(self.scanner_controller)
 
         # Aggiungi le schede
@@ -759,9 +759,18 @@ class MainWindow(QMainWindow):
             selected_scanner = self.scanner_controller.selected_scanner
             if selected_scanner and selected_scanner.status == ScannerStatus.CONNECTED:
                 # Se il dispositivo è connesso ma lo streaming non è attivo, avvia lo streaming automaticamente
-                if hasattr(self,
-                           'streaming_widget') and self.streaming_widget and not self.streaming_widget.is_streaming():
-                    self.streaming_widget.start_streaming(selected_scanner)
+                if hasattr(self, 'streaming_widget') and self.streaming_widget:
+                    # Assicurati che scanner_controller sia impostato
+                    if not hasattr(self.streaming_widget,
+                                   'scanner_controller') or self.streaming_widget.scanner_controller is None:
+                        self.streaming_widget.scanner_controller = self.scanner_controller
+
+                    # Assicurati che selected_scanner sia impostato
+                    self.streaming_widget.selected_scanner = selected_scanner
+
+                    # Ora puoi avviare lo streaming in sicurezza
+                    if hasattr(self.streaming_widget, 'is_streaming') and not self.streaming_widget.is_streaming():
+                        self.streaming_widget.start_streaming(selected_scanner)
         elif index == self.TabIndex.SCANNING.value:
             # Aggiorna lo stato dello scanner nella tab di scansione
             if hasattr(self, 'scanning_widget') and self.scanning_widget:
