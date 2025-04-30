@@ -1739,16 +1739,49 @@ def main():
     # Inizializza il proiettore a nero
     try:
         from server.projector.dlp342x import DLPC342XController, OperatingMode, Color, BorderEnable
-        projector = DLPC342XController(bus=args.i2c_bus,
-                                       address=int(args.i2c_address, 16) if args.i2c_address.startswith("0x") else int(
-                                           args.i2c_address))
+        logger.info(f"Tentativo di inizializzazione del proiettore con bus={args.i2c_bus}, address={args.i2c_address}")
+
+        # Converti l'indirizzo nel formato corretto
+        address = int(args.i2c_address, 16) if args.i2c_address.startswith("0x") else int(args.i2c_address)
+
+        # Crea il controller e imposta una sequenza più robusta
+        projector = DLPC342XController(bus=args.i2c_bus, address=address)
+
+        # Prima ottieni lo stato attuale per verificare la connessione
+        try:
+            current_mode = projector.get_operating_mode()
+            logger.info(f"Modalità attuale del proiettore: {current_mode}")
+        except Exception as e:
+            logger.warning(f"Impossibile leggere la modalità attuale: {e}")
+
+        # Imposta la modalità pattern generator con un timeout più lungo
         projector.set_operating_mode(OperatingMode.TestPatternGenerator)
+        logger.info("Impostata modalità TestPatternGenerator")
+        time.sleep(1.0)  # Aumentiamo il tempo di attesa
+
+        # Ripeti la generazione del pattern nero 3 volte per assicurarci
+        for i in range(3):
+            try:
+                projector.generate_solid_field(Color.Black)
+                logger.info(f"Pattern nero generato (tentativo {i + 1}/3)")
+                time.sleep(0.3)  # Breve pausa tra i tentativi
+            except Exception as e:
+                logger.warning(f"Errore nella generazione del pattern nero (tentativo {i + 1}/3): {e}")
+
+        # Disabilita il bordo
+        try:
+            projector.set_display_border(BorderEnable.Disable)
+            logger.info("Bordo disabilitato")
+        except Exception as e:
+            logger.warning(f"Errore nella disabilitazione del bordo: {e}")
+
+        # Verifica finale
         time.sleep(0.5)
-        projector.generate_solid_field(Color.Black)
-        projector.set_display_border(BorderEnable.Disable)
         logger.info("Proiettore inizializzato a nero all'avvio del server")
     except Exception as e:
         logger.warning(f"Impossibile inizializzare il proiettore all'avvio: {e}")
+        import traceback
+        logger.warning(f"Traceback: {traceback.format_exc()}")
 
     # Crea e avvia il server
     server = UnLookServer(config_path=args.config)

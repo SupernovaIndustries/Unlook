@@ -530,6 +530,10 @@ class ScanProcessor:
         left_dir = self.scan_dir / "left"
         right_dir = self.scan_dir / "right"
 
+        # Assicura che le directory esistano
+        left_dir.mkdir(parents=True, exist_ok=True)
+        right_dir.mkdir(parents=True, exist_ok=True)
+
         if left_dir.exists() and right_dir.exists():
             # Get files and sort by name
             self.left_images = sorted(glob.glob(str(left_dir / "*.png")))
@@ -552,7 +556,7 @@ class ScanProcessor:
 
             return True
         else:
-            logger.error(f"Scan directories not found: {left_dir}, {right_dir}")
+            logger.error(f"Scan directories not found or could not be created: {left_dir}, {right_dir}")
             return False
 
     def _detect_pattern_type(self):
@@ -600,10 +604,19 @@ class ScanProcessor:
             self.scan_dir = Path(scan_dir)
             self.scan_id = self.scan_dir.name
 
+            # Assicura che la directory principale esista
+            self.scan_dir.mkdir(parents=True, exist_ok=True)
+
+            # Crea le sottodirectory necessarie
+            left_dir = self.scan_dir / "left"
+            right_dir = self.scan_dir / "right"
+            left_dir.mkdir(exist_ok=True)
+            right_dir.mkdir(exist_ok=True)
+
             # Find scan images
             success = self._find_scan_images()
             if not success:
-                return False
+                logger.warning(f"No scan images found in {scan_dir}, but directories are prepared")
 
             # Load calibration data if available
             calib_file = self.scan_dir / "calibration.npz"
@@ -622,6 +635,8 @@ class ScanProcessor:
 
         except Exception as e:
             logger.error(f"Error loading local scan: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
     def process_scan(self, use_threading: bool = True) -> bool:
