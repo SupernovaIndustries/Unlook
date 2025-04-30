@@ -2309,6 +2309,8 @@ class ScanView(QWidget):
         """Registra un gestore per ricevere i frame della scansione in tempo reale."""
         if self.scanner_controller and self.scanner_controller._connection_manager:
             try:
+                # Aggiungi questo log
+                logger.info("Tentativo di registrazione del gestore SCAN_FRAME")
                 self.scanner_controller._connection_manager.register_message_handler(
                     "SCAN_FRAME",
                     self._on_scan_frame_received
@@ -2326,6 +2328,7 @@ class ScanView(QWidget):
             message: Messaggio contenente i dati del frame
         """
         try:
+            logger.info(f"Ricevuto frame {message.get('frame_info', {}).get('pattern_index')} da {device_id}")
             # Verifica che il messaggio sia valido
             if not message or "frame_info" not in message or "left_frame" not in message or "right_frame" not in message:
                 logger.warning("Messaggio di frame non valido")
@@ -2376,6 +2379,11 @@ class ScanView(QWidget):
             # Salva le immagini
             cv2.imwrite(left_file, left_img)
             cv2.imwrite(right_file, right_img)
+
+            logger.info(
+                f"Frame sinistro salvato in {left_file}, dimensione: {os.path.getsize(left_file) if os.path.exists(left_file) else 'file non creato'}")
+            logger.info(
+                f"Frame destro salvato in {right_file}, dimensione: {os.path.getsize(right_file) if os.path.exists(right_file) else 'file non creato'}")
 
             # Aggiorna il log
             self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Frame ricevuto: {pattern_name} (indice {pattern_index})\n"

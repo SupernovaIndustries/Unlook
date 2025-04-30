@@ -575,6 +575,9 @@ class ScanManager:
                 "scan_id": self.current_scan_id if hasattr(self, 'current_scan_id') else None
             }
 
+            logger.info(
+                f"Invio frame {frame_info['pattern_index']} al client, dimensione: {len(left_frame_data)} bytes")
+
             # Invia il messaggio al client attraverso il socket di comando
             for device_id in self.server._client_connections:
                 try:
