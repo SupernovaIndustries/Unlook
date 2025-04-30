@@ -557,7 +557,7 @@ class ScanManager:
         """
         try:
             import zmq
-            
+
             pattern_index = frame_info.get('pattern_index', 'sconosciuto')
             logger.info(f"Tentativo invio frame {pattern_index} al client")
 
