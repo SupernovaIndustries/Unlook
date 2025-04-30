@@ -545,7 +545,7 @@ class ScanManager:
                                  right_frame_data: bytes) -> bool:
         """
         Notifica il client di nuovi frame acquisiti durante la scansione.
-        Versione migliorata con connessione più robusta e timeouts estesi.
+        Versione migliorata con gestione robusta degli errori e canale di comunicazione dedicato.
 
         Args:
             frame_info: Informazioni sul frame (indice, nome pattern, timestamp)
@@ -556,82 +556,100 @@ class ScanManager:
             True se la notifica è stata inviata con successo, False altrimenti
         """
         try:
-            # Importazione necessaria per i timeout
             import zmq
+            
+            pattern_index = frame_info.get('pattern_index', 'sconosciuto')
+            logger.info(f"Tentativo invio frame {pattern_index} al client")
 
-            logger.info(f"Tentativo invio frame {frame_info.get('pattern_index', 'sconosciuto')} al client")
-
-            # Se non ci sono riferimenti al server, non inviare nulla
+            # Verifica riferimento al server
             if not hasattr(self, 'server') or not self.server:
                 logger.warning("Nessun riferimento al server disponibile")
                 return False
 
-            # Prepara il messaggio
-            import base64
-
             # Codifica i dati in base64 per la trasmissione JSON
+            import base64
             left_b64 = base64.b64encode(left_frame_data).decode('utf-8')
             right_b64 = base64.b64encode(right_frame_data).decode('utf-8')
 
+            # Prepara il messaggio
             message = {
                 "type": "SCAN_FRAME",
                 "frame_info": frame_info,
                 "left_frame": left_b64,
                 "right_frame": right_b64,
-                "scan_id": getattr(self, 'current_scan_id', None)
+                "scan_id": getattr(self._scan_controller, 'current_scan_id', None),
+                "timestamp": time.time()
             }
 
-            # MIGLIORAMENTO: Verifica le connessioni in modo più diretto
-            # invece di affidarsi solo a clients_connected
-
-            # Verifica se c'è un client connesso tramite client_ip nel server
-            client_ip = None
-            if hasattr(self.server, 'client_ip') and self.server.client_ip:
-                client_ip = self.server.client_ip
-                logger.info(f"Client IP rilevato: {client_ip}")
-
-            # Verifica se ci sono connessioni disponibili
-            if hasattr(self.server, '_client_connections') and self.server._client_connections:
-                # Usa le connessioni esistenti
-                success = False
-                for device_id in self.server._client_connections:
-                    try:
-                        # Tenta di inviare attraverso il connection_manager
-                        if hasattr(self.server, '_connection_manager') and self.server._connection_manager:
-                            # Esegui un ping prima per verificare che la connessione sia attiva
-                            ping_success = self.server._connection_manager.send_message(
-                                device_id,
-                                "PING",
-                                {"timestamp": time.time(), "is_keepalive": True}
-                            )
-
-                            if ping_success:
-                                # La connessione è attiva, invia il frame
-                                self.server._connection_manager.send_message(device_id, "SCAN_FRAME", message)
-                                logger.info(f"Frame {frame_info.get('pattern_index')} inviato al client {device_id}")
-                                success = True
-                            else:
-                                logger.warning(f"Ping fallito per client {device_id}, connessione non attiva")
-                    except Exception as e:
-                        logger.warning(f"Errore nell'invio del frame al client {device_id}: {e}")
-
-                return success
-            else:
-                # MIGLIORAMENTO: Ulteriore tentativo con la connessione di default
-                # Questo può aiutare se il client è connesso ma non è registrato correttamente
+            # STRATEGIA 1: Utilizzo dello stream_socket (PUB) per invio non bloccante
+            # Questo socket non richiede una richiesta precedente come il REP
+            success = False
+            if hasattr(self.server, 'stream_socket'):
                 try:
-                    if hasattr(self.server, 'command_socket') and self.server.command_socket:
-                        logger.info("Tentativo di broadcast del frame a tutti i client connessi")
-                        # Invia un messaggio broadcast con timeout esteso
-                        self.server.command_socket.setsockopt(zmq.SNDTIMEO, 2000)  # Aumenta timeout a 2 secondi
-                        self.server.command_socket.send_json(message)
-                        logger.info(f"Frame {frame_info.get('pattern_index')} inviato in broadcast")
-                        return True
+                    # Invia un messaggio multipart con topic "SCAN_FRAME"
+                    # (così i client possono filtrare solo questo tipo di messaggi)
+                    self.server.stream_socket.send_string("SCAN_FRAME", zmq.SNDMORE)
+                    self.server.stream_socket.send_json(message)
+                    logger.info(f"Frame {pattern_index} inviato tramite stream_socket")
+                    success = True
                 except Exception as e:
-                    logger.warning(f"Errore nell'invio broadcast: {e}")
+                    logger.warning(f"Errore nell'invio tramite stream_socket: {e}")
 
-                logger.warning("Nessuna connessione client disponibile")
-                return False
+            # STRATEGIA 2: Utilizzo del connection_manager se disponibile
+            if not success and hasattr(self.server, 'client_ip') and self.server.client_ip:
+                client_ip = self.server.client_ip
+
+                # Se c'è un ConnectionManager disponibile
+                if hasattr(self.server, '_connection_manager') and self.server._connection_manager:
+                    # Trova il device_id associato all'IP client se possibile
+                    device_id = None
+
+                    # Cerca nelle connessioni recenti
+                    if hasattr(self.server, '_client_connections'):
+                        for d_id, info in self.server._client_connections.items():
+                            if info.get('ip_address') == client_ip:
+                                device_id = d_id
+                                break
+
+                    if device_id:
+                        try:
+                            # Invia il messaggio tramite il connection manager
+                            cm_success = self.server._connection_manager.send_message(
+                                device_id, "SCAN_FRAME", message)
+                            if cm_success:
+                                logger.info(f"Frame {pattern_index} inviato al client {device_id}")
+                                success = True
+                        except Exception as e:
+                            logger.warning(f"Errore nell'invio tramite connection_manager: {e}")
+
+            # STRATEGIA 3: Come ultima risorsa, creiamo un socket dedicato per il client
+            if not success and hasattr(self.server, 'client_ip') and self.server.client_ip:
+                try:
+                    import zmq
+                    # Creiamo un socket PUSH dedicato solo per l'invio dei frame (pattern push/pull)
+                    if not hasattr(self, '_frame_socket'):
+                        context = zmq.Context.instance()
+                        self._frame_socket = context.socket(zmq.PUSH)
+                        # Porta dedicata per frame scan: porta comandi + 2
+                        frame_port = self.server.config["server"]["command_port"] + 2
+                        self._frame_socket.bind(f"tcp://*:{frame_port}")
+                        logger.info(f"Socket dedicato per frame creato sulla porta {frame_port}")
+
+                    # Imposta un timeout per evitare blocchi
+                    self._frame_socket.setsockopt(zmq.SNDTIMEO, 500)
+                    self._frame_socket.send_json(message)
+                    logger.info(f"Frame {pattern_index} inviato tramite socket dedicato")
+                    success = True
+                except Exception as e:
+                    logger.warning(f"Errore nell'invio tramite socket dedicato: {e}")
+
+            # Notifica l'esito dell'operazione
+            if success:
+                logger.info(f"Frame {pattern_index} inviato con successo al client")
+            else:
+                logger.warning(f"Impossibile inviare il frame {pattern_index} al client")
+
+            return success
 
         except Exception as e:
             logger.error(f"Errore nella notifica dei frame al client: {e}")

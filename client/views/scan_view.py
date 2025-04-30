@@ -2395,149 +2395,274 @@ class ScanView(QWidget):
             return False
 
     def _register_frame_handler(self):
-        """Registra un gestore per ricevere i frame della scansione in tempo reale."""
-        if self.scanner_controller and self.scanner_controller._connection_manager:
+        """
+        Registra un gestore per ricevere i frame della scansione in tempo reale.
+        Versione migliorata con verifica della registrazione.
+        """
+        if self.scanner_controller and hasattr(self.scanner_controller, '_connection_manager'):
             try:
-                # Aggiungi questo log
-                logger.info("Tentativo di registrazione del gestore SCAN_FRAME")
-                self.scanner_controller._connection_manager.register_message_handler(
+                # Prima rimuovi eventuali registrazioni precedenti per evitare callback duplicati
+                cm = self.scanner_controller._connection_manager
+                if hasattr(cm, '_message_handlers') and "SCAN_FRAME" in cm._message_handlers:
+                    logger.info("Rimozione registrazione precedente del gestore SCAN_FRAME")
+                    cm._message_handlers.pop("SCAN_FRAME")
+
+                # Registra il nuovo handler
+                logger.info("Registrazione del gestore SCAN_FRAME")
+                cm.register_message_handler(
                     "SCAN_FRAME",
                     self._on_scan_frame_received
                 )
-                logger.info("Gestore di frame di scansione registrato")
+
+                # Verifica che la registrazione sia avvenuta con successo
+                if "SCAN_FRAME" in cm._message_handlers:
+                    logger.info("Gestore di frame di scansione registrato con successo")
+                else:
+                    logger.error("Registrazione del gestore SCAN_FRAME fallita!")
+
+                # Aggiungi un modo alternativo per ricevere i frame
+                # Registra anche un listener per PUB/SUB come backup
+                self._setup_frame_receiver()
+
             except Exception as e:
                 logger.error(f"Errore nella registrazione del gestore di frame: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
+        else:
+            logger.error("Scanner controller o connection manager non disponibile")
+
+    def _setup_frame_receiver(self):
+        """
+        Configura un ricevitore dedicato per i frame di scansione come backup.
+        Utilizza un pattern PULL per ricevere i frame dal socket PUSH del server.
+        """
+        try:
+            import zmq
+            import threading
+
+            def frame_receiver_thread():
+                """Thread dedicato a ricevere i frame di scansione"""
+                logger.info("Avvio thread ricevitore frame di scansione")
+
+                try:
+                    # Crea un contesto ZMQ
+                    context = zmq.Context()
+
+                    # Crea un socket PULL per ricevere i frame
+                    socket = context.socket(zmq.PULL)
+
+                    # Ottieni porta e indirizzo del server
+                    if self.selected_scanner:
+                        server_ip = self.selected_scanner.ip_address
+                        # La porta per i frame è la porta di comando + 2
+                        frame_port = self.selected_scanner.port + 2
+
+                        # Connetti al server
+                        logger.info(f"Connessione a {server_ip}:{frame_port} per ricevere frame")
+                        socket.connect(f"tcp://{server_ip}:{frame_port}")
+
+                        # Loop di ricezione
+                        while True:
+                            try:
+                                # Ricezione con timeout
+                                socket.setsockopt(zmq.RCVTIMEO, 1000)  # Timeout di 1 secondo
+                                message = socket.recv_json()
+
+                                if message and message.get("type") == "SCAN_FRAME":
+                                    # Processa il frame ricevuto
+                                    self._on_scan_frame_received(self.selected_scanner.device_id, message)
+
+                            except zmq.Again:
+                                # Timeout nella ricezione, ma continuiamo
+                                continue
+                            except Exception as e:
+                                logger.error(f"Errore nella ricezione frame: {e}")
+                                import traceback
+                                logger.error(f"Traceback: {traceback.format_exc()}")
+                                time.sleep(1)  # Pausa per evitare loop di errore
+
+                    # Pulizia
+                    socket.close()
+                    context.term()
+
+                except Exception as e:
+                    logger.error(f"Errore nel thread ricevitore frame: {e}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+
+            # Avvia il thread
+            self._frame_receiver_thread = threading.Thread(target=frame_receiver_thread)
+            self._frame_receiver_thread.daemon = True
+            self._frame_receiver_thread.start()
+            logger.info("Thread ricevitore frame avviato")
+
+        except Exception as e:
+            logger.error(f"Errore nella configurazione del ricevitore frame: {e}")
 
     def _on_scan_frame_received(self, device_id: str, message: Dict[str, Any]):
         """
         Gestisce la ricezione di un frame di scansione in tempo reale con gestione errori migliorata.
+        Versione corretta che risolve i problemi di salvataggio dei frame.
 
         Args:
             device_id: ID del dispositivo che ha inviato il frame
             message: Messaggio contenente i dati del frame
         """
         try:
-            # Log più dettagliato per debugging
-            pattern_index = message.get('frame_info', {}).get('pattern_index', 'sconosciuto')
-            pattern_name = message.get('frame_info', {}).get('pattern_name', 'sconosciuto')
-
-            logger.info(f"Ricevuto frame {pattern_index} ({pattern_name}) da {device_id}")
-
-            # Verifica che il messaggio sia valido con più dettagli
+            # Verifica minima del messaggio
             if not message:
                 logger.warning("Messaggio di frame vuoto")
                 return
 
-            if "frame_info" not in message:
-                logger.warning(f"Messaggio mancante di frame_info: {list(message.keys())}")
+            # Estrai informazioni dal messaggio con robustezza
+            frame_info = message.get("frame_info", {})
+            if not frame_info:
+                logger.warning("Informazioni frame mancanti nel messaggio")
                 return
 
-            if "left_frame" not in message:
-                logger.warning("Frame sinistro mancante nel messaggio")
-                return
-
-            if "right_frame" not in message:
-                logger.warning("Frame destro mancante nel messaggio")
-                return
-
-            # Estrai le informazioni
-            frame_info = message["frame_info"]
             pattern_index = frame_info.get("pattern_index", 0)
             pattern_name = frame_info.get("pattern_name", "unknown")
-            scan_id = message.get("scan_id")
+            scan_id = message.get("scan_id", self.current_scan_id)
 
-            # Se non c'è un ID di scansione nel messaggio, usa quello corrente
+            # Log dettagliato e informativo
+            logger.info(f"Ricevuto frame {pattern_index} ({pattern_name}) da {device_id}")
+
+            # Se non c'è un ID di scansione, usa quello corrente o crea un nuovo ID
             if not scan_id:
-                scan_id = self.current_scan_id
+                if self.current_scan_id:
+                    scan_id = self.current_scan_id
+                else:
+                    # Crea un nuovo ID come fallback
+                    scan_id = f"Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    self.current_scan_id = scan_id
+                    logger.info(f"Creato nuovo scan_id: {scan_id}")
 
-            if not scan_id:
-                logger.warning("Nessun ID di scansione disponibile per salvare i frame")
-                return
-
-            # Prepara la directory per salvare i frame
+            # Prepara la directory per salvare i frame, con gestione robusta dei percorsi
             scan_dir = os.path.join(str(self.output_dir), scan_id)
             left_dir = os.path.join(scan_dir, "left")
             right_dir = os.path.join(scan_dir, "right")
 
-            # Crea le directory se non esistono
-            os.makedirs(left_dir, exist_ok=True)
-            os.makedirs(right_dir, exist_ok=True)
+            # Crea le directory se non esistono, con gestione degli errori
+            for directory in [scan_dir, left_dir, right_dir]:
+                try:
+                    os.makedirs(directory, exist_ok=True)
+                    logger.debug(f"Directory creata/verificata: {directory}")
+                except Exception as e:
+                    logger.error(f"Errore nella creazione della directory {directory}: {e}")
+                    # Tenta di utilizzare una directory temporanea come fallback
+                    if directory == scan_dir:
+                        import tempfile
+                        scan_dir = tempfile.mkdtemp(prefix="unlook_scan_")
+                        logger.warning(f"Usando directory temporanea: {scan_dir}")
+                        left_dir = os.path.join(scan_dir, "left")
+                        right_dir = os.path.join(scan_dir, "right")
+                        # Riprova a creare le sottodirectory
+                        os.makedirs(left_dir, exist_ok=True)
+                        os.makedirs(right_dir, exist_ok=True)
+                        break
 
-            # Decodifica i dati dei frame con gestione errori migliorata
+            # Verifica i dati dei frame con gestione robusta
+            left_frame_data = message.get("left_frame")
+            right_frame_data = message.get("right_frame")
+
+            if not left_frame_data:
+                logger.warning(f"Frame sinistro mancante per pattern {pattern_index}")
+                return
+
+            if not right_frame_data:
+                logger.warning(f"Frame destro mancante per pattern {pattern_index}")
+                return
+
+            # Decodifica i dati dei frame
             import base64
-
             try:
-                # Decodifica i frame da base64
-                left_frame_data = base64.b64decode(message["left_frame"])
-                right_frame_data = base64.b64decode(message["right_frame"])
+                left_frame_data = base64.b64decode(left_frame_data)
+                right_frame_data = base64.b64decode(right_frame_data)
             except Exception as e:
                 logger.error(f"Errore nella decodifica base64: {e}")
                 return
 
-            # Salva i frame con gestione errori migliorata
+            # Salva i frame con gestione robusta degli errori
             left_file = os.path.join(left_dir, f"{pattern_index:04d}_{pattern_name}.png")
             right_file = os.path.join(right_dir, f"{pattern_index:04d}_{pattern_name}.png")
 
-            try:
-                # Converti da JPEG a immagine
-                import numpy as np
-                left_np = np.frombuffer(left_frame_data, np.uint8)
-                right_np = np.frombuffer(right_frame_data, np.uint8)
+            # Tracciamento dettagliato dei percorsi file
+            logger.debug(f"Salvataggio frame sinistro in: {left_file}")
+            logger.debug(f"Salvataggio frame destro in: {right_file}")
 
+            try:
+                # Converti da JPEG a immagine con robusto controllo degli errori
+                import numpy as np
+
+                # Decodifica il frame sinistro
+                left_np = np.frombuffer(left_frame_data, np.uint8)
                 left_img = cv2.imdecode(left_np, cv2.IMREAD_UNCHANGED)
+
+                if left_img is None or left_img.size == 0:
+                    logger.error(f"Decodifica fallita per frame sinistro (dimensione dati={len(left_frame_data)})")
+                    # Tenta di salvare i dati grezzi come fallback
+                    with open(left_file + ".jpg", "wb") as f:
+                        f.write(left_frame_data)
+                    logger.info(f"Salvati dati grezzi del frame sinistro in {left_file}.jpg")
+                else:
+                    # Salva l'immagine decodificata
+                    cv2.imwrite(left_file, left_img)
+                    logger.info(f"Frame sinistro salvato in {left_file}")
+
+                    # Verifica che il file sia stato creato correttamente
+                    if not os.path.exists(left_file) or os.path.getsize(left_file) == 0:
+                        logger.error(f"Verifica fallita: il file {left_file} non esiste o è vuoto")
+                        # Riprova con formato alternativo
+                        alt_left_file = left_file.replace(".png", ".jpg")
+                        cv2.imwrite(alt_left_file, left_img)
+                        logger.info(f"Tentativo alternativo: frame sinistro salvato in {alt_left_file}")
+
+                # Decodifica il frame destro
+                right_np = np.frombuffer(right_frame_data, np.uint8)
                 right_img = cv2.imdecode(right_np, cv2.IMREAD_UNCHANGED)
 
-                if left_img is None:
-                    logger.error(
-                        f"Errore nella decodifica dell'immagine sinistra: dimensione dati={len(left_frame_data)}")
-                    return
-
-                if right_img is None:
-                    logger.error(
-                        f"Errore nella decodifica dell'immagine destra: dimensione dati={len(right_frame_data)}")
-                    return
-
-                # Salva le immagini
-                cv2.imwrite(left_file, left_img)
-                cv2.imwrite(right_file, right_img)
-
-                # Verifica che i file siano stati creati
-                if not os.path.exists(left_file):
-                    logger.error(f"Errore: il file {left_file} non è stato creato!")
+                if right_img is None or right_img.size == 0:
+                    logger.error(f"Decodifica fallita per frame destro (dimensione dati={len(right_frame_data)})")
+                    # Tenta di salvare i dati grezzi come fallback
+                    with open(right_file + ".jpg", "wb") as f:
+                        f.write(right_frame_data)
+                    logger.info(f"Salvati dati grezzi del frame destro in {right_file}.jpg")
                 else:
-                    logger.info(f"Frame sinistro salvato in {left_file}, dimensione: {os.path.getsize(left_file)}")
+                    # Salva l'immagine decodificata
+                    cv2.imwrite(right_file, right_img)
+                    logger.info(f"Frame destro salvato in {right_file}")
 
-                if not os.path.exists(right_file):
-                    logger.error(f"Errore: il file {right_file} non è stato creato!")
-                else:
-                    logger.info(f"Frame destro salvato in {right_file}, dimensione: {os.path.getsize(right_file)}")
+                    # Verifica che il file sia stato creato correttamente
+                    if not os.path.exists(right_file) or os.path.getsize(right_file) == 0:
+                        logger.error(f"Verifica fallita: il file {right_file} non esiste o è vuoto")
+                        # Riprova con formato alternativo
+                        alt_right_file = right_file.replace(".png", ".jpg")
+                        cv2.imwrite(alt_right_file, right_img)
+                        logger.info(f"Tentativo alternativo: frame destro salvato in {alt_right_file}")
 
-                # Aggiorna il log
+                # Aggiorna il log della scansione
                 self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Frame ricevuto: {pattern_name} (indice {pattern_index})\n"
 
-                # Aggiorna l'anteprima delle immagini
-                self._update_preview_image()
-
-                # Invia un ACK al server
-                try:
-                    self.scanner_controller.send_command(
-                        device_id,
-                        "FRAME_ACK",
-                        {
-                            "pattern_index": pattern_index,
-                            "received_timestamp": time.time()
-                        }
-                    )
-                except Exception as ack_err:
-                    logger.debug(f"Errore nell'invio dell'ACK del frame: {ack_err}")
+                # Aggiorna l'anteprima delle immagini se richiesto
+                self._update_preview_image(scan_dir)
 
             except Exception as e:
                 logger.error(f"Errore nel salvataggio dei frame: {e}")
                 import traceback
                 logger.error(f"Traceback: {traceback.format_exc()}")
 
+                # Tentativo di fallback: salva i dati grezzi
+                try:
+                    with open(left_file + ".raw", "wb") as f:
+                        f.write(left_frame_data)
+                    with open(right_file + ".raw", "wb") as f:
+                        f.write(right_frame_data)
+                    logger.info("Salvati dati frame grezzi come fallback")
+                except Exception as e2:
+                    logger.error(f"Anche il salvataggio di fallback è fallito: {e2}")
+
         except Exception as e:
-            logger.error(f"Errore nella gestione del frame ricevuto: {e}")
+            logger.error(f"Errore generale nella gestione del frame ricevuto: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
 
