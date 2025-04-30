@@ -19,10 +19,10 @@ from PySide6.QtWidgets import (
     QGroupBox, QFormLayout, QComboBox, QSlider, QCheckBox,
     QSpinBox, QDoubleSpinBox, QFrame, QSplitter, QFileDialog,
     QMessageBox, QTabWidget, QRadioButton, QButtonGroup, QLineEdit,
-    QProgressDialog
+    QProgressDialog, QStyle, QStyleOption, QStyleFactory, QApplication
 )
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, QMutex, QMutexLocker
-from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QMutex, QMutexLocker, QPoint
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont, QPalette
 
 from client.models.scanner_model import Scanner, ScannerStatus
 from client.network.stream_receiver import StreamReceiver
@@ -279,6 +279,50 @@ class StreamView(QWidget):
                 frame = color_frame
 
         return frame
+
+    def _update_status(self, message):
+        """
+        Aggiorna in modo sicuro il messaggio di stato nell'interfaccia utente.
+        Gestisce diversi possibili layout dell'interfaccia per massima compatibilità.
+
+        Args:
+            message: Il messaggio di stato da visualizzare
+        """
+        # Log del messaggio di stato
+        logger.debug(f"Stato streaming: {message}")
+
+        # Prova diversi possibili elementi dell'interfaccia per aggiornare lo stato
+        try:
+            # Opzione 1: attributo status_label diretto
+            if hasattr(self, 'status_label'):
+                self.status_label.setText(message)
+                return
+
+            # Opzione 2: status_label nel pannello di controllo
+            if hasattr(self, 'control_panel') and hasattr(self.control_panel, 'status_label'):
+                self.control_panel.status_label.setText(message)
+                return
+
+            # Opzione 3: info_label (possibile alternativa)
+            if hasattr(self, 'info_label'):
+                self.info_label.setText(message)
+                return
+
+            # Opzione 4: Cerca la statusbar nella finestra principale
+            main_window = self.window()
+            if hasattr(main_window, 'status_bar'):
+                main_window.status_bar.showMessage(message, 3000)  # Mostra per 3 secondi
+                return
+
+            # Opzione 5: Nessuna opzione disponibile, solo log
+            logger.info(f"Nessuna UI per stato: {message}")
+        except Exception as e:
+            # In caso di errore, registra solo il messaggio
+            logger.warning(f"Errore nell'aggiornamento dello stato UI: {e}")
+        finally:
+            # Logga sempre il messaggio
+            logger.info(f"Stato streaming: {message}")
+
 
     def _update_lag_label(self):
         """
@@ -1112,118 +1156,58 @@ class DualStreamView(QWidget):
             except Exception as e:
                 logger.error(f"Errore nell'invio del keepalive: {e}")
 
-    def start_streaming(self, scanner: Scanner) -> bool:
+    def start_streaming(self, scanner=None):
         """
-        Avvia lo streaming video da uno scanner.
+        Avvia lo streaming dalle camere dello scanner.
 
         Args:
-            scanner: Oggetto Scanner da cui ricevere lo stream
-
-        Returns:
-            True se lo streaming è stato avviato, False altrimenti
+            scanner: Scanner da cui ricevere lo stream (opzionale, usa selected_scanner se None)
         """
-        # Verifica che scanner_controller sia impostato
-        if not hasattr(self, 'scanner_controller') or self.scanner_controller is None:
-            logger.error("scanner_controller non impostato in DualStreamView")
-
-            # Mostra messaggio di errore all'utente
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.critical(
-                self,
-                "Errore",
-                "Errore interno: scanner_controller non impostato"
-            )
-            return False
-
-        # Salva il riferimento allo scanner
-        self.selected_scanner = scanner
-        self._scanner = scanner
-
-        # Verifica dei prerequisiti
-        if self.is_streaming_active:
-            logger.warning("Streaming già attivo")
-            return False
-
-        try:
-            # Imposta lo scanner selezionato
+        if scanner:
             self.selected_scanner = scanner
 
-            # Assicurati che lo scanner sia connesso
-            is_connected = (self.scanner_controller and
-                            self.scanner_controller.is_connected(scanner.device_id))
+        if not self.selected_scanner:
+            logger.warning("Impossibile avviare lo streaming: nessuno scanner selezionato")
+            return False
 
-            if not is_connected:
-                logger.warning(f"Lo scanner {scanner.name} non è connesso")
-                self.status_label.setText("Scanner non connesso")
-                return False
+        # Verifica se lo streaming è già attivo
+        if hasattr(self, '_streaming_active') and self._streaming_active:
+            logger.info(f"Streaming già attivo da {self.selected_scanner.name}")
+            return True
 
-            # Aggiorna l'interfaccia
-            self.status_label.setText(f"Connessione allo stream di {scanner.name}...")
-            self.start_button.setEnabled(False)
-            self.stop_button.setEnabled(True)
+        try:
+            # Visualizza messaggio di stato nei log
+            logger.info(f"Avvio streaming da {self.selected_scanner.name}...")
 
-            # Invia il comando di avvio streaming al server
-            logger.info(f"Invio comando START_STREAM a {scanner.name}")
+            # Ottieni le informazioni di connessione
+            device_id = self.selected_scanner.device_id
+            host = self.selected_scanner.ip_address
+            port = self.selected_scanner.port + 1  # La porta di streaming è quella di comando + 1
 
-            # Creazione della configurazione di streaming
-            streaming_config = {
-                "dual_camera": True,  # Richiedi entrambe le camere se disponibili
-                "quality": 90,  # Qualità JPEG
-                "target_fps": 30  # FPS target
-            }
+            logger.info(f"Avvio streaming da {host}:{port} (Device ID: {device_id})")
 
-            # Invia il comando
-            command_success = self.scanner_controller.send_command(
-                scanner.device_id,
-                "START_STREAM",
-                streaming_config
-            )
+            # Verifica che la connessione sia attiva
+            if not self.scanner_controller.is_connected(device_id):
+                # Prova a connetterti prima
+                logger.info("Tentativo di connessione prima di avviare lo streaming...")
+                success = self.scanner_controller.connect_to_scanner(device_id)
+                if not success:
+                    logger.error("Impossibile connettersi allo scanner")
+                    return False
 
-            if not command_success:
-                logger.error(f"Impossibile inviare il comando START_STREAM a {scanner.name}")
-                self.status_label.setText("Errore nell'avvio dello streaming")
-                self.start_button.setEnabled(True)
-                self.stop_button.setEnabled(False)
-                return False
+            # Inizializza il ricevitore di streaming
+            try:
+                if hasattr(self, 'stream_receiver') and self.stream_receiver:
+                    # Stop any existing stream
+                    self.stop_streaming()
+                    # Release resources
+                    self.stream_receiver.deleteLater()
+                    self.stream_receiver = None
+            except Exception as e:
+                logger.error(f"Errore nella pulizia dello stream_receiver esistente: {e}")
 
-            # Attendi la risposta
-            response = self.scanner_controller.wait_for_response(
-                scanner.device_id,
-                "START_STREAM",
-                timeout=5.0
-            )
-
-            if not response or response.get("status") != "ok":
-                error_msg = "Nessuna risposta" if not response else response.get("message", "Errore sconosciuto")
-                logger.error(f"Errore nell'avvio dello streaming: {error_msg}")
-                self.status_label.setText(f"Errore: {error_msg}")
-                self.start_button.setEnabled(True)
-                self.stop_button.setEnabled(False)
-                return False
-
-            # Estrai informazioni dalla risposta
-            streaming_enabled = response.get("streaming", False)
-            num_cameras = response.get("cameras", 0)
-            quality = response.get("quality", 90)
-            target_fps = response.get("target_fps", 30)
-            dual_camera = response.get("dual_camera", True)
-
-            if not streaming_enabled:
-                logger.error("Il server ha risposto ma lo streaming non è attivo")
-                self.status_label.setText("Errore: lo streaming non è attivo sul server")
-                self.start_button.setEnabled(True)
-                self.stop_button.setEnabled(False)
-                return False
-
-            # Avvia il receiver di stream
-            ip_address = scanner.ip_address
-            stream_port = scanner.port + 1  # Assume che la porta di streaming sia +1 rispetto alla porta di comando
-
-            # Usa il modulo di stream_receiver
-            from client.network.stream_receiver import StreamReceiver
-
-            # Crea il receiver di stream
-            self.stream_receiver = StreamReceiver(ip_address, stream_port)
+            # Crea un nuovo ricevitore
+            self.stream_receiver = StreamReceiver(host, port)
 
             # Collega i segnali
             self.stream_receiver.frame_received.connect(self._on_frame_received)
@@ -1231,26 +1215,76 @@ class DualStreamView(QWidget):
             self.stream_receiver.disconnected.connect(self._on_stream_disconnected)
             self.stream_receiver.error.connect(self._on_stream_error)
 
-            # Avvia il receiver
+            # Invia il comando di avvio dello streaming
+            command_success = self.scanner_controller.send_command(
+                device_id,
+                "START_STREAM",
+                {
+                    "dual_camera": True,
+                    "quality": 90,
+                    "target_fps": 30
+                }
+            )
+
+            if not command_success:
+                logger.error("Impossibile inviare il comando START_STREAM")
+                return False
+
+            # Attendi la risposta
+            response = self.scanner_controller.wait_for_response(
+                device_id,
+                "START_STREAM",
+                timeout=5.0
+            )
+
+            if not response or response.get("status") != "ok":
+                error_msg = "Errore risposta server" if not response else response.get("message", "Errore sconosciuto")
+                logger.error(f"Risposta START_STREAM non valida: {error_msg}")
+                return False
+
+            # Avvia il ricevitore di streaming
             self.stream_receiver.start()
 
-            # Aggiorna lo stato
-            self.is_streaming_active = True
-            scanner.status = ScannerStatus.STREAMING
+            # Imposta lo stato di streaming attivo
+            self._streaming_active = True
 
-            # Aggiorna l'interfaccia
-            self.status_label.setText(f"Streaming da {scanner.name} ({num_cameras} camere)")
+            # Aggiorna lo stato dello scanner
+            if self.selected_scanner.status != ScannerStatus.STREAMING:
+                self.selected_scanner.status = ScannerStatus.STREAMING
 
-            logger.info(
-                f"Streaming avviato da {scanner.name} ({num_cameras} camere, {target_fps} FPS, qualità {quality})")
+            # Avvia il timer per il monitoraggio FPS se esiste
+            if hasattr(self, '_fps_timer'):
+                self._fps_timer.start(1000)  # Aggiorna una volta al secondo
+
+            # Resetta i contatori FPS se esistono
+            if hasattr(self, '_frame_count_left'):
+                self._frame_count_left = 0
+            if hasattr(self, '_frame_count_right'):
+                self._frame_count_right = 0
+            if hasattr(self, '_last_fps_update'):
+                self._last_fps_update = time.time()
+
+            # Aggiorna l'interfaccia del pannello di controllo se esiste
+            if hasattr(self, 'control_panel') and hasattr(self.control_panel, 'streaming_button'):
+                self.control_panel.streaming_button.setText("Ferma Stream")
+
+            logger.info(f"Streaming avviato con successo da {self.selected_scanner.name}")
             return True
 
         except Exception as e:
             logger.error(f"Errore nell'avvio dello streaming: {e}")
-            self.status_label.setText(f"Errore: {str(e)}")
-            self.start_button.setEnabled(True)
-            self.stop_button.setEnabled(False)
+            # Assicurati che lo stato sia coerente
+            self._streaming_active = False
             return False
+
+    def is_streaming(self):
+        """
+        Verifica se lo streaming è attualmente attivo.
+
+        Returns:
+            bool: True se lo streaming è attivo, False altrimenti
+        """
+        return hasattr(self, '_streaming_active') and self._streaming_active
 
     def _start_actual_streaming(self) -> bool:
         """
@@ -1429,61 +1463,95 @@ class DualStreamView(QWidget):
         self.apply_settings_button.setEnabled(is_connected)
 
     def stop_streaming(self):
-        """Ferma lo streaming video con gestione migliorata dello stato del dispositivo."""
-        if not self._streaming:
-            return
+        """
+        Ferma lo streaming in modo sicuro con gestione migliorata delle risorse.
 
-        logger.info("Arresto dello streaming video...")
+        Returns:
+            bool: True se lo stop è avvenuto con successo, False altrimenti
+        """
+        if not hasattr(self, '_streaming_active') or not self._streaming_active:
+            logger.debug("Streaming non attivo, nessuna azione necessaria")
+            return True
 
-        # Ferma il timer di retry se attivo
-        if self._retry_timer.isActive():
-            self._retry_timer.stop()
+        logger.info("Arresto dello streaming...")
 
-        # Ferma il timer di controllo dual camera se attivo
-        if hasattr(self, '_camera_check_timer') and self._camera_check_timer.isActive():
-            self._camera_check_timer.stop()
-
-        # Ferma il ricevitore di stream
-        if self._stream_receiver:
-            self._stream_receiver.stop()
-            self._stream_receiver = None
-
-        # Invia un messaggio al server per fermare lo streaming
-        if self._scanner and self._connection_manager:
-            if self._connection_manager.is_connected(self._scanner.device_id):
-                self._connection_manager.send_message(self._scanner.device_id, "STOP_STREAM")
-
-                # Invia un PING esplicito per verificare che la connessione sia ancora attiva
-                time.sleep(0.5)  # Breve pausa
-                ping_success = self._connection_manager.send_message(
-                    self._scanner.device_id,
-                    "PING",
-                    {"timestamp": time.time()}
+        try:
+            # Invia comando di stop solo se c'è uno scanner selezionato e connesso
+            if self.selected_scanner and self.scanner_controller.is_connected(self.selected_scanner.device_id):
+                # Invia il comando STOP_STREAM
+                command_success = self.scanner_controller.send_command(
+                    self.selected_scanner.device_id,
+                    "STOP_STREAM"
                 )
 
-                # Se il ping ha successo, mantieni lo stato CONNECTED
-                if ping_success and self._scanner.status == ScannerStatus.STREAMING:
-                    self._scanner.status = ScannerStatus.CONNECTED
+                if not command_success:
+                    logger.warning("Impossibile inviare il comando STOP_STREAM")
+                else:
+                    logger.info("Comando STOP_STREAM inviato con successo")
 
-        # Pulisci le viste
-        for view in self.stream_views:
-            view.clear()
+                # Aggiorna lo stato dello scanner (anche se il comando fallisce)
+                if self.selected_scanner.status == ScannerStatus.STREAMING:
+                    self.selected_scanner.status = ScannerStatus.CONNECTED
 
-        # Reimposta lo stato di streaming
-        self._streaming = False
-        logger.info("Streaming fermato")
+            # Ferma il ricevitore di streaming in modo sicuro
+            if hasattr(self, 'stream_receiver') and self.stream_receiver:
+                try:
+                    # Disconnetti i segnali prima di fermare il ricevitore
+                    try:
+                        self.stream_receiver.frame_received.disconnect()
+                        self.stream_receiver.connected.disconnect()
+                        self.stream_receiver.disconnected.disconnect()
+                        self.stream_receiver.error.disconnect()
+                    except Exception as e:
+                        logger.debug(f"Errore nella disconnessione dei segnali: {e}")
 
-        # Aggiorna i pulsanti dell'interfaccia
-        self._update_ui_buttons()
+                    # Ferma il ricevitore
+                    self.stream_receiver.stop()
 
-        # Notifica il controller dello scanner del cambio di stato
-        if self._scanner and hasattr(self, 'scanner_controller') and self.scanner_controller:
-            # Forza un aggiornamento dell'interfaccia utente
-            self.scanner_controller.scanners_changed.emit()
+                    # Non eseguire deleteLater qui, potrebbe causare crash
+                except Exception as e:
+                    logger.error(f"Errore nell'arresto del ricevitore: {e}")
 
-    def is_streaming(self) -> bool:
-        """Verifica se lo streaming è attivo."""
-        return self._streaming
+            # Ferma il timer FPS
+            if hasattr(self, '_fps_timer') and self._fps_timer.isActive():
+                self._fps_timer.stop()
+
+            # Svuota le etichette video se esistono
+            if hasattr(self, 'left_video_label'):
+                self.left_video_label.clear()
+            if hasattr(self, 'right_video_label'):
+                self.right_video_label.clear()
+
+            # Pulisci le label FPS se esistono
+            if hasattr(self, 'fps_label_left'):
+                self.fps_label_left.setText("0 FPS")
+            if hasattr(self, 'fps_label_right'):
+                self.fps_label_right.setText("0 FPS")
+
+            # Aggiorna lo stato di streaming
+            self._streaming_active = False
+
+            # Aggiorna l'interfaccia
+            if hasattr(self, 'control_panel') and hasattr(self.control_panel, 'streaming_button'):
+                self.control_panel.streaming_button.setText("Avvia Stream")
+
+            logger.info("Streaming arrestato con successo")
+            return True
+
+        except Exception as e:
+            logger.error(f"Errore nell'arresto dello streaming: {e}")
+            # Assicurati che lo stato sia coerente anche in caso di errore
+            self._streaming_active = False
+            return False
+
+    def is_streaming(self):
+        """
+        Verifica se lo streaming è attualmente attivo.
+
+        Returns:
+            bool: True se lo streaming è attivo, False altrimenti
+        """
+        return hasattr(self, '_streaming_active') and self._streaming_active
 
     @Slot(int, np.ndarray, float)
     def _on_frame_received(self, camera_index: int, frame: np.ndarray, timestamp: float):
