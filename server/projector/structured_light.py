@@ -120,7 +120,7 @@ class StructuredLightController:
 
     def initialize_projector(self) -> bool:
         """
-        Inizializza la connessione con il proiettore DLP.
+        Inizializza la connessione con il proiettore DLP e imposta lo sfondo nero.
 
         Returns:
             True se l'inizializzazione è riuscita, False altrimenti
@@ -139,7 +139,14 @@ class StructuredLightController:
             # Imposta un pattern iniziale (nero) per verifica
             self._projector.generate_solid_field(Color.Black)
 
-            logger.info("Proiettore DLP inizializzato correttamente")
+            # Imposta il bordo nero
+            try:
+                self._projector.set_display_border(BorderEnable.Disable)
+                logger.info("Bordo proiettore disabilitato")
+            except Exception as border_err:
+                logger.warning(f"Impossibile disabilitare il bordo: {border_err}")
+
+            logger.info("Proiettore DLP inizializzato correttamente e impostato a nero")
             return True
 
         except Exception as e:
@@ -153,13 +160,18 @@ class StructuredLightController:
             try:
                 # Imposta un pattern nero
                 self._projector.generate_solid_field(Color.Black)
+                # Disabilita il bordo
+                try:
+                    self._projector.set_display_border(BorderEnable.Disable)
+                except:
+                    pass
                 # Torna alla modalità video
                 self._projector.set_operating_mode(OperatingMode.ExternalVideoPort)
                 # Chiudi la connessione
                 self._projector.close()
-                logger.info("Proiettore DLP chiuso correttamente")
+                logger.info("Proiettore DLP chiuso correttamente e impostato a nero")
             except Exception as e:
-                logger.error(f"Errore nella chiusura del proiettore: {str(e)}")
+                logger.error(f"Errore nella chiusura del proiettore: {e}")
 
     def set_frame_capture_callback(self, callback: Callable):
         """
@@ -716,6 +728,7 @@ class StructuredLightController:
     def _capture_and_save_frame(self, pattern_index: int, pattern_name: str) -> bool:
         """
         Acquisisce e salva i frame dalle due camere per il pattern corrente.
+        Versione aggiornata che invia anche i frame al client in tempo reale.
 
         Args:
             pattern_index: Indice del pattern corrente
@@ -748,7 +761,7 @@ class StructuredLightController:
                 logger.error(self.error_message)
                 return False
 
-            # Salva i frame
+            # Salva i frame localmente
             left_file = self.left_dir / f"{pattern_index:04d}_{pattern_name}.png"
             right_file = self.right_dir / f"{pattern_index:04d}_{pattern_name}.png"
 
@@ -757,6 +770,27 @@ class StructuredLightController:
 
             # Salva i frame anche nella lista per eventuale elaborazione successiva
             self.frame_pairs.append((frame_left, frame_right))
+
+            # Invia i frame al client in tempo reale
+            try:
+                from server.scan_manager import notify_client_new_frames
+                # Codifica i frame in formato JPEG per una trasmissione più efficiente
+                _, left_encoded = cv2.imencode('.jpg', frame_left, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                _, right_encoded = cv2.imencode('.jpg', frame_right, [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+                # Informazioni sul frame per il client
+                frame_info = {
+                    "pattern_index": pattern_index,
+                    "pattern_name": pattern_name,
+                    "timestamp": time.time()
+                }
+
+                # Notifica il client
+                notify_client_new_frames(frame_info, left_encoded.tobytes(), right_encoded.tobytes())
+                logger.debug(f"Frame per pattern {pattern_name} inviati al client")
+            except Exception as e:
+                logger.warning(f"Impossibile inviare i frame al client: {e}")
+                # Non fallire se l'invio al client non riesce, continua con la scansione
 
             # Aggiorna le statistiche
             self.scan_stats['captured_frames'] += 2
@@ -769,7 +803,6 @@ class StructuredLightController:
             logger.error(self.error_message)
             self.scan_stats['errors'] += 1
             return False
-
     def process_scan_data(self, output_file: str = None) -> bool:
         """
         Elabora i dati acquisiti durante la scansione per generare la nuvola di punti.

@@ -1736,6 +1736,20 @@ def main():
     os.environ["UNLOOK_I2C_BUS"] = str(args.i2c_bus)
     os.environ["UNLOOK_I2C_ADDRESS"] = args.i2c_address
 
+    # Inizializza il proiettore a nero
+    try:
+        from server.projector.dlp342x import DLPC342XController, OperatingMode, Color, BorderEnable
+        projector = DLPC342XController(bus=args.i2c_bus,
+                                       address=int(args.i2c_address, 16) if args.i2c_address.startswith("0x") else int(
+                                           args.i2c_address))
+        projector.set_operating_mode(OperatingMode.TestPatternGenerator)
+        time.sleep(0.5)
+        projector.generate_solid_field(Color.Black)
+        projector.set_display_border(BorderEnable.Disable)
+        logger.info("Proiettore inizializzato a nero all'avvio del server")
+    except Exception as e:
+        logger.warning(f"Impossibile inizializzare il proiettore all'avvio: {e}")
+
     # Crea e avvia il server
     server = UnLookServer(config_path=args.config)
 

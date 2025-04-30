@@ -300,13 +300,16 @@ class ScannerController(QObject):
             return None
 
         try:
-            # Per i comandi di scansione, usiamo un timeout più lungo
-            if command_type.startswith("START_SCAN") or command_type.startswith("STOP_SCAN") or command_type.startswith(
-                    "GET_SCAN") or command_type == "CHECK_SCAN_CAPABILITY":
-                effective_timeout = max(60.0, timeout)  # Minimo 60 secondi per comandi di scansione
-                logger.info(f"Usando timeout esteso di {effective_timeout}s per comando {command_type}")
+            # Per i comandi di scansione, usiamo un timeout più corto
+            # MODIFICA: Ridotti i timeout per evitare blocchi UI
+            if command_type.startswith("START_SCAN") or command_type.startswith("STOP_SCAN"):
+                effective_timeout = 20.0  # Ridotto da 60s a 20s
+            elif command_type.startswith("GET_SCAN") or command_type == "CHECK_SCAN_CAPABILITY":
+                effective_timeout = 15.0  # Ridotto da 60s a 15s
             else:
-                effective_timeout = timeout
+                effective_timeout = min(timeout, 10.0)  # Limitato a massimo 10s
+
+            logger.info(f"Usando timeout di {effective_timeout}s per comando {command_type}")
 
             # Attendi che la risposta sia disponibile
             start_time = time.time()

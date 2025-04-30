@@ -539,6 +539,55 @@ class ScanManager:
         """
         return self._scan_config
 
+    def notify_client_new_frames(self, frame_info: Dict[str, Any], left_frame_data: bytes, right_frame_data: bytes) -> bool:
+        """
+        Notifica il client di nuovi frame acquisiti durante la scansione.
+
+        Args:
+            frame_info: Informazioni sul frame (indice, nome pattern, timestamp)
+            left_frame_data: Dati del frame sinistro codificati in JPEG
+            right_frame_data: Dati del frame destro codificati in JPEG
+
+        Returns:
+            True se la notifica è stata inviata con successo, False altrimenti
+        """
+        try:
+            # Se non ci sono client connessi, non inviare nulla
+            if not hasattr(self, 'server') or not self.server or not hasattr(self.server, 'state'):
+                return False
+
+            # Verifica se c'è un client connesso
+            if self.server.state.get('clients_connected', 0) == 0:
+                return False
+
+            # Prepara il messaggio
+            import base64
+
+            # Codifica i dati in base64 per la trasmissione JSON
+            left_b64 = base64.b64encode(left_frame_data).decode('utf-8')
+            right_b64 = base64.b64encode(right_frame_data).decode('utf-8')
+
+            message = {
+                "type": "SCAN_FRAME",
+                "frame_info": frame_info,
+                "left_frame": left_b64,
+                "right_frame": right_b64,
+                "scan_id": self.current_scan_id if hasattr(self, 'current_scan_id') else None
+            }
+
+            # Invia il messaggio al client attraverso il socket di comando
+            for device_id in self.server._client_connections:
+                try:
+                    self.server._connection_manager.send_message(device_id, "SCAN_FRAME", message)
+                    return True
+                except Exception as e:
+                    logger.warning(f"Errore nell'invio del frame al client {device_id}: {e}")
+
+            return False
+        except Exception as e:
+            logger.error(f"Errore nella notifica dei frame al client: {e}")
+            return False
+
     def check_scan_capability(self) -> Dict[str, Any]:
         """
         Verifica la capacità di scansione 3D del sistema.
