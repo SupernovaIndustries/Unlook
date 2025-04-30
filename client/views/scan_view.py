@@ -1168,7 +1168,10 @@ class ScanView(QWidget):
                 self.status_label.setText("Scanner non connesso")
 
     def _start_scan(self):
-        """Avvia una nuova scansione con polling dello stato migliorato e migliore sincronizzazione con lo streaming."""
+        """
+        Avvia una nuova scansione con gestione della connessione migliorata.
+        Versione con ping attivo e timeout estesi per mantenere la connessione durante tutta la scansione.
+        """
         if self.is_scanning:
             return
 
@@ -1199,6 +1202,35 @@ class ScanView(QWidget):
 
             # Breve pausa per assicurarsi che la connessione sia stabilita
             time.sleep(0.5)
+
+        # MIGLIORAMENTO: Prima dell'avvio della scansione, invia un ping con timeout esteso
+        # per assicurarsi che la connessione sia solida
+        try:
+            import socket
+            # Ottieni l'IP locale
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+
+            # Invia un ping con informazioni estese
+            ping_success = self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "PING",
+                {
+                    "timestamp": time.time(),
+                    "client_ip": local_ip,
+                    "keep_connection": True,  # Flag per mantenere la connessione attiva
+                    "client_session_id": str(time.time())  # ID sessione unico
+                }
+            )
+
+            logger.info(f"Ping pre-scansione inviato con successo: {ping_success}")
+
+            # Attesa breve per assicurarsi che il ping venga elaborato
+            time.sleep(0.2)
+        except Exception as e:
+            logger.debug(f"Errore nell'invio del ping pre-scansione: {e}")
 
         # Prima di avviare la scansione, ferma lo streaming se attivo
         streaming_active = False
@@ -1233,6 +1265,18 @@ class ScanView(QWidget):
 
         # Prepara la configurazione
         scan_config = self.scan_config.copy()
+
+        # MIGLIORAMENTO: Aggiungi informazioni del client alla configurazione
+        try:
+            import socket
+            scan_config["client_info"] = {
+                "ip": socket.gethostbyname(socket.gethostname()),
+                "hostname": socket.gethostname(),
+                "timestamp": time.time(),
+                "session_id": str(time.time())
+            }
+        except:
+            pass
 
         # Aggiorna l'interfaccia
         self.progress_bar.setValue(0)
@@ -1300,6 +1344,15 @@ class ScanView(QWidget):
 
             # Aggiorna il log
             self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Comando di avvio scansione inviato, in attesa di conferma...\n"
+
+            # MIGLIORAMENTO: Aggiungi un timer per l'invio di ping durante la scansione
+            self._scan_keepalive_timer = QTimer(self)
+            self._scan_keepalive_timer.timeout.connect(self._send_scan_keepalive)
+            self._scan_keepalive_timer.start(2000)  # Invia un ping ogni 2 secondi
+
+            # Log dell'avvio del timer keepalive
+            logger.info("Timer keepalive scansione avviato")
+            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Timer keepalive scansione avviato\n"
 
             # Avvia un timer per il polling dello stato invece di aspettare sincronamente
             self._start_status_polling_timer()
@@ -1562,6 +1615,41 @@ class ScanView(QWidget):
             logger.error(f"Errore nell'elaborazione della risposta di stato: {e}")
             self._polling_errors += 1
 
+    def _send_scan_keepalive(self):
+        """
+        Invia un segnale keepalive durante la scansione per mantenere la connessione attiva.
+        Questa funzione viene chiamata periodicamente dal timer durante la scansione.
+        """
+        if not self.is_scanning or not self.scanner_controller or not self.selected_scanner:
+            # Se la scansione è terminata, ferma il timer
+            if hasattr(self, '_scan_keepalive_timer') and self._scan_keepalive_timer.isActive():
+                self._scan_keepalive_timer.stop()
+                logger.info("Timer keepalive scansione fermato")
+            return
+
+        try:
+            import socket
+            # Ottieni l'IP locale
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+
+            # Invia un ping keepalive
+            self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "PING",
+                {
+                    "timestamp": time.time(),
+                    "client_ip": local_ip,
+                    "keep_connection": True,
+                    "is_scanning": True,
+                    "scan_id": self.current_scan_id
+                }
+            )
+            logger.debug("Keepalive scansione inviato")
+        except Exception as e:
+            logger.debug(f"Errore nell'invio del keepalive scansione: {e}")
     def _handle_status_timeout(self):
         """Gestisce il timeout nella risposta allo stato della scansione."""
         logger.warning("Timeout nella richiesta dello stato della scansione")
@@ -2322,17 +2410,34 @@ class ScanView(QWidget):
 
     def _on_scan_frame_received(self, device_id: str, message: Dict[str, Any]):
         """
-        Gestisce la ricezione di un frame di scansione in tempo reale.
+        Gestisce la ricezione di un frame di scansione in tempo reale con gestione errori migliorata.
 
         Args:
             device_id: ID del dispositivo che ha inviato il frame
             message: Messaggio contenente i dati del frame
         """
         try:
-            logger.info(f"Ricevuto frame {message.get('frame_info', {}).get('pattern_index')} da {device_id}")
-            # Verifica che il messaggio sia valido
-            if not message or "frame_info" not in message or "left_frame" not in message or "right_frame" not in message:
-                logger.warning("Messaggio di frame non valido")
+            # Log più dettagliato per debugging
+            pattern_index = message.get('frame_info', {}).get('pattern_index', 'sconosciuto')
+            pattern_name = message.get('frame_info', {}).get('pattern_name', 'sconosciuto')
+
+            logger.info(f"Ricevuto frame {pattern_index} ({pattern_name}) da {device_id}")
+
+            # Verifica che il messaggio sia valido con più dettagli
+            if not message:
+                logger.warning("Messaggio di frame vuoto")
+                return
+
+            if "frame_info" not in message:
+                logger.warning(f"Messaggio mancante di frame_info: {list(message.keys())}")
+                return
+
+            if "left_frame" not in message:
+                logger.warning("Frame sinistro mancante nel messaggio")
+                return
+
+            if "right_frame" not in message:
+                logger.warning("Frame destro mancante nel messaggio")
                 return
 
             # Estrai le informazioni
@@ -2358,44 +2463,83 @@ class ScanView(QWidget):
             os.makedirs(left_dir, exist_ok=True)
             os.makedirs(right_dir, exist_ok=True)
 
-            # Decodifica i dati dei frame
+            # Decodifica i dati dei frame con gestione errori migliorata
             import base64
 
-            # Decodifica i frame da base64
-            left_frame_data = base64.b64decode(message["left_frame"])
-            right_frame_data = base64.b64decode(message["right_frame"])
+            try:
+                # Decodifica i frame da base64
+                left_frame_data = base64.b64decode(message["left_frame"])
+                right_frame_data = base64.b64decode(message["right_frame"])
+            except Exception as e:
+                logger.error(f"Errore nella decodifica base64: {e}")
+                return
 
-            # Salva i frame
+            # Salva i frame con gestione errori migliorata
             left_file = os.path.join(left_dir, f"{pattern_index:04d}_{pattern_name}.png")
             right_file = os.path.join(right_dir, f"{pattern_index:04d}_{pattern_name}.png")
 
-            # Converti da JPEG a immagine
-            import numpy as np
-            left_np = np.frombuffer(left_frame_data, np.uint8)
-            right_np = np.frombuffer(right_frame_data, np.uint8)
+            try:
+                # Converti da JPEG a immagine
+                import numpy as np
+                left_np = np.frombuffer(left_frame_data, np.uint8)
+                right_np = np.frombuffer(right_frame_data, np.uint8)
 
-            left_img = cv2.imdecode(left_np, cv2.IMREAD_UNCHANGED)
-            right_img = cv2.imdecode(right_np, cv2.IMREAD_UNCHANGED)
+                left_img = cv2.imdecode(left_np, cv2.IMREAD_UNCHANGED)
+                right_img = cv2.imdecode(right_np, cv2.IMREAD_UNCHANGED)
 
-            # Salva le immagini
-            cv2.imwrite(left_file, left_img)
-            cv2.imwrite(right_file, right_img)
+                if left_img is None:
+                    logger.error(
+                        f"Errore nella decodifica dell'immagine sinistra: dimensione dati={len(left_frame_data)}")
+                    return
 
-            logger.info(
-                f"Frame sinistro salvato in {left_file}, dimensione: {os.path.getsize(left_file) if os.path.exists(left_file) else 'file non creato'}")
-            logger.info(
-                f"Frame destro salvato in {right_file}, dimensione: {os.path.getsize(right_file) if os.path.exists(right_file) else 'file non creato'}")
+                if right_img is None:
+                    logger.error(
+                        f"Errore nella decodifica dell'immagine destra: dimensione dati={len(right_frame_data)}")
+                    return
 
-            # Aggiorna il log
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Frame ricevuto: {pattern_name} (indice {pattern_index})\n"
+                # Salva le immagini
+                cv2.imwrite(left_file, left_img)
+                cv2.imwrite(right_file, right_img)
 
-            # Aggiorna l'anteprima delle immagini se appropriato
-            self._update_preview_image()
+                # Verifica che i file siano stati creati
+                if not os.path.exists(left_file):
+                    logger.error(f"Errore: il file {left_file} non è stato creato!")
+                else:
+                    logger.info(f"Frame sinistro salvato in {left_file}, dimensione: {os.path.getsize(left_file)}")
 
-            logger.debug(f"Frame {pattern_index} ({pattern_name}) salvato localmente")
+                if not os.path.exists(right_file):
+                    logger.error(f"Errore: il file {right_file} non è stato creato!")
+                else:
+                    logger.info(f"Frame destro salvato in {right_file}, dimensione: {os.path.getsize(right_file)}")
+
+                # Aggiorna il log
+                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Frame ricevuto: {pattern_name} (indice {pattern_index})\n"
+
+                # Aggiorna l'anteprima delle immagini
+                self._update_preview_image()
+
+                # Invia un ACK al server
+                try:
+                    self.scanner_controller.send_command(
+                        device_id,
+                        "FRAME_ACK",
+                        {
+                            "pattern_index": pattern_index,
+                            "received_timestamp": time.time()
+                        }
+                    )
+                except Exception as ack_err:
+                    logger.debug(f"Errore nell'invio dell'ACK del frame: {ack_err}")
+
+            except Exception as e:
+                logger.error(f"Errore nel salvataggio dei frame: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
 
         except Exception as e:
             logger.error(f"Errore nella gestione del frame ricevuto: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def _load_existing_scan(self):
         """Carica una scansione esistente."""

@@ -7,7 +7,7 @@
     <list default="true" id="31592bd9-183c-4f71-ad25-9064a5892649" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/client/views/scan_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/views/scan_view.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/server/projector/structured_light.py" beforeDir="false" afterPath="$PROJECT_DIR$/server/projector/structured_light.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/main_standalone.py" beforeDir="false" afterPath="$PROJECT_DIR$/server/main_standalone.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/server/scan_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/server/scan_manager.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
