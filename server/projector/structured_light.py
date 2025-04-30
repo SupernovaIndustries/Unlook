@@ -728,7 +728,8 @@ class StructuredLightController:
     def _capture_and_save_frame(self, pattern_index: int, pattern_name: str) -> bool:
         """
         Acquisisce e salva i frame dalle due camere per il pattern corrente.
-        Versione aggiornata che invia anche i frame al client in tempo reale.
+        Versione ottimizzata che gestisce meglio l'invio dei frame al client,
+        la compressione e la gestione degli errori.
 
         Args:
             pattern_index: Indice del pattern corrente
@@ -737,6 +738,8 @@ class StructuredLightController:
         Returns:
             True se l'acquisizione è riuscita, False altrimenti
         """
+        start_time = time.time()
+
         try:
             # Verifica che la callback sia impostata
             if not self._frame_capture_callback:
@@ -762,46 +765,141 @@ class StructuredLightController:
                 return False
 
             # Salva i frame localmente
-            left_file = self.left_dir / f"{pattern_index:04d}_{pattern_name}.png"
-            right_file = self.right_dir / f"{pattern_index:04d}_{pattern_name}.png"
+            try:
+                left_file = self.left_dir / f"{pattern_index:04d}_{pattern_name}.png"
+                right_file = self.right_dir / f"{pattern_index:04d}_{pattern_name}.png"
 
-            cv2.imwrite(str(left_file), frame_left)
-            cv2.imwrite(str(right_file), frame_right)
+                save_success = True
+                try:
+                    cv2.imwrite(str(left_file), frame_left)
+                except Exception as e:
+                    logger.error(f"Errore nel salvataggio del frame sinistro: {e}")
+                    save_success = False
+
+                try:
+                    cv2.imwrite(str(right_file), frame_right)
+                except Exception as e:
+                    logger.error(f"Errore nel salvataggio del frame destro: {e}")
+                    save_success = False
+
+                if not save_success:
+                    logger.warning(f"Problemi nel salvataggio di uno o entrambi i frame per pattern {pattern_name}")
+            except Exception as save_err:
+                logger.error(f"Errore critico nel salvataggio dei frame: {save_err}")
+                # Continuiamo comunque per tentare l'invio al client
 
             # Salva i frame anche nella lista per eventuale elaborazione successiva
             self.frame_pairs.append((frame_left, frame_right))
 
-            # Invia i frame al client in tempo reale
+            # Invia i frame al client in tempo reale se disponibile un riferimento al server
             try:
-                from server.scan_manager import notify_client_new_frames
-                # Codifica i frame in formato JPEG per una trasmissione più efficiente
-                _, left_encoded = cv2.imencode('.jpg', frame_left, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                _, right_encoded = cv2.imencode('.jpg', frame_right, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                # Verifica se esistono istanze per notificare il client
+                server_available = False
 
-                # Informazioni sul frame per il client
-                frame_info = {
-                    "pattern_index": pattern_index,
-                    "pattern_name": pattern_name,
-                    "timestamp": time.time()
-                }
+                # Prima opzione: utilizzo dell'attributo _server
+                if hasattr(self, '_server') and self._server is not None:
+                    server_available = True
+                    server = self._server
+                # Seconda opzione: cerca l'attributo server dall'oggetto parent
+                elif hasattr(self, 'server') and self.server is not None:
+                    server_available = True
+                    server = self.server
 
-                # Notifica il client
-                notify_client_new_frames(frame_info, left_encoded.tobytes(), right_encoded.tobytes())
-                logger.debug(f"Frame per pattern {pattern_name} inviati al client")
+                if server_available:
+                    # Codifica i frame in formato JPEG per una trasmissione più efficiente
+                    # Utilizziamo una qualità ottimizzata per bilanciare dimensione e qualità
+                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, 90]
+
+                    try:
+                        _, left_encoded = cv2.imencode('.jpg', frame_left, encode_params)
+                        _, right_encoded = cv2.imencode('.jpg', frame_right, encode_params)
+                    except Exception as encode_err:
+                        logger.error(f"Errore nella codifica JPEG: {encode_err}")
+                        # Tentativo con qualità inferiore
+                        try:
+                            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
+                            _, left_encoded = cv2.imencode('.jpg', frame_left, encode_params)
+                            _, right_encoded = cv2.imencode('.jpg', frame_right, encode_params)
+                            logger.info("Codifica con qualità ridotta riuscita")
+                        except Exception as retry_err:
+                            logger.error(f"Errore anche nella codifica a bassa qualità: {retry_err}")
+                            return True  # Continua con la scansione anche senza invio
+
+                    # Informazioni sul frame per il client
+                    frame_info = {
+                        "pattern_index": pattern_index,
+                        "pattern_name": pattern_name,
+                        "timestamp": time.time()
+                    }
+
+                    # Notifica il client - gestione delle diverse configurazioni
+                    try:
+                        # Verifica se il server ha direttamente la funzione notify_client_new_frames
+                        if hasattr(server, 'notify_client_new_frames'):
+                            server.notify_client_new_frames(
+                                frame_info, left_encoded.tobytes(), right_encoded.tobytes()
+                            )
+                            logger.debug(f"Frame inviato direttamente dal server")
+                        # Verifica se il server ha un scan_manager con la funzione
+                        elif hasattr(server, 'scan_manager') and server.scan_manager and hasattr(server.scan_manager,
+                                                                                                 'notify_client_new_frames'):
+                            server.scan_manager.notify_client_new_frames(
+                                frame_info, left_encoded.tobytes(), right_encoded.tobytes()
+                            )
+                            logger.debug(f"Frame inviato tramite scan_manager")
+                        else:
+                            # Tentativo di import dalla classe corrente
+                            try:
+                                module_names = [
+                                    'notify_client_new_frames',  # Funzione locale
+                                    'server.scan_manager.notify_client_new_frames',  # Import relativo
+                                    '.scan_manager.notify_client_new_frames'  # Import relativo alternativo
+                                ]
+
+                                for mod_name in module_names:
+                                    try:
+                                        if '.' in mod_name:
+                                            parts = mod_name.split('.')
+                                            module = __import__(parts[0])
+                                            for part in parts[1:]:
+                                                module = getattr(module, part)
+                                            module(frame_info, left_encoded.tobytes(), right_encoded.tobytes())
+                                            logger.debug(f"Frame inviato usando import {mod_name}")
+                                            break
+                                    except (ImportError, AttributeError) as imp_err:
+                                        continue
+                            except Exception as imp_err:
+                                logger.debug(f"Tutti i tentativi di import falliti: {imp_err}")
+
+                        logger.debug(f"Frame per pattern {pattern_name} inviato al client")
+                    except Exception as notify_err:
+                        logger.warning(f"Errore specifico nell'invio al client: {notify_err}")
+                else:
+                    logger.debug("Nessun riferimento al server disponibile per l'invio dei frame")
+
             except Exception as e:
                 logger.warning(f"Impossibile inviare i frame al client: {e}")
+                import traceback
+                logger.debug(f"Dettaglio dell'errore: {traceback.format_exc()}")
                 # Non fallire se l'invio al client non riesce, continua con la scansione
 
             # Aggiorna le statistiche
             self.scan_stats['captured_frames'] += 2
 
-            logger.debug(f"Frame acquisiti per pattern {pattern_name} (indice {pattern_index})")
+            # Calcola il tempo totale di acquisizione per debugging
+            elapsed_ms = (time.time() - start_time) * 1000
+            logger.debug(f"Frame acquisiti per pattern {pattern_name} (indice {pattern_index}) in {elapsed_ms:.1f}ms")
+
             return True
 
         except Exception as e:
             self.error_message = f"Errore nell'acquisizione dei frame per pattern {pattern_name}: {str(e)}"
             logger.error(self.error_message)
             self.scan_stats['errors'] += 1
+
+            import traceback
+            logger.debug(f"Traceback completo: {traceback.format_exc()}")
+
             return False
     def process_scan_data(self, output_file: str = None) -> bool:
         """

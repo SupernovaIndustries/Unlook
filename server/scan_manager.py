@@ -133,6 +133,8 @@ class ScanManager:
                 capture_dir=str(scan_dir)
             )
 
+            self._scan_controller._server = self.server
+
             # Imposta la callback per l'acquisizione dei frame
             self._scan_controller.set_frame_capture_callback(self._capture_frame_callback)
 
