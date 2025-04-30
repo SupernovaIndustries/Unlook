@@ -74,12 +74,12 @@ class GridLines:
 class DLPC342XController:
     """Controller for DLPC342X projector via I2C."""
 
-    def __init__(self, bus=1, address=0x36):
+    def __init__(self, bus=3, address=0x1b):
         """Initialize the controller.
 
         Args:
-            bus: I2C bus number (usually 1 for Raspberry Pi)
-            address: I2C device address (default 0x36)
+            bus: I2C bus number (usually 3 for Unlook)
+            address: I2C device address (default 0x1b)
         """
         self.bus = SMBus(bus)
         self.address = address

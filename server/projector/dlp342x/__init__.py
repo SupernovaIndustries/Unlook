@@ -19,4 +19,4 @@ from .dlpc342x_i2c import (
 )
 
 __version__ = "1.0.0"
-__author__ = "Claude AI for SupernovaIndustries"
+__author__ = "Alessandro Cursoli - SupernovaIndustries"
