@@ -791,97 +791,49 @@ class StructuredLightController:
             # Salva i frame anche nella lista per eventuale elaborazione successiva
             self.frame_pairs.append((frame_left, frame_right))
 
-            # Invia i frame al client in tempo reale se disponibile un riferimento al server
+            # Invia i frame al client in tempo reale se possibile
             try:
-                # Verifica se esistono istanze per notificare il client
-                server_available = False
+                # Codifica i frame in formato JPEG per una trasmissione più efficiente
+                encode_params = [cv2.IMWRITE_JPEG_QUALITY, 90]
+                _, left_encoded = cv2.imencode('.jpg', frame_left, encode_params)
+                _, right_encoded = cv2.imencode('.jpg', frame_right, encode_params)
 
-                # Prima opzione: utilizzo dell'attributo _server
-                if hasattr(self, '_server') and self._server is not None:
-                    server_available = True
-                    server = self._server
-                # Seconda opzione: cerca l'attributo server dall'oggetto parent
-                elif hasattr(self, 'server') and self.server is not None:
-                    server_available = True
-                    server = self.server
+                # Informazioni sul frame per il client
+                frame_info = {
+                    "pattern_index": pattern_index,
+                    "pattern_name": pattern_name,
+                    "timestamp": time.time()
+                }
 
-                if server_available:
-                    # Codifica i frame in formato JPEG per una trasmissione più efficiente
-                    # Utilizziamo una qualità ottimizzata per bilanciare dimensione e qualità
-                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, 90]
+                # Notifica il client attraverso il server
+                # Se abbiamo un riferimento al ScanManager
+                if hasattr(self, '_parent_scan_manager') and self._parent_scan_manager:
+                    if hasattr(self._parent_scan_manager, 'notify_client_new_frames'):
+                        self._parent_scan_manager.notify_client_new_frames(
+                            frame_info,
+                            left_encoded.tobytes(),
+                            right_encoded.tobytes()
+                        )
+                        logger.info(f"Frame {pattern_index} inviato al client via parent_scan_manager")
 
-                    try:
-                        _, left_encoded = cv2.imencode('.jpg', frame_left, encode_params)
-                        _, right_encoded = cv2.imencode('.jpg', frame_right, encode_params)
-                    except Exception as encode_err:
-                        logger.error(f"Errore nella codifica JPEG: {encode_err}")
-                        # Tentativo con qualità inferiore
-                        try:
-                            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
-                            _, left_encoded = cv2.imencode('.jpg', frame_left, encode_params)
-                            _, right_encoded = cv2.imencode('.jpg', frame_right, encode_params)
-                            logger.info("Codifica con qualità ridotta riuscita")
-                        except Exception as retry_err:
-                            logger.error(f"Errore anche nella codifica a bassa qualità: {retry_err}")
-                            return True  # Continua con la scansione anche senza invio
-
-                    # Informazioni sul frame per il client
-                    frame_info = {
-                        "pattern_index": pattern_index,
-                        "pattern_name": pattern_name,
-                        "timestamp": time.time()
-                    }
-
-                    # Notifica il client - gestione delle diverse configurazioni
-                    try:
-                        # Verifica se il server ha direttamente la funzione notify_client_new_frames
-                        if hasattr(server, 'notify_client_new_frames'):
-                            server.notify_client_new_frames(
-                                frame_info, left_encoded.tobytes(), right_encoded.tobytes()
+                # Se abbiamo un riferimento diretto al server
+                elif hasattr(self, '_server') and self._server:
+                    if hasattr(self._server, 'scan_manager') and self._server.scan_manager:
+                        if hasattr(self._server.scan_manager, 'notify_client_new_frames'):
+                            self._server.scan_manager.notify_client_new_frames(
+                                frame_info,
+                                left_encoded.tobytes(),
+                                right_encoded.tobytes()
                             )
-                            logger.debug(f"Frame inviato direttamente dal server")
-                        # Verifica se il server ha un scan_manager con la funzione
-                        elif hasattr(server, 'scan_manager') and server.scan_manager and hasattr(server.scan_manager,
-                                                                                                 'notify_client_new_frames'):
-                            server.scan_manager.notify_client_new_frames(
-                                frame_info, left_encoded.tobytes(), right_encoded.tobytes()
-                            )
-                            logger.debug(f"Frame inviato tramite scan_manager")
-                        else:
-                            # Tentativo di import dalla classe corrente
-                            try:
-                                module_names = [
-                                    'notify_client_new_frames',  # Funzione locale
-                                    'server.scan_manager.notify_client_new_frames',  # Import relativo
-                                    '.scan_manager.notify_client_new_frames'  # Import relativo alternativo
-                                ]
-
-                                for mod_name in module_names:
-                                    try:
-                                        if '.' in mod_name:
-                                            parts = mod_name.split('.')
-                                            module = __import__(parts[0])
-                                            for part in parts[1:]:
-                                                module = getattr(module, part)
-                                            module(frame_info, left_encoded.tobytes(), right_encoded.tobytes())
-                                            logger.debug(f"Frame inviato usando import {mod_name}")
-                                            break
-                                    except (ImportError, AttributeError) as imp_err:
-                                        continue
-                            except Exception as imp_err:
-                                logger.debug(f"Tutti i tentativi di import falliti: {imp_err}")
-
-                        logger.debug(f"Frame per pattern {pattern_name} inviato al client")
-                    except Exception as notify_err:
-                        logger.warning(f"Errore specifico nell'invio al client: {notify_err}")
+                            logger.info(f"Frame {pattern_index} inviato al client via server.scan_manager")
                 else:
-                    logger.debug("Nessun riferimento al server disponibile per l'invio dei frame")
+                    logger.warning("Nessun riferimento al server o scan_manager disponibile")
 
             except Exception as e:
                 logger.warning(f"Impossibile inviare i frame al client: {e}")
                 import traceback
-                logger.debug(f"Dettaglio dell'errore: {traceback.format_exc()}")
-                # Non fallire se l'invio al client non riesce, continua con la scansione
+                logger.warning(f"Traceback: {traceback.format_exc()}")
+                # Non fallire se l'invio al client non riesce
 
             # Aggiorna le statistiche
             self.scan_stats['captured_frames'] += 2

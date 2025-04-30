@@ -471,7 +471,7 @@ class ScanView(QWidget):
     def __init__(self, scanner_controller=None, parent=None):
         super().__init__(parent)
         self.scanner_controller = scanner_controller
-
+        logger.info("Inizializzazione ScanView")
         # Stato della scansione
         self.is_scanning = False
         self.selected_scanner = None
@@ -483,6 +483,7 @@ class ScanView(QWidget):
 
         # Registra il gestore di frame
         self._register_frame_handler()
+        logger.info("Gestore frame registrato")
 
         # Processor per la triangolazione
         self.scan_processor = ScanProcessor()

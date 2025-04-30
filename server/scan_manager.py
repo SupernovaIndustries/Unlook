@@ -541,9 +541,11 @@ class ScanManager:
         """
         return self._scan_config
 
-    def notify_client_new_frames(self, frame_info: Dict[str, Any], left_frame_data: bytes, right_frame_data: bytes) -> bool:
+    def notify_client_new_frames(self, frame_info: Dict[str, Any], left_frame_data: bytes,
+                                 right_frame_data: bytes) -> bool:
         """
         Notifica il client di nuovi frame acquisiti durante la scansione.
+        Versione migliorata con comunicazione diretta e gestione errori.
 
         Args:
             frame_info: Informazioni sul frame (indice, nome pattern, timestamp)
@@ -554,12 +556,18 @@ class ScanManager:
             True se la notifica è stata inviata con successo, False altrimenti
         """
         try:
+            logger.info(f"Tentativo invio frame {frame_info.get('pattern_index', 'sconosciuto')} al client")
+
             # Se non ci sono client connessi, non inviare nulla
-            if not hasattr(self, 'server') or not self.server or not hasattr(self.server, 'state'):
+            if not hasattr(self, 'server') or not self.server:
+                logger.warning("Nessun riferimento al server disponibile")
                 return False
 
             # Verifica se c'è un client connesso
-            if self.server.state.get('clients_connected', 0) == 0:
+            clients_connected = getattr(self.server.state, 'clients_connected', 0) if hasattr(self.server,
+                                                                                              'state') else 0
+            if clients_connected == 0:
+                logger.warning("Nessun client connesso, frame non inviato")
                 return False
 
             # Prepara il messaggio
@@ -577,20 +585,27 @@ class ScanManager:
                 "scan_id": self.current_scan_id if hasattr(self, 'current_scan_id') else None
             }
 
-            logger.info(
-                f"Invio frame {frame_info['pattern_index']} al client, dimensione: {len(left_frame_data)} bytes")
-
-            # Invia il messaggio al client attraverso il socket di comando
-            for device_id in self.server._client_connections:
-                try:
-                    self.server._connection_manager.send_message(device_id, "SCAN_FRAME", message)
-                    return True
-                except Exception as e:
-                    logger.warning(f"Errore nell'invio del frame al client {device_id}: {e}")
+            # Accedi direttamente all'oggetto di connessione
+            if hasattr(self.server, '_client_connections') and self.server._client_connections:
+                for device_id in self.server._client_connections:
+                    try:
+                        # Accedi direttamente all'oggetto connection_manager
+                        if hasattr(self.server, '_connection_manager') and self.server._connection_manager:
+                            self.server._connection_manager.send_message(device_id, "SCAN_FRAME", message)
+                            logger.info(f"Frame {frame_info.get('pattern_index')} inviato al client {device_id}")
+                            return True
+                        else:
+                            logger.warning("Oggetto connection_manager non disponibile")
+                    except Exception as e:
+                        logger.warning(f"Errore nell'invio del frame al client {device_id}: {e}")
+            else:
+                logger.warning("Nessuna connessione client disponibile")
 
             return False
         except Exception as e:
             logger.error(f"Errore nella notifica dei frame al client: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
     def check_scan_capability(self) -> Dict[str, Any]:
