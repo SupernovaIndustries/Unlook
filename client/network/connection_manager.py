@@ -416,22 +416,32 @@ class ConnectionWorker(QThread):
         """Ferma il worker e chiude la connessione in modo sicuro."""
         logger.info(f"Arresto del worker di connessione per {self.device_id}...")
 
-        # Segnala l'evento di arresto
-        self._shutdown_event.set()
+        try:
+            # Segnala l'evento di arresto
+            self._shutdown_event.set()
 
-        with QMutexLocker(self._mutex):
-            self._running = False
+            with QMutexLocker(self._mutex):
+                self._running = False
 
-        # Attendiamo un breve momento per permettere al thread di completare
-        # eventuali operazioni in corso
-        if self.isRunning():
-            # Se il thread è ancora in esecuzione dopo 10ms, proviamo a interromperlo
-            if not self.wait(2000):  # Attendi fino a 2 secondi
-                logger.warning(f"Thread di connessione per {self.device_id} non si ferma entro il timeout")
+            # Pulisci subito le risorse socket per evitare blocchi
+            self._cleanup_socket()
 
-        # Pulisci le risorse indipendentemente dall'esito dell'attesa
-        self._cleanup_socket()
-        logger.info(f"Worker di connessione per {self.device_id} arrestato")
+            # Attendiamo un breve momento per permettere al thread di completare
+            # eventuali operazioni in corso
+            if self.isRunning():
+                # Se il thread è ancora in esecuzione, attendiamo con timeout
+                if not self.wait(2000):  # Attendi fino a 2 secondi
+                    logger.warning(f"Thread di connessione per {self.device_id} non si ferma entro il timeout")
+                    # Non forziamo con terminate() che è pericoloso
+
+            logger.info(f"Worker di connessione per {self.device_id} arrestato")
+        except Exception as e:
+            logger.error(f"Errore nell'arresto del worker di connessione: {e}")
+            # Assicurati che le risorse vengano comunque rilasciate
+            try:
+                self._cleanup_socket()
+            except Exception as cleanup_err:
+                logger.error(f"Errore anche nella pulizia del socket: {cleanup_err}")
 
     def _cleanup_socket(self):
         """Pulisce le risorse del worker in modo sicuro."""
@@ -536,7 +546,7 @@ class ConnectionManager(QObject):
 
     def disconnect(self, device_id: str) -> bool:
         """
-        Chiude la connessione con uno scanner.
+        Chiude la connessione con uno scanner in modo sicuro e robusto.
 
         Args:
             device_id: ID univoco dello scanner
@@ -544,31 +554,103 @@ class ConnectionManager(QObject):
         Returns:
             True se la disconnessione è stata avviata, False altrimenti
         """
-        with QMutexLocker(self._connections_mutex):
-            if device_id not in self._connections:
-                logger.warning(f"Nessuna connessione attiva per {device_id}")
-                return False
+        logger.info(f"Richiesta disconnessione per device {device_id}")
 
-            # Invia un messaggio di disconnessione esplicito (se possibile)
+        try:
+            with QMutexLocker(self._connections_mutex):
+                if device_id not in self._connections:
+                    logger.warning(f"Nessuna connessione attiva per {device_id}")
+                    return False
+
+                # Ottieni il riferimento al worker prima di rimuoverlo dal dizionario
+                worker = self._connections[device_id]
+
+                # Rimuovi immediatamente dal dizionario per evitare accessi multipli
+                self._connections.pop(device_id)
+
+                # Pulisci le risposte in sospeso
+                with QMutexLocker(self._responses_mutex):
+                    if device_id in self._responses:
+                        del self._responses[device_id]
+
+            # Fuori dal mutex, gestiamo la disconnessione effettiva
             try:
-                # Tentativo di invio diretto, senza passare per la coda
-                self.send_message(device_id, "DISCONNECT")
-            except:
-                pass
+                # Tentativo di invio diretto del comando DISCONNECT, senza passare per la coda
+                # Ma solo se il worker è ancora in esecuzione
+                if worker.isRunning():
+                    try:
+                        message = {"type": "DISCONNECT", "timestamp": time.time()}
+                        data = json.dumps(message).encode('utf-8')
+                        worker.send_data(data)
+                        logger.debug(f"Comando DISCONNECT inviato a {device_id}")
+                    except Exception as msg_err:
+                        logger.debug(f"Impossibile inviare DISCONNECT: {msg_err}")
+            except Exception as e:
+                logger.debug(f"Errore nell'invio del messaggio di disconnessione: {e}")
 
-            # Ferma il worker
-            worker = self._connections[device_id]
-            worker.stop()
+            # Ferma il worker in modo sicuro
+            try:
+                # Usa stop() che dovrebbe gestire internamente la terminazione
+                worker.stop()
 
-            # Attendiamo la terminazione con un timeout
-            if worker.isRunning():
-                worker.wait(2000)  # 2 secondi di timeout
+                # Attendi la terminazione con un timeout ragionevole
+                if worker.isRunning():
+                    logger.debug(f"In attesa della terminazione del worker per {device_id}...")
+                    worker.wait(2000)  # 2 secondi di timeout
 
-            # Rimuovi la connessione
-            self._cleanup_connection(device_id)
+                    if worker.isRunning():
+                        logger.warning(f"Il worker per {device_id} non si è fermato nel timeout previsto")
+            except Exception as stop_err:
+                logger.error(f"Errore nell'arresto del worker: {stop_err}")
+
+            # Disconnetti i segnali in modo sicuro
+            self._disconnect_worker_signals_safely(worker)
 
             logger.info(f"Disconnessione completata per {device_id}")
             return True
+
+        except Exception as e:
+            logger.error(f"Errore critico durante la disconnessione di {device_id}: {e}")
+            # Rilascia comunque le risorse per evitare memory leak
+            try:
+                with QMutexLocker(self._connections_mutex):
+                    if device_id in self._connections:
+                        self._connections.pop(device_id)
+
+                with QMutexLocker(self._responses_mutex):
+                    if device_id in self._responses:
+                        del self._responses[device_id]
+            except:
+                pass
+            return False
+
+    def _disconnect_worker_signals_safely(self, worker):
+        """Disconnette in modo sicuro i segnali del worker."""
+        try:
+            # Disconnetti ogni segnale individualmente per gestire meglio gli errori
+            signals_to_disconnect = [
+                'connection_ready',
+                'connection_error',
+                'connection_closed',
+                'data_received'
+            ]
+
+            for signal_name in signals_to_disconnect:
+                try:
+                    if hasattr(worker, signal_name):
+                        signal = getattr(worker, signal_name)
+                        # In PySide6/PyQt, non abbiamo accesso diretto al numero di ricevitori
+                        # quindi catturiamo semplicemente le eccezioni
+                        try:
+                            signal.disconnect()
+                        except TypeError:  # Tipo di errore quando non ci sono connessioni
+                            pass
+                        except Exception as e:
+                            logger.debug(f"Errore nella disconnessione del segnale {signal_name}: {e}")
+                except Exception as e:
+                    logger.debug(f"Errore nell'accesso al segnale {signal_name}: {e}")
+        except Exception as e:
+            logger.error(f"Errore generale nella disconnessione dei segnali: {e}")
 
     def send_message(self, device_id: str, message_type: str, payload: Dict = None) -> bool:
         """

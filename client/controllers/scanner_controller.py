@@ -10,6 +10,7 @@ import time
 from typing import List, Optional, Callable, Dict, Any
 
 from PySide6.QtCore import QObject, Signal, Slot, Property, QSettings, QTimer, QCoreApplication
+from PySide6.QtWidgets import QApplication
 
 # Importa i moduli del progetto in modo che funzionino sia con esecuzione diretta che tramite launcher
 try:
@@ -113,13 +114,35 @@ class ScannerController(QObject):
         Returns:
             True se la disconnessione è stata avviata, False altrimenti
         """
-        scanner = self._scanner_manager.get_scanner(device_id)
-        if not scanner:
-            logger.error(f"Scanner con ID {device_id} non trovato")
-            return False
+        try:
+            scanner = self._scanner_manager.get_scanner(device_id)
+            if not scanner:
+                logger.error(f"Scanner con ID {device_id} non trovato")
+                return False
 
-        # Chiude la connessione
-        return self._connection_manager.disconnect(device_id)
+            # Imposta lo stato a DISCONNECTING per evitare operazioni durante disconnessione
+            if scanner:
+                try:
+                    old_status = scanner.status
+                    scanner.status = ScannerStatus.DISCONNECTED  # Impostiamo subito a disconnesso
+                    logger.info(f"Stato scanner {device_id} cambiato da {old_status} a DISCONNECTED")
+                except Exception as e:
+                    logger.error(f"Errore nel cambio stato scanner: {e}")
+
+            # Chiude la connessione
+            success = self._connection_manager.disconnect(device_id)
+
+            # Emetti il segnale di disconnessione se necessario
+            if success and scanner:
+                try:
+                    self.scanner_disconnected.emit(scanner)
+                except Exception as e:
+                    logger.error(f"Errore nell'emissione del segnale di disconnessione: {e}")
+
+            return success
+        except Exception as e:
+            logger.error(f"Errore durante la disconnessione da {device_id}: {e}")
+            return False
 
     @Slot(str)
     def select_scanner(self, device_id: str) -> bool:

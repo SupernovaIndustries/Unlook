@@ -925,11 +925,10 @@ class DualStreamView(QWidget):
 
     def _apply_camera_settings(self):
         """
-        Applica le impostazioni delle camere con gestione degli errori migliorata.
-        Versione ottimizzata per prevenire crash e garantire sincronizzazione delle modalità.
+        Applica le impostazioni delle camere con sincronizzazione robusta delle modalità.
         """
-        if not self._scanner or not self._connection_manager or not self._connection_manager.is_connected(
-                self._scanner.device_id):
+        if not self.selected_scanner or not self.scanner_controller or not self.scanner_controller.is_connected(
+                self.selected_scanner.device_id):
             QMessageBox.warning(
                 self,
                 "Errore",
@@ -937,186 +936,134 @@ class DualStreamView(QWidget):
             )
             return
 
-        # Raccogliere le impostazioni attuali
+        # Prima di tutto, valida che entrambe le modalità siano identiche
         left_mode = "color" if self.left_mode_color.isChecked() else "grayscale"
-        left_exposure = self.left_exposure_slider.value()
-        left_gain = self.left_gain_slider.value()
-        left_brightness = self.left_brightness_slider.value()
-        left_contrast = self.left_contrast_slider.value()
-        left_sharpness = self.left_sharpness_slider.value()
-        left_saturation = self.left_saturation_slider.value()
-
         right_mode = "color" if self.right_mode_color.isChecked() else "grayscale"
-        right_exposure = self.right_exposure_slider.value()
-        right_gain = self.right_gain_slider.value()
-        right_brightness = self.right_brightness_slider.value()
-        right_contrast = self.right_contrast_slider.value()
-        right_sharpness = self.right_sharpness_slider.value()
-        right_saturation = self.right_saturation_slider.value()
 
-        # Verifica se c'è un cambio di modalità e avvisa l'utente che entrambe le camere saranno impostate allo stesso modo
-        mode_changed = False
-        if (left_mode != right_mode) or (
-                hasattr(self, '_previous_mode_left') and self._previous_mode_left != left_mode) or (
-                hasattr(self, '_previous_mode_right') and self._previous_mode_right != right_mode):
-            mode_changed = True
-            # Memorizza le modalità precedenti per riferimento futuro
-            self._previous_mode_left = left_mode
-            self._previous_mode_right = right_mode
+        # Forza automaticamente la sincronizzazione delle modalità
+        if left_mode != right_mode:
+            logger.info(f"Sincronizzazione automatica delle modalità: {left_mode} → entrambe le camere")
 
-            # Assicura coerenza tra le modalità delle camere (entrambe a colori o entrambe in scala di grigi)
-            # Utilizziamo sempre la modalità della camera sinistra come riferimento
+            # Imposta entrambe le camere alla stessa modalità (quella sinistra)
+            if left_mode == "color":
+                self.right_mode_color.setChecked(True)
+                self.right_mode_grayscale.setChecked(False)
+            else:
+                self.right_mode_color.setChecked(False)
+                self.right_mode_grayscale.setChecked(True)
+
             right_mode = left_mode
 
-            # Aggiorna l'interfaccia per riflettere questa sincronizzazione
-            if left_mode == "color":
-                self.right_mode_color.blockSignals(True)
-                self.right_mode_color.setChecked(True)
-                self.right_mode_color.blockSignals(False)
-            else:
-                self.right_mode_grayscale.blockSignals(True)
-                self.right_mode_grayscale.setChecked(True)
-                self.right_mode_grayscale.blockSignals(False)
+            # Aggiorna la visibilità della saturazione in base alla modalità
+            self._update_saturation_visibility(left_mode == "color", False)
 
-            # Avvisa l'utente della sincronizzazione
             QMessageBox.information(
                 self,
                 "Sincronizzazione modalità",
-                f"Le modalità delle camere sono state sincronizzate, entrambe impostate a: {left_mode.upper()}.\n"
+                f"Le modalità delle camere sono state sincronizzate in {left_mode.upper()}.\n"
                 "Per il corretto funzionamento, entrambe le camere devono utilizzare la stessa modalità."
             )
 
-        # Crea il payload di configurazione
+        # Raccogli tutti i parametri
         config = {
             "camera": {
                 "left": {
                     "mode": left_mode,
-                    "exposure": left_exposure,
-                    "gain": left_gain,
-                    "brightness": left_brightness,
-                    "contrast": left_contrast,
-                    "sharpness": left_sharpness,
-                    "saturation": left_saturation
+                    "exposure": self.left_exposure_slider.value(),
+                    "gain": self.left_gain_slider.value(),
+                    "brightness": self.left_brightness_slider.value(),
+                    "contrast": self.left_contrast_slider.value(),
+                    "sharpness": self.left_sharpness_slider.value(),
+                    "saturation": self.left_saturation_slider.value() if left_mode == "color" else 50
                 },
                 "right": {
-                    "mode": right_mode,  # Ora garantito che sia uguale a left_mode
-                    "exposure": right_exposure,
-                    "gain": right_gain,
-                    "brightness": right_brightness,
-                    "contrast": right_contrast,
-                    "sharpness": right_sharpness,
-                    "saturation": right_saturation
+                    "mode": right_mode,
+                    "exposure": self.right_exposure_slider.value(),
+                    "gain": self.right_gain_slider.value(),
+                    "brightness": self.right_brightness_slider.value(),
+                    "contrast": self.right_contrast_slider.value(),
+                    "sharpness": self.right_sharpness_slider.value(),
+                    "saturation": self.right_saturation_slider.value() if right_mode == "color" else 50
                 }
             }
         }
 
         # Verifica se lo streaming è attivo
-        streaming_was_active = False
-        if hasattr(self, '_streaming') and self._streaming:
-            streaming_was_active = True
+        streaming_was_active = hasattr(self, '_streaming_active') and self._streaming_active
 
-            # Mostra un messaggio che informa l'utente
-            QMessageBox.information(
-                self,
-                "Applicazione configurazione",
-                "Per applicare le modifiche, lo streaming verrà temporaneamente interrotto e riavviato.",
-                QMessageBox.Ok
+        # Se lo streaming è attivo, fermalo prima di applicare le modifiche
+        if streaming_was_active:
+            self.stop_streaming()
+            time.sleep(0.5)  # Pausa breve per assicurarsi che lo streaming sia fermato
+
+        # Invia la configurazione con dialog di progresso
+        dialog = QProgressDialog("Applicazione delle impostazioni in corso...", None, 0, 100, self)
+        dialog.setWindowTitle("Attendere")
+        dialog.setMinimumDuration(300)
+        dialog.setValue(20)
+        dialog.setCancelButton(None)  # Rimuove il pulsante di annullamento
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.show()
+
+        try:
+            # Invia la configurazione
+            command_success = self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "SET_CONFIG",
+                {"config": config}
             )
 
-            # Ferma lo streaming in modo sicuro
-            try:
-                self.stop_streaming()
-                logger.info("Streaming fermato per applicare la nuova configurazione")
-            except Exception as e:
-                logger.error(f"Errore nell'arresto dello streaming: {e}")
-                # Continuiamo comunque
+            dialog.setValue(60)
+            QApplication.processEvents()
 
-        # Invia la configurazione con gestione errori migliorata
-        try:
-            # Usa un timeout più lungo per le modifiche di configurazione
-            dialog = QProgressDialog("Applicazione delle impostazioni in corso...", "Annulla", 0, 100, self)
-            dialog.setWindowTitle("Attendere")
-            dialog.setMinimumDuration(500)  # Mostra solo se l'operazione dura più di 500ms
-            dialog.setValue(20)
-            dialog.setWindowModality(Qt.WindowModal)
-
-            # Crea un timeout sicuro
-            success = False
-            max_attempts = 3
-
-            for attempt in range(1, max_attempts + 1):
-                dialog.setValue(20 + attempt * 20)  # Aggiorna la barra di progresso
-
-                try:
-                    # Invia la configurazione con timeout
-                    if self._connection_manager.send_message(
-                            self._scanner.device_id,
-                            "SET_CONFIG",
-                            {"config": config}
-                    ):
-                        # La configurazione è stata inviata, attendiamo conferma
-                        time.sleep(1.0)  # Lascia tempo allo scanner per applicare le modifiche
-                        success = True
-                        break
-                except Exception as e:
-                    logger.warning(f"Tentativo {attempt}/{max_attempts} fallito: {e}")
-                    time.sleep(0.5)  # Pausa tra i tentativi
-
-            dialog.setValue(100)  # Completa la barra di progresso
-
-            # Verifica l'esito dell'operazione
-            if success:
-                # Se c'è stato un cambio di modalità, attendi un po' più a lungo
-                if mode_changed:
-                    time.sleep(1.0)  # Pausa aggiuntiva per il cambio di modalità
-
-                QMessageBox.information(
-                    self,
-                    "Impostazioni applicate",
-                    "Le impostazioni delle camere sono state applicate con successo."
+            if command_success:
+                # Attendi la risposta
+                response = self.scanner_controller.wait_for_response(
+                    self.selected_scanner.device_id,
+                    "SET_CONFIG",
+                    timeout=10.0  # Timeout più lungo per il cambio di configurazione
                 )
+
+                dialog.setValue(80)
+                QApplication.processEvents()
+
+                if response and response.get("status") == "ok":
+                    time.sleep(0.5)  # Breve pausa per applicare le modifiche
+                    dialog.setValue(100)
+                    QMessageBox.information(
+                        self,
+                        "Impostazioni applicate",
+                        "Le impostazioni delle camere sono state applicate con successo."
+                    )
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Avviso",
+                        "La configurazione è stata inviata, ma non è stato possibile confermare l'applicazione."
+                    )
             else:
                 QMessageBox.warning(
                     self,
-                    "Avviso",
-                    "La configurazione è stata inviata, ma non è stato possibile confermare l'applicazione.\n"
-                    "Le modifiche potrebbero richiedere un riavvio dello streaming."
+                    "Errore",
+                    "Impossibile inviare la configurazione al server."
                 )
 
         except Exception as e:
+            logger.error(f"Errore nell'applicazione delle impostazioni: {e}")
             QMessageBox.critical(
                 self,
                 "Errore",
                 f"Si è verificato un errore durante l'applicazione delle impostazioni:\n{str(e)}"
             )
-            success = False
 
-        # Riavvia lo streaming se era attivo
-        if streaming_was_active:
-            try:
-                # Attendi un momento per permettere alle camere di riconfigurare
-                time.sleep(1.5)
+        finally:
+            # Chiudi il dialog
+            dialog.close()
 
-                # Riavvia lo streaming
-                if self._scanner:
-                    logger.info("Riavvio streaming dopo cambio configurazione")
-                    success = self.start_streaming(self._scanner)
-
-                    if not success:
-                        QMessageBox.warning(
-                            self,
-                            "Avviso",
-                            "La configurazione è stata applicata, ma non è stato possibile riavviare lo streaming.\n"
-                            "Prova a riavviare manualmente lo streaming."
-                        )
-            except Exception as e:
-                logger.error(f"Errore nel riavvio dello streaming: {e}")
-                QMessageBox.warning(
-                    self,
-                    "Avviso",
-                    f"La configurazione è stata applicata, ma si è verificato un errore nel riavvio dello streaming:\n{str(e)}\n"
-                    "Prova a riavviare manualmente lo streaming."
-                )
+            # Riavvia lo streaming se era attivo
+            if streaming_was_active:
+                time.sleep(1.0)  # Attendi un po' prima di riavviare lo streaming
+                self.start_streaming(self.selected_scanner)
 
     def _send_keep_alive(self):
         """
@@ -1560,29 +1507,32 @@ class DualStreamView(QWidget):
         Versione ottimizzata per ridurre la latenza.
         """
         try:
-            if frame is None:
-                logger.warning(f"Frame nullo ricevuto per camera {camera_index}")
+            # Verifiche preliminari rapide per evitare elaborazioni inutili
+            if frame is None or frame.size == 0:
                 return
 
             # Verifica se l'indice della camera è valido
             if camera_index < 0 or camera_index >= len(self.stream_views):
-                logger.warning(
-                    f"Indice camera non valido: {camera_index}, massimo supportato: {len(self.stream_views) - 1}")
                 return
 
-            # Log più limitato per ridurre overhead
-            if getattr(self, '_frame_count', 0) % 100 == 0:
-                logger.debug(f"Frame ricevuto: camera={camera_index}, forma={frame.shape}, timestamp={timestamp}")
+            # Incrementa contatore frame (solo ogni 100 frame per debug)
+            if not hasattr(self, '_frame_counter'):
+                self._frame_counter = [0, 0]
 
-            # Incrementa contatore frame
-            self._frame_count = getattr(self, '_frame_count', 0) + 1
+            self._frame_counter[camera_index] += 1
 
-            # Calcolo latenza
-            current_time = time.time()
-            latency_ms = (current_time - timestamp) * 1000
+            # Log limitato per ridurre overhead
+            if self._frame_counter[camera_index] % 100 == 0:
+                logger.debug(f"Frame #{self._frame_counter[camera_index]} ricevuto per camera {camera_index}")
 
-            # Invia il frame direttamente per l'elaborazione e la visualizzazione
-            # Passiamo il frame e il timestamp alla view specifica per quella camera
+            # Calcolo latenza (con verifica validità timestamp)
+            if timestamp > 0:
+                latency_ms = int((time.time() - timestamp) * 1000)
+                # Log solo in caso di latenza anomala (> 500ms)
+                if latency_ms > 500 and self._frame_counter[camera_index] % 30 == 0:
+                    logger.warning(f"Latenza elevata per camera {camera_index}: {latency_ms}ms")
+
+            # Passa il frame direttamente alla view specifica (senza copie aggiuntive)
             self.stream_views[camera_index].update_frame(frame, timestamp)
 
         except Exception as e:
@@ -1597,6 +1547,36 @@ class DualStreamView(QWidget):
         camera_name = "Sinistra" if camera_index == 0 else "Destra"
         if camera_index < len(self.stream_views):
             self.stream_views[camera_index].info_label.setText(f"Camera {camera_name} | Connessa")
+
+    @Slot()
+    def _on_stream_connected(self):
+        """Gestisce l'evento di connessione dello stream."""
+        logger.info("Stream connesso")
+
+        # Aggiorna l'interfaccia utente
+        for i, view in enumerate(self.stream_views):
+            camera_name = "Sinistra" if i == 0 else "Destra"
+            view.info_label.setText(f"Camera {camera_name} | Connessione stabilita")
+
+        # Aggiorna lo stato
+        self._streaming_active = True
+        self.toggle_stream_button.setText("Ferma Streaming")
+        self.capture_button.setEnabled(True)
+
+    @Slot()
+    def _on_stream_disconnected(self):
+        """Gestisce l'evento di disconnessione dello stream."""
+        logger.info("Stream disconnesso")
+
+        # Aggiorna lo stato solo se lo streaming era attivo
+        if hasattr(self, '_streaming_active') and self._streaming_active:
+            self._streaming_active = False
+            self.toggle_stream_button.setText("Avvia Streaming")
+            self.capture_button.setEnabled(False)
+
+            # Pulisci le visualizzazioni delle camere
+            for view in self.stream_views:
+                view.clear()
 
     @Slot(int)
     def _on_stream_stopped(self, camera_index: int):

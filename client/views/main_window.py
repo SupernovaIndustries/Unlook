@@ -792,7 +792,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _toggle_connection(self):
-        """Connette/disconnette lo scanner selezionato."""
+        """Connette/disconnette lo scanner selezionato con gestione robusta degli errori."""
         # Verifica se c'è uno scanner selezionato
         if self.scanner_selector.currentIndex() < 0:
             return
@@ -802,15 +802,47 @@ class MainWindow(QMainWindow):
         if not device_id:
             return
 
-        # Verifica lo stato corrente
-        if self.action_toggle_connection.text() == "Connetti":
-            # Connettiti allo scanner
-            self.scanner_controller.connect_to_scanner(device_id)
-            self.status_bar.showMessage(f"Connessione in corso...", 3000)
-        else:
-            # Disconnettiti dallo scanner
-            self.scanner_controller.disconnect_from_scanner(device_id)
-            self.status_bar.showMessage(f"Disconnessione in corso...", 3000)
+        try:
+            # Verifica lo stato corrente
+            if self.action_toggle_connection.text() == "Connetti":
+                # Connettiti allo scanner
+                self.scanner_controller.connect_to_scanner(device_id)
+                self.status_bar.showMessage(f"Connessione in corso...", 3000)
+            else:
+                # Disabilita temporaneamente il pulsante per evitare clic multipli
+                self.action_toggle_connection.setEnabled(False)
+
+                # Disabilita anche il selettore scanner durante la disconnessione
+                self.scanner_selector.setEnabled(False)
+
+                # Mostra messaggio e aggiorna status bar
+                self.status_bar.showMessage(f"Disconnessione in corso...", 3000)
+
+                # Piccola pausa per aggiornare l'UI prima di operazioni potenzialmente bloccanti
+                QApplication.processEvents()
+
+                # Disconnettiti dallo scanner
+                success = self.scanner_controller.disconnect_from_scanner(device_id)
+
+                # Riattiva il pulsante e il selettore
+                self.action_toggle_connection.setEnabled(True)
+                self.scanner_selector.setEnabled(True)
+
+                # Mostra un messaggio appropriato
+                if success:
+                    self.status_bar.showMessage(f"Disconnessione completata", 3000)
+                else:
+                    self.status_bar.showMessage(f"Errore nella disconnessione", 3000)
+
+                # Aggiorna la lista degli scanner
+                self._update_scanner_list()
+        except Exception as e:
+            logger.error(f"Errore durante la connessione/disconnessione: {e}")
+            self.status_bar.showMessage(f"Errore: {str(e)}", 5000)
+
+            # Assicurati di riattivare i controlli
+            self.action_toggle_connection.setEnabled(True)
+            self.scanner_selector.setEnabled(True)
 
     def _disconnect_all(self):
         """
