@@ -2,703 +2,208 @@
 # -*- coding: utf-8 -*-
 
 """
-Widget per la gestione e visualizzazione delle scansioni 3D con UnLook.
-Gestisce l'avvio della scansione, il download dei dati, la triangolazione e la visualizzazione.
+Widget per la scansione 3D in tempo reale con UnLook.
+Versione completamente riprogettata per operare esclusivamente in real-time
+con preview integrata delle camere e visualizzazione 3D in tempo reale.
 """
 
 import logging
 import time
 import os
-import json
-import glob
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
-from client.models.scanner_model import Scanner, ScannerStatus
-from client.processing.scan_frame_processor import ScanFrameProcessor, RealTimeTriangulator
 
+import numpy as np
+import cv2
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
-    QGroupBox, QFormLayout, QComboBox, QSlider, QCheckBox, QMessageBox,
-    QSpinBox, QDoubleSpinBox, QFrame, QSplitter, QTabWidget, QRadioButton,
-    QButtonGroup, QLineEdit, QProgressBar, QToolButton, QDialog, QScrollArea,
-    QTextEdit, QApplication, QStyle, QStyleOption, QStyleFactory, QProgressDialog
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSplitter,
+    QGroupBox, QFormLayout, QComboBox, QSlider, QProgressBar, QMessageBox,
+    QApplication, QFileDialog
 )
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, QSize, QSettings, QThread, QObject, QMetaObject, QGenericArgument
-from PySide6.QtGui import QIcon, QFont, QColor, QPixmap, QImage
+from PySide6.QtCore import Qt, Signal, Slot, QTimer
+from PySide6.QtGui import QImage, QPixmap
 
+from client.models.scanner_model import Scanner, ScannerStatus
+from client.processing.scan_frame_processor import ScanFrameProcessor
 
-def Q_ARG(type_name, value):
-    return QGenericArgument(type_name, value)
-
-
-# Definizione della classe ScanFrameProcessor come fallback globale
-# in caso di fallimento dell'importazione
-class ScanFrameProcessor:
-    """Classe fallback per ScanFrameProcessor quando non è disponibile il modulo originale."""
-
-    def __init__(self, output_dir=None):
-        self.output_dir = output_dir
-        self._progress_callback = None
-        self._frame_callback = None
-        logger = logging.getLogger(__name__)
-        logger.warning("Utilizzando versione fallback di ScanFrameProcessor")
-
-    def set_callbacks(self, progress_callback=None, frame_callback=None):
-        self._progress_callback = progress_callback
-        self._frame_callback = frame_callback
-
-    def start_scan(self, scan_id=None, num_patterns=24, pattern_type="PROGRESSIVE"):
-        if scan_id is None:
-            scan_id = f"Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        return scan_id
-
-    def process_frame(self, camera_index, frame, frame_info):
-        return True
-
-    def stop_scan(self):
-        return {"success": True, "message": "Scan stopped (mock implementation)"}
-
-    def get_scan_progress(self):
-        return {"state": "IDLE", "progress": 0.0}
-
-
-# Importa il modulo di triangolazione
-try:
-    from client.processing.triangulation import ScanProcessor, PatternType
-except ImportError:
-    logger = logging.getLogger(__name__)
-    logger.error("Impossibile importare il modulo di triangolazione. La visualizzazione 3D sarà disabilitata.")
-
-
-    # Definizione di PatternType come fallback
-    class PatternType:
-        PROGRESSIVE = "PROGRESSIVE"
-        GRAY_CODE = "GRAY_CODE"
-        BINARY_CODE = "BINARY_CODE"
-        PHASE_SHIFT = "PHASE_SHIFT"
-
-
-    # Definizione di ScanProcessor come fallback
-    class ScanProcessor:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def set_callbacks(self, *args, **kwargs):
-            pass
-
-        def load_local_scan(self, *args, **kwargs):
-            return False
-
-        def process_scan(self, *args, **kwargs):
-            return False
-
-# Ora tentiamo di importare la versione reale di ScanFrameProcessor
-try:
-    from client.processing.scan_frame_processor import ScanFrameProcessor
-
-    logger = logging.getLogger(__name__)
-    logger.info("ScanFrameProcessor importato con successo")
-except ImportError:
-    logger = logging.getLogger(__name__)
-    logger.error("Impossibile importare ScanFrameProcessor, utilizzo versione fallback")
-    # Nota: Non è necessario ridefinire ScanFrameProcessor qui perché
-    # l'abbiamo già definito a livello globale prima del blocco try
-
-# Verifica se Open3D è disponibile per la visualizzazione 3D
+# Verifica la disponibilità di Open3D per la visualizzazione 3D
 try:
     import open3d as o3d
 
     OPEN3D_AVAILABLE = True
 except ImportError:
     OPEN3D_AVAILABLE = False
-
-# Verifica se OpenCV è disponibile per la visualizzazione delle immagini
-try:
-    import cv2
-    import numpy as np
-
-    OPENCV_AVAILABLE = True
-except ImportError:
-    OPENCV_AVAILABLE = False
-
-try:
-    from PyQt5.QtWebEngineWidgets import QWebEngineView
-
-    WEBENGINE_AVAILABLE = True
-except ImportError:
-    try:
-        from PySide6.QtWebEngineWidgets import QWebEngineView
-
-        WEBENGINE_AVAILABLE = True
-    except ImportError:
-        WEBENGINE_AVAILABLE = False
-        logger.warning("QtWebEngine non disponibile. Sarà usata una visualizzazione 3D semplificata.")
+    logging.warning("Open3D non disponibile. Funzionalità di visualizzazione 3D limitate.")
 
 # Configura logging
 logger = logging.getLogger(__name__)
 
 
-class RealtimeViewer3D(QWidget):
-    """Widget per la visualizzazione in tempo reale della nuvola di punti 3D.
-    Versione ottimizzata per l'elaborazione in-memory con aggiornamenti in tempo reale.
-    """
+class CameraPreviewWidget(QWidget):
+    """Widget per visualizzare il preview di una singola camera."""
+
+    def __init__(self, camera_index: int, parent=None):
+        super().__init__(parent)
+        self.camera_index = camera_index
+        self._frame = None
+        self._last_update_time = time.time()
+        self._fps = 0
+        self._frame_count = 0
+
+        # Setup UI
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Display per l'immagine
+        self.display_label = QLabel()
+        self.display_label.setAlignment(Qt.AlignCenter)
+        self.display_label.setMinimumSize(320, 240)
+        self.display_label.setStyleSheet("background-color: black; color: white;")
+        self.display_label.setText("Camera non attiva\nIn attesa dei frame...")
+
+        # Etichetta informativa
+        self.info_label = QLabel("Camera non attiva")
+        self.info_label.setAlignment(Qt.AlignCenter)
+
+        layout.addWidget(self.display_label)
+        layout.addWidget(self.info_label)
+
+    @Slot(np.ndarray, float)
+    def update_frame(self, frame: np.ndarray, timestamp: float = None):
+        """Aggiorna il frame visualizzato."""
+        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+            return
+
+        # Memorizza e analizza il frame
+        self._frame = frame.copy()
+        self._frame_count += 1
+
+        # Converti il frame in QImage per visualizzazione
+        height, width = frame.shape[:2]
+        bytes_per_line = frame.strides[0]
+
+        if len(frame.shape) == 3 and frame.shape[2] == 3:
+            # Frame a colori BGR -> RGB
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            qt_image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        else:
+            # Frame in scala di grigi
+            qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+
+        # Visualizza il frame
+        pixmap = QPixmap.fromImage(qt_image)
+        self.display_label.setPixmap(pixmap.scaled(
+            self.display_label.width(), self.display_label.height(),
+            Qt.KeepAspectRatio, Qt.SmoothTransformation
+        ))
+        self.display_label.setStyleSheet("")  # Rimuovi stile sfondo nero
+
+        # Calcola FPS
+        current_time = time.time()
+        if self._last_update_time > 0:
+            time_diff = current_time - self._last_update_time
+            if time_diff > 0:
+                fps = 1.0 / time_diff
+                # Media mobile per stabilizzare
+                alpha = 0.1
+                self._fps = (1.0 - alpha) * self._fps + alpha * fps
+
+        self._last_update_time = current_time
+
+        # Aggiorna etichetta informativa
+        camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
+        fps_text = f"{self._fps:.1f} FPS" if self._fps > 0 else ""
+        self.info_label.setText(f"Camera {camera_name} | {width}x{height} | {fps_text}")
+
+    def get_current_frame(self) -> Optional[np.ndarray]:
+        """Restituisce il frame corrente."""
+        return self._frame.copy() if self._frame is not None else None
+
+    def clear(self):
+        """Pulisce il display."""
+        self.display_label.clear()
+        self.display_label.setStyleSheet("background-color: black; color: white;")
+        self.display_label.setText("Camera non attiva")
+        self.info_label.setText("Camera non attiva")
+        self._frame = None
+        self._fps = 0
+        self._frame_count = 0
+
+
+class PointCloudViewerWidget(QWidget):
+    """Widget per visualizzare la nuvola di punti 3D in tempo reale."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.pointcloud = None
-        self.last_update_time = 0
+        self._last_update_time = time.time()
+        self._fps = 0
+        self._frame_count = 0
 
-        # Inizializza attributi PRIMA di setup_ui
-        self._max_points_display = 30000  # Limite punti per visualizzazione
-        self._auto_center = True  # Auto-centra la vista quando ci sono nuovi punti
-        self._last_points_count = 0  # Per rilevare cambiamenti significativi
-        self._update_interval = 0.2  # Intervallo minimo tra aggiornamenti (secondi)
-
-        # Ora imposta l'UI
-        self._setup_ui()
-
-    def _setup_ui(self):
-        """Configura l'interfaccia utente del visualizzatore."""
+        # Setup UI
         layout = QVBoxLayout(self)
 
-        # Usa WebEngine se disponibile per una visualizzazione 3D interattiva
-        if WEBENGINE_AVAILABLE:
-            self.web_view = QWebEngineView()
-            self.web_view.setMinimumHeight(300)
-            layout.addWidget(self.web_view, 1)  # Proporzione aumentata
+        # Etichetta per visualizzazione
+        self.display_label = QLabel("Nuvola di punti non disponibile")
+        self.display_label.setAlignment(Qt.AlignCenter)
+        self.display_label.setMinimumSize(400, 300)
+        self.display_label.setStyleSheet("background-color: #f0f0f0; border: 1px solid #ccc;")
 
-            # Carica una pagina HTML con Three.js per la visualizzazione
-            self._load_threejs_viewer()
-        else:
-            # Fallback a un semplice widget di visualizzazione
-            self.view_label = QLabel("Visualizzazione nuvola di punti")
-            self.view_label.setAlignment(Qt.AlignCenter)
-            self.view_label.setMinimumHeight(300)
-            self.view_label.setStyleSheet("background-color: #f0f0f0; border: 1px solid #ccc;")
-            layout.addWidget(self.view_label, 1)  # Proporzione aumentata
-
-        # Aggiunge informazioni sulla nuvola di punti
-        info_layout = QHBoxLayout()
-
-        self.info_label = QLabel("Nessuna nuvola di punti disponibile")
+        # Etichetta informativa
+        self.info_label = QLabel("In attesa della nuvola di punti...")
         self.info_label.setAlignment(Qt.AlignCenter)
-        info_layout.addWidget(self.info_label)
 
-        # Aggiunto indicatore FPS
-        self.fps_label = QLabel("0 FPS")
-        self.fps_label.setAlignment(Qt.AlignRight)
-        self.fps_label.setStyleSheet("color: #888; font-size: 10px;")
-        info_layout.addWidget(self.fps_label)
-
-        layout.addLayout(info_layout)
-
-        # Aggiungi controlli per la visualizzazione
+        # Pulsanti di controllo
         controls_layout = QHBoxLayout()
 
-        self.center_button = QPushButton("Centra Vista")
-        self.center_button.clicked.connect(self._center_view)
-
-        self.reset_button = QPushButton("Reset")
-        self.reset_button.clicked.connect(self._reset_view)
-
-        # Nuovo pulsante per esportare la nuvola corrente
-        self.export_button = QPushButton("Esporta Nuvola...")
+        self.export_button = QPushButton("Esporta PLY...")
+        self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self._export_pointcloud)
-        self.export_button.setEnabled(False)  # Disabilitato finché non c'è una nuvola
 
-        # Checkbox per auto-center
-        self.auto_center_checkbox = QCheckBox("Auto-centra")
-        self.auto_center_checkbox.setChecked(self._auto_center)
-        self.auto_center_checkbox.toggled.connect(self._toggle_auto_center)
-
-        controls_layout.addWidget(self.center_button)
-        controls_layout.addWidget(self.reset_button)
         controls_layout.addWidget(self.export_button)
-        controls_layout.addWidget(self.auto_center_checkbox)
+        controls_layout.addStretch(1)
 
+        # Assembla il layout
+        layout.addWidget(self.display_label)
+        layout.addWidget(self.info_label)
         layout.addLayout(controls_layout)
 
-        # Timer per aggiornamento FPS
-        self._fps_timer = QTimer(self)
-        self._fps_timer.timeout.connect(self._update_fps)
-        self._fps_timer.start(1000)  # Aggiorna ogni secondo
-
-        # Contatori FPS
-        self._frame_count = 0
-        self._last_fps_time = time.time()
-
-    def _toggle_auto_center(self, checked):
-        """Toggle per l'auto-centraggio della vista."""
-        self._auto_center = checked
-
-    def _update_fps(self):
-        """Aggiorna l'indicatore FPS."""
-        current_time = time.time()
-        elapsed = current_time - self._last_fps_time
-
-        if elapsed > 0:
-            fps = self._frame_count / elapsed
-            self.fps_label.setText(f"{fps:.1f} FPS")
-
-            # Reset contatori
-            self._frame_count = 0
-            self._last_fps_time = current_time
-
-    def _load_threejs_viewer(self):
-        """Carica il visualizzatore Three.js ottimizzato."""
-        if not hasattr(self, 'web_view'):
-            return
-
-        # HTML base per il visualizzatore - versione ottimizzata per prestazioni
-        html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <title>UnLook 3D Viewer</title>
-            <style>
-                body { margin: 0; overflow: hidden; background-color: #f0f0f0; }
-                canvas { width: 100%; height: 100%; display: block; }
-                .stats { position: absolute; top: 0; left: 0; }
-                .loading { 
-                    position: absolute; 
-                    top: 50%; 
-                    left: 50%; 
-                    transform: translate(-50%, -50%);
-                    background-color: rgba(0,0,0,0.7);
-                    color: white;
-                    padding: 10px 20px;
-                    border-radius: 5px;
-                    font-family: Arial, sans-serif;
-                }
-            </style>
-            <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-            <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js"></script>
-            <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/libs/stats.min.js"></script>
-        </head>
-        <body>
-            <div id="loading" class="loading" style="display: none;">Caricamento...</div>
-            <script>
-                // Variabili globali
-                let scene, camera, renderer, controls, stats;
-                let pointcloud;
-                let lastPointsCount = 0;
-                let loadingTimeout;
-                let autoCenter = true;
-
-                // Performance settings
-                const USE_INSTANCING = true;  // Usa InstancedBufferGeometry per migliori prestazioni
-                const USE_ADAPTIVE_DETAIL = true;  // Riduce dettaglio durante rotazione
-
-                // Inizializza la scena
-                function init() {
-                    // Crea scena
-                    scene = new THREE.Scene();
-                    scene.background = new THREE.Color(0xf0f0f0);
-
-                    // Crea camera
-                    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-                    camera.position.z = 200;
-
-                    // Crea renderer
-                    renderer = new THREE.WebGLRenderer({ antialias: true });
-                    renderer.setSize(window.innerWidth, window.innerHeight);
-                    renderer.setPixelRatio(window.devicePixelRatio > 1 ? 2 : 1);
-                    document.body.appendChild(renderer.domElement);
-
-                    // Aggiungi controlli
-                    controls = new THREE.OrbitControls(camera, renderer.domElement);
-                    controls.enableDamping = true;
-                    controls.dampingFactor = 0.25;
-                    controls.rotateSpeed = 0.5;
-                    controls.addEventListener('start', onControlsStart);
-                    controls.addEventListener('end', onControlsEnd);
-
-                    // Aggiungi luci
-                    const ambientLight = new THREE.AmbientLight(0xcccccc, 0.5);
-                    scene.add(ambientLight);
-
-                    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-                    directionalLight.position.set(1, 1, 1).normalize();
-                    scene.add(directionalLight);
-
-                    // Aggiungi griglia e assi
-                    const gridHelper = new THREE.GridHelper(200, 20);
-                    scene.add(gridHelper);
-
-                    const axesHelper = new THREE.AxesHelper(100);
-                    scene.add(axesHelper);
-
-                    // Stats for performance monitoring
-                    stats = new Stats();
-                    document.body.appendChild(stats.dom);
-                    stats.dom.style.position = 'absolute';
-                    stats.dom.style.top = '0px';
-                    stats.dom.style.left = '0px';
-
-                    // Gestisci resize
-                    window.addEventListener('resize', onWindowResize, false);
-
-                    // Avvia animazione
-                    animate();
-                }
-
-                // Callback per controlli start/end
-                function onControlsStart() {
-                    if (USE_ADAPTIVE_DETAIL && pointcloud) {
-                        // Riduce dimensione punti durante interazione per performance
-                        pointcloud.material.size = 1.0;
-                    }
-                }
-
-                function onControlsEnd() {
-                    if (USE_ADAPTIVE_DETAIL && pointcloud) {
-                        // Ripristina dimensione punti dopo interazione
-                        pointcloud.material.size = 1.5;
-                    }
-                }
-
-                // Aggiorna dimensioni al resize
-                function onWindowResize() {
-                    camera.aspect = window.innerWidth / window.innerHeight;
-                    camera.updateProjectionMatrix();
-                    renderer.setSize(window.innerWidth, window.innerHeight);
-                }
-
-                // Loop di animazione
-                function animate() {
-                    requestAnimationFrame(animate);
-                    controls.update();
-                    stats.update();
-                    renderer.render(scene, camera);
-                }
-
-                // Funzione per aggiornare la nuvola di punti (ottimizzata)
-                function updatePointCloud(points) {
-                    const startTime = performance.now();
-
-                    // Mostra loader solo per nuvole grandi che richiedono tempo
-                    if (points && points.length > 20000) {
-                        document.getElementById('loading').style.display = 'block';
-                        clearTimeout(loadingTimeout);
-                        loadingTimeout = setTimeout(() => {
-                            document.getElementById('loading').style.display = 'none';
-                        }, 500);
-                    }
-
-                    // Se non ci sono punti, usa nuvola esistente o esci
-                    if (!points || points.length === 0) {
-                        if (pointcloud) {
-                            // Nascondi loader
-                            document.getElementById('loading').style.display = 'none';
-                        }
-                        return;
-                    }
-
-                    // Evita di ricreare se non ci sono cambiamenti significativi
-                    const significantChange = !pointcloud || 
-                                              Math.abs(lastPointsCount - points.length) > points.length * 0.1;
-
-                    // Se la nuvola esiste e non ci sono cambiamenti significativi,
-                    // aggiorna solo i punti senza ricreare tutto
-                    if (pointcloud && !significantChange) {
-                        const positions = pointcloud.geometry.attributes.position.array;
-                        let updated = false;
-
-                        // Aggiorna solo se il numero di punti è lo stesso
-                        if (points.length === lastPointsCount) {
-                            for (let i = 0; i < points.length; i++) {
-                                positions[i*3] = points[i][0];
-                                positions[i*3+1] = points[i][1];
-                                positions[i*3+2] = points[i][2];
-                            }
-                            pointcloud.geometry.attributes.position.needsUpdate = true;
-                            updated = true;
-                        }
-
-                        // Se l'aggiornamento rapido non è possibile, ricrea la geometria
-                        if (!updated) {
-                            // Rimuovi nuvola esistente
-                            scene.remove(pointcloud);
-                            pointcloud = null;
-                        } else {
-                            // Nascondi loader se aggiornamento è completato
-                            document.getElementById('loading').style.display = 'none';
-                            return;
-                        }
-                    }
-
-                    // Rimuovi nuvola esistente se necessario
-                    if (pointcloud) {
-                        scene.remove(pointcloud);
-                    }
-
-                    // Crea nuova geometria
-                    let geometry;
-
-                    if (USE_INSTANCING && points.length > 10000) {
-                        // Per grandi nuvole, usa InstancedBufferGeometry per migliori prestazioni
-                        geometry = new THREE.InstancedBufferGeometry();
-
-                        // Crea geometria base (un punto)
-                        const baseGeometry = new THREE.BufferGeometry();
-                        const positions = new Float32Array(3);
-                        positions[0] = 0;
-                        positions[1] = 0;
-                        positions[2] = 0;
-                        baseGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-
-                        // Clona attributi dalla geometria base
-                        geometry.copy(baseGeometry);
-
-                        // Crea attributo di offset per ogni istanza
-                        const offsets = new Float32Array(points.length * 3);
-                        for (let i = 0; i < points.length; i++) {
-                            offsets[i*3] = points[i][0];
-                            offsets[i*3+1] = points[i][1];
-                            offsets[i*3+2] = points[i][2];
-                        }
-
-                        // Aggiungi attributo offset
-                        geometry.setAttribute('offset', new THREE.InstancedBufferAttribute(offsets, 3));
-                        geometry.instanceCount = points.length;
-                    } else {
-                        // Per nuvole più piccole, usa BufferGeometry standard
-                        geometry = new THREE.BufferGeometry();
-                        const vertices = new Float32Array(points.length * 3);
-
-                        for (let i = 0; i < points.length; i++) {
-                            vertices[i*3] = points[i][0];
-                            vertices[i*3+1] = points[i][1];
-                            vertices[i*3+2] = points[i][2];
-                        }
-
-                        geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
-                    }
-
-                    // Calcola raggio della nuvola e centro
-                    geometry.computeBoundingSphere();
-
-                    // Crea materiale
-                    let material;
-
-                    if (USE_INSTANCING && points.length > 10000) {
-                        // Shader personalizzato per geometria istanziata
-                        material = new THREE.ShaderMaterial({
-                            uniforms: {
-                                color: { value: new THREE.Color(0x0088ff) },
-                                pointSize: { value: 1.5 }
-                            },
-                            vertexShader: `
-                                uniform float pointSize;
-                                attribute vec3 offset;
-                                void main() {
-                                    vec3 pos = position + offset;
-                                    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
-                                    gl_PointSize = pointSize;
-                                }
-                            `,
-                            fragmentShader: `
-                                uniform vec3 color;
-                                void main() {
-                                    gl_FragColor = vec4(color, 1.0);
-                                }
-                            `,
-                            transparent: false
-                        });
-                    } else {
-                        // PointsMaterial standard per geometria normale
-                        material = new THREE.PointsMaterial({
-                            size: 1.5,
-                            color: 0x0088ff,
-                            sizeAttenuation: true
-                        });
-                    }
-
-                    // Crea nuvola di punti
-                    pointcloud = new THREE.Points(geometry, material);
-                    scene.add(pointcloud);
-
-                    // Auto-centra la vista se richiesto
-                    if (autoCenter) {
-                        centerView();
-                    }
-
-                    lastPointsCount = points.length;
-
-                    // Nascondi loader
-                    document.getElementById('loading').style.display = 'none';
-
-                    // Log prestazioni
-                    const endTime = performance.now();
-                    console.log(`Aggiornamento nuvola: ${endTime - startTime}ms, ${points.length} punti`);
-                }
-
-                // Funzione per centrare la vista
-                function centerView() {
-                    if (pointcloud) {
-                        const geometry = pointcloud.geometry;
-                        geometry.computeBoundingSphere();
-                        const center = geometry.boundingSphere.center;
-                        const radius = geometry.boundingSphere.radius;
-
-                        controls.target.set(center.x, center.y, center.z);
-                        camera.position.set(center.x, center.y, center.z + radius * 2);
-                        camera.updateProjectionMatrix();
-                        controls.update();
-                    }
-                }
-
-                // Funzione per resettare la vista
-                function resetView() {
-                    camera.position.set(0, 0, 200);
-                    controls.target.set(0, 0, 0);
-                    camera.updateProjectionMatrix();
-                    controls.update();
-                }
-
-                // Funzione per impostare auto-center
-                function setAutoCenter(enabled) {
-                    autoCenter = enabled;
-                }
-
-                // Funzione per esportare la nuvola di punti
-                function getCurrentPointCloudData() {
-                    if (!pointcloud) {
-                        return null;
-                    }
-
-                    // Estrai i punti dalla geometria
-                    let points = [];
-
-                    if (USE_INSTANCING && pointcloud.geometry instanceof THREE.InstancedBufferGeometry) {
-                        // Per geometria istanziata, usa l'attributo offset
-                        const offsetAttr = pointcloud.geometry.getAttribute('offset');
-                        const count = pointcloud.geometry.instanceCount;
-
-                        for (let i = 0; i < count; i++) {
-                            points.push([
-                                offsetAttr.getX(i),
-                                offsetAttr.getY(i),
-                                offsetAttr.getZ(i)
-                            ]);
-                        }
-                    } else {
-                        // Per geometria standard, usa l'attributo position
-                        const positionAttr = pointcloud.geometry.getAttribute('position');
-                        const count = positionAttr.count;
-
-                        for (let i = 0; i < count; i++) {
-                            points.push([
-                                positionAttr.getX(i),
-                                positionAttr.getY(i),
-                                positionAttr.getZ(i)
-                            ]);
-                        }
-                    }
-
-                    return points;
-                }
-
-                // Inizializza
-                document.addEventListener('DOMContentLoaded', init);
-            </script>
-        </body>
-        </html>
-        """
-
-        # Carica l'HTML nel widget
-        self.web_view.setHtml(html)
-
     def update_pointcloud(self, pointcloud):
-        """
-        Aggiorna la nuvola di punti visualizzata con ottimizzazioni di performance.
-
-        Args:
-            pointcloud: Nuvola di punti come array NumPy
-        """
-        # Limita aggiornamenti troppo frequenti (max uno ogni 0.2 secondi)
-        current_time = time.time()
-        if current_time - self.last_update_time < self._update_interval:
-            return
-
-        self.last_update_time = current_time
-        self.pointcloud = pointcloud
-
-        # Incrementa contatore frame per FPS
-        self._frame_count += 1
-
+        """Aggiorna la nuvola di punti visualizzata."""
         if pointcloud is None or len(pointcloud) == 0:
-            self.info_label.setText("Nessuna nuvola di punti disponibile")
-            self.export_button.setEnabled(False)
             return
 
-        # Aggiorna informazioni con più dettagli
-        x_range = (np.min(pointcloud[:, 0]), np.max(pointcloud[:, 0]))
-        y_range = (np.min(pointcloud[:, 1]), np.max(pointcloud[:, 1]))
-        z_range = (np.min(pointcloud[:, 2]), np.max(pointcloud[:, 2]))
-
-        # Dimensioni della nuvola
-        dimensions = (
-            x_range[1] - x_range[0],
-            y_range[1] - y_range[0],
-            z_range[1] - z_range[0]
-        )
-
-        info_text = f"{len(pointcloud):,} punti | "
-        info_text += f"Dim: {dimensions[0]:.1f} x {dimensions[1]:.1f} x {dimensions[2]:.1f} mm"
-
-        self.info_label.setText(info_text)
+        # Memorizza la nuvola per l'esportazione
+        self.pointcloud = pointcloud.copy()
+        self._frame_count += 1
 
         # Abilita il pulsante di esportazione
         self.export_button.setEnabled(True)
 
-        # Campionamento per prestazioni migliori se necessario
-        if len(pointcloud) > self._max_points_display:
-            # Usa una strategia di campionamento adattiva
-            # Se la differenza con l'ultimo conteggio è grande, usiamo campionamento casuale
-            # altrimenti campionamento uniforme più veloce
-            if abs(len(pointcloud) - self._last_points_count) > self._max_points_display * 0.2:
-                # Campionamento casuale: migliore qualità visiva ma più lento
-                indices = np.random.choice(len(pointcloud), self._max_points_display, replace=False)
-                display_cloud = pointcloud[indices]
-            else:
-                # Campionamento uniforme: più veloce ma meno rappresentativo
-                step = len(pointcloud) // self._max_points_display
-                display_cloud = pointcloud[::step][:self._max_points_display]
-        else:
-            display_cloud = pointcloud
+        # Aggiorna etichetta informativa
+        self.info_label.setText(f"Nuvola di punti: {len(pointcloud):,} punti")
 
-        # Aggiorna l'ultimo conteggio
-        self._last_points_count = len(pointcloud)
+        # Genera e visualizza immagine della nuvola
+        self._update_pointcloud_image()
 
-        # Se stiamo usando WebEngine, aggiorna la nuvola nel visualizzatore 3D
-        if WEBENGINE_AVAILABLE and hasattr(self, 'web_view'):
-            # Converti la nuvola in formato JSON per JavaScript
-            import json
+        # Calcola FPS
+        current_time = time.time()
+        if self._last_update_time > 0:
+            time_diff = current_time - self._last_update_time
+            if time_diff > 0:
+                fps = 1.0 / time_diff
+                # Media mobile per stabilizzare
+                alpha = 0.1
+                self._fps = (1.0 - alpha) * self._fps + alpha * fps
 
-            # Ottimizzazione: invia solo i punti che verranno visualizzati
-            points_list = display_cloud.tolist()
-            points_json = json.dumps(points_list)
+        self._last_update_time = current_time
 
-            # Chiama la funzione JavaScript per aggiornare la nuvola
-            js_code = f"updatePointCloud({points_json});"
-            self.web_view.page().runJavaScript(js_code)
-
-            # Aggiorna lo stato di auto-center
-            self.web_view.page().runJavaScript(f"setAutoCenter({str(self._auto_center).lower()});")
-        else:
-            # Se WebEngine non è disponibile, genera un'immagine statica
-            self._update_static_image(display_cloud)
-
-    def _update_static_image(self, pointcloud):
-        """Genera un'immagine statica della nuvola di punti."""
-        if not hasattr(self, 'view_label'):
-            return
-
-        if not OPEN3D_AVAILABLE or pointcloud is None or len(pointcloud) == 0:
-            self.view_label.setText("Visualizzazione 3D non disponibile")
+    def _update_pointcloud_image(self):
+        """Genera e visualizza un'immagine della nuvola di punti."""
+        if not OPEN3D_AVAILABLE or self.pointcloud is None:
+            self.display_label.setText("Visualizzazione 3D non disponibile")
             return
 
         try:
@@ -706,12 +211,12 @@ class RealtimeViewer3D(QWidget):
 
             # Crea nuvola Open3D
             pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(pointcloud)
+            pcd.points = o3d.utility.Vector3dVector(self.pointcloud)
 
-            # Aggiungi un sistema di coordinate per riferimento
+            # Crea sistema di coordinate
             coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=20)
 
-            # Crea visualizzatore
+            # Visualizzazione
             vis = o3d.visualization.Visualizer()
             vis.create_window(visible=False, width=800, height=600)
             vis.add_geometry(pcd)
@@ -730,10 +235,11 @@ class RealtimeViewer3D(QWidget):
 
             # Mostra immagine
             pixmap = QPixmap(temp_img.name)
-            self.view_label.setPixmap(pixmap.scaled(
-                self.view_label.width(), self.view_label.height(),
+            self.display_label.setPixmap(pixmap.scaled(
+                self.display_label.width(), self.display_label.height(),
                 Qt.KeepAspectRatio, Qt.SmoothTransformation
             ))
+            self.display_label.setText("")
 
             # Elimina file temporaneo
             try:
@@ -742,22 +248,12 @@ class RealtimeViewer3D(QWidget):
                 pass
 
         except Exception as e:
-            logger.error(f"Errore nella generazione dell'immagine statica: {e}")
-            self.view_label.setText(f"Errore nella visualizzazione: {str(e)}")
-
-    def _center_view(self):
-        """Centra la vista sulla nuvola di punti."""
-        if WEBENGINE_AVAILABLE and hasattr(self, 'web_view'):
-            self.web_view.page().runJavaScript("centerView();")
-
-    def _reset_view(self):
-        """Ripristina la vista predefinita."""
-        if WEBENGINE_AVAILABLE and hasattr(self, 'web_view'):
-            self.web_view.page().runJavaScript("resetView();")
+            logger.error(f"Errore nella visualizzazione della nuvola: {e}")
+            self.display_label.setText(f"Errore nella visualizzazione 3D: {str(e)}")
 
     def _export_pointcloud(self):
-        """Esporta la nuvola di punti corrente."""
-        if not self.pointcloud is not None:
+        """Esporta la nuvola di punti su file PLY."""
+        if self.pointcloud is None or len(self.pointcloud) == 0:
             QMessageBox.warning(
                 self,
                 "Nessuna nuvola di punti",
@@ -765,43 +261,8 @@ class RealtimeViewer3D(QWidget):
             )
             return
 
-        # Ottieni i dati correnti della nuvola dal visualizzatore
-        if WEBENGINE_AVAILABLE and hasattr(self, 'web_view'):
-            # Ottieni i dati direttamente da JavaScript
-            self.web_view.page().runJavaScript(
-                "getCurrentPointCloudData();",
-                self._handle_export_data
-            )
-        else:
-            # Usa i dati locali
-            self._handle_export_data(self.pointcloud.tolist() if self.pointcloud is not None else None)
-
-    def _handle_export_data(self, data):
-        """Gestisce i dati ricevuti per l'esportazione."""
-        if not data:
-            QMessageBox.warning(
-                self,
-                "Errore",
-                "Impossibile ottenere i dati della nuvola di punti."
-            )
-            return
-
         try:
-            # Converti i dati in NumPy array
-            if isinstance(data, list):
-                pointcloud = np.array(data)
-            else:
-                pointcloud = self.pointcloud
-
-            if pointcloud is None or len(pointcloud) == 0:
-                QMessageBox.warning(
-                    self,
-                    "Errore",
-                    "Nessun dato valido da esportare."
-                )
-                return
-
-            # Mostra dialog per selezionare file
+            # Chiedi dove salvare il file
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Esporta Nuvola di Punti",
@@ -823,7 +284,7 @@ class RealtimeViewer3D(QWidget):
             if OPEN3D_AVAILABLE:
                 # Usa Open3D
                 pcd = o3d.geometry.PointCloud()
-                pcd.points = o3d.utility.Vector3dVector(pointcloud)
+                pcd.points = o3d.utility.Vector3dVector(self.pointcloud)
                 o3d.io.write_point_cloud(file_path, pcd)
             else:
                 # Fallback a salvataggio manuale
@@ -831,3540 +292,493 @@ class RealtimeViewer3D(QWidget):
                     # Scrivi header
                     f.write("ply\n")
                     f.write("format ascii 1.0\n")
-                    f.write(f"element vertex {len(pointcloud)}\n")
+                    f.write(f"element vertex {len(self.pointcloud)}\n")
                     f.write("property float x\n")
                     f.write("property float y\n")
                     f.write("property float z\n")
                     f.write("end_header\n")
 
                     # Scrivi vertici
-                    for point in pointcloud:
+                    for point in self.pointcloud:
                         f.write(f"{point[0]} {point[1]} {point[2]}\n")
 
             QMessageBox.information(
                 self,
                 "Esportazione Completata",
-                f"La nuvola di punti con {len(pointcloud):,} punti è stata esportata con successo in:\n{file_path}"
+                f"La nuvola di punti con {len(self.pointcloud):,} punti è stata esportata con successo in:\n{file_path}"
             )
 
         except Exception as e:
-            logger.error(f"Errore nell'esportazione della nuvola di punti: {e}")
+            logger.error(f"Errore nell'esportazione della nuvola: {e}")
             QMessageBox.critical(
                 self,
                 "Errore",
                 f"Si è verificato un errore durante l'esportazione:\n{str(e)}"
             )
-
-
-class TestCapabilityWorker(QObject):
-    """Worker per eseguire il test delle capacità di scansione in un thread separato."""
-    progress = Signal(int, str)  # progress, message
-    finished = Signal(dict)  # response
-    error = Signal(str)  # error message
-
-    def __init__(self, scanner_controller, device_id):
-        super().__init__()
-        self.scanner_controller = scanner_controller
-        self.device_id = device_id
-
-    def run(self):
-        try:
-            self.progress.emit(20, "Invio comando di test...")
-
-            command_success = self.scanner_controller.send_command(
-                self.device_id,
-                "CHECK_SCAN_CAPABILITY"
-            )
-
-            if not command_success:
-                self.error.emit("Impossibile inviare il comando di test al server.")
-                return
-
-            self.progress.emit(40, "Attesa risposta dal server...")
-
-            # Attendi la risposta con timeout aumentato (60 secondi)
-            response = self.scanner_controller.wait_for_response(
-                self.device_id,
-                "CHECK_SCAN_CAPABILITY",
-                timeout=60.0
-            )
-
-            if not response:
-                self.error.emit("Nessuna risposta dal server entro il timeout.")
-                return
-
-            self.progress.emit(100, "Test completato.")
-            self.finished.emit(response)
-        except Exception as e:
-            self.error.emit(f"Errore durante il test: {str(e)}")
-
-
-class ScanOptionsDialog(QDialog):
-    """Dialog per configurare le opzioni di scansione."""
-
-    def __init__(self, parent=None, current_config=None):
-        super().__init__(parent)
-        self.setWindowTitle("Opzioni di Scansione 3D")
-        self.setMinimumWidth(400)
-
-        # Inizializza con configurazione corrente o default
-        self.config = current_config or {
-            "pattern_type": "PROGRESSIVE",
-            "num_patterns": 12,
-            "exposure_time": 0.5,
-            "quality": 3
-        }
-
-        # Configura l'interfaccia
-        self._setup_ui()
-        self._update_ui_from_config()
-
-    def _setup_ui(self):
-        """Configura l'interfaccia del dialog."""
-        layout = QVBoxLayout(self)
-
-        # Gruppo principale per le opzioni
-        options_group = QGroupBox("Parametri di Scansione")
-        form_layout = QFormLayout(options_group)
-
-        # Tipo di pattern
-        self.pattern_type_combo = QComboBox()
-        self.pattern_type_combo.addItem("Pattern Progressivi", "PROGRESSIVE")
-        self.pattern_type_combo.addItem("Gray Code", "GRAY_CODE")
-        self.pattern_type_combo.addItem("Binary Code", "BINARY_CODE")
-        self.pattern_type_combo.addItem("Phase Shift", "PHASE_SHIFT")
-        form_layout.addRow("Tipo di Pattern:", self.pattern_type_combo)
-
-        # Numero di pattern
-        self.num_patterns_spin = QSpinBox()
-        self.num_patterns_spin.setRange(4, 24)
-        self.num_patterns_spin.setSingleStep(2)
-        self.num_patterns_spin.setToolTip("Numero di pattern per direzione (orizzontale/verticale)")
-        form_layout.addRow("Numero di Pattern:", self.num_patterns_spin)
-
-        # Tempo di esposizione
-        self.exposure_spin = QDoubleSpinBox()
-        self.exposure_spin.setRange(0.1, 2.0)
-        self.exposure_spin.setSingleStep(0.1)
-        self.exposure_spin.setDecimals(1)
-        self.exposure_spin.setSuffix(" sec")
-        form_layout.addRow("Tempo di Esposizione:", self.exposure_spin)
-
-        # Qualità
-        quality_layout = QHBoxLayout()
-        self.quality_slider = QSlider(Qt.Horizontal)
-        self.quality_slider.setRange(1, 5)
-        self.quality_slider.setTickPosition(QSlider.TicksBelow)
-        self.quality_slider.setTickInterval(1)
-
-        self.quality_label = QLabel("3")
-        self.quality_slider.valueChanged.connect(lambda v: self.quality_label.setText(str(v)))
-
-        quality_layout.addWidget(self.quality_slider)
-        quality_layout.addWidget(self.quality_label)
-        form_layout.addRow("Qualità:", quality_layout)
-
-        layout.addWidget(options_group)
-
-        # Pulsanti di azione
-        button_layout = QHBoxLayout()
-        self.cancel_button = QPushButton("Annulla")
-        self.cancel_button.clicked.connect(self.reject)
-
-        self.ok_button = QPushButton("OK")
-        self.ok_button.clicked.connect(self.accept)
-        self.ok_button.setDefault(True)
-
-        button_layout.addStretch(1)
-        button_layout.addWidget(self.cancel_button)
-        button_layout.addWidget(self.ok_button)
-
-        layout.addLayout(button_layout)
-
-    def _update_ui_from_config(self):
-        """Aggiorna l'interfaccia in base alla configurazione."""
-        # Imposta tipo di pattern
-        index = self.pattern_type_combo.findData(self.config.get("pattern_type", "PROGRESSIVE"))
-        if index >= 0:
-            self.pattern_type_combo.setCurrentIndex(index)
-
-        # Imposta numero di pattern
-        self.num_patterns_spin.setValue(self.config.get("num_patterns", 12))
-
-        # Imposta tempo di esposizione
-        self.exposure_spin.setValue(self.config.get("exposure_time", 0.5))
-
-        # Imposta qualità
-        self.quality_slider.setValue(self.config.get("quality", 3))
-        self.quality_label.setText(str(self.quality_slider.value()))
-
-    def get_config(self):
-        """Restituisce la configurazione corrente."""
-        return {
-            "pattern_type": self.pattern_type_combo.currentData(),
-            "num_patterns": self.num_patterns_spin.value(),
-            "exposure_time": self.exposure_spin.value(),
-            "quality": self.quality_slider.value()
-        }
-
-
-class PointCloudViewerDialog(QDialog):
-    """Dialog per visualizzare la nuvola di punti 3D."""
-
-    def __init__(self, parent=None, pointcloud_path=None, screenshot_path=None, in_memory_pointcloud=None):
-        super().__init__(parent)
-        self.setWindowTitle("Visualizzatore Nuvola di Punti 3D")
-        self.setMinimumSize(800, 600)
-
-        self.pointcloud_path = pointcloud_path
-        self.screenshot_path = screenshot_path
-        self.in_memory_pointcloud = in_memory_pointcloud  # Nuova proprietà per dati in memoria
-
-        # Configura l'interfaccia
-        self._setup_ui()
-
-        # Carica la nuvola di punti se disponibile
-        if in_memory_pointcloud is not None and OPEN3D_AVAILABLE:
-            # Usa direttamente la nuvola in memoria
-            self._display_in_memory_pointcloud(in_memory_pointcloud)
-        elif pointcloud_path and OPEN3D_AVAILABLE:
-            # Fallback al caricamento da file
-            self.load_pointcloud(pointcloud_path)
-
-    def _setup_ui(self):
-        """Configura l'interfaccia del visualizzatore."""
-        layout = QVBoxLayout(self)
-
-        # Se Open3D è disponibile, mostreremo un'immagine della nuvola di punti
-        # altrimenti solo un messaggio informativo
-        if OPEN3D_AVAILABLE:
-            if self.screenshot_path and os.path.exists(self.screenshot_path):
-                # Mostra lo screenshot della nuvola di punti
-                self.image_label = QLabel()
-                self.image_label.setAlignment(Qt.AlignCenter)
-                pixmap = QPixmap(self.screenshot_path)
-                self.image_label.setPixmap(pixmap.scaled(
-                    self.width(), self.height(),
-                    Qt.KeepAspectRatio, Qt.SmoothTransformation
-                ))
-                layout.addWidget(self.image_label)
-            else:
-                # Crea un placeholder per l'immagine
-                self.image_label = QLabel("Caricamento nuvola di punti in corso...")
-                self.image_label.setAlignment(Qt.AlignCenter)
-                layout.addWidget(self.image_label)
-        else:
-            # Open3D non disponibile
-            info_label = QLabel(
-                "La visualizzazione 3D richiede Open3D.\n"
-                "Installa Open3D con: pip install open3d"
-            )
-            info_label.setAlignment(Qt.AlignCenter)
-            info_label.setStyleSheet("color: #666;")
-            layout.addWidget(info_label)
-
-        # Informazioni sulla nuvola di punti
-        info_text = ""
-
-        # Caso 1: Nuvola in memoria
-        if self.in_memory_pointcloud is not None:
-            num_points = len(self.in_memory_pointcloud)
-            info_text += f"Nuvola di punti in memoria\n"
-            info_text += f"Numero di punti: {num_points:,}\n"
-            info_text += f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-
-            # Se esiste anche un percorso di salvataggio
-            if self.pointcloud_path:
-                info_text += f"Salvata su: {os.path.basename(self.pointcloud_path)}\n"
-
-        # Caso 2: Nuvola da file
-        elif self.pointcloud_path:
-            info_text += f"File: {os.path.basename(self.pointcloud_path)}\n"
-            if os.path.exists(self.pointcloud_path):
-                info_text += f"Dimensione: {os.path.getsize(self.pointcloud_path) / 1024:.1f} KB\n"
-
-                # Se Open3D è disponibile, aggiungi informazioni sul numero di punti
-                if OPEN3D_AVAILABLE:
-                    try:
-                        pcd = o3d.io.read_point_cloud(self.pointcloud_path)
-                        num_points = len(pcd.points)
-                        info_text += f"Numero di punti: {num_points:,}\n"
-                    except:
-                        pass
-            else:
-                info_text += "File non trovato\n"
-
-        # Caso 3: Nessuna nuvola disponibile
-        else:
-            info_text = "Nessuna nuvola di punti disponibile"
-
-        self.info_label = QLabel(info_text)
-        self.info_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.info_label)
-
-        # Pulsanti di azione
-        button_layout = QHBoxLayout()
-
-        # Pulsante per aprire la nuvola di punti con software esterno
-        if self.pointcloud_path and os.path.exists(self.pointcloud_path):
-            self.open_external_button = QPushButton("Apri con Software Esterno")
-            self.open_external_button.clicked.connect(self._open_pointcloud_external)
-            button_layout.addWidget(self.open_external_button)
-
-        # Pulsante per aprire la directory
-        if self.pointcloud_path:
-            self.open_dir_button = QPushButton("Apri Directory")
-            self.open_dir_button.clicked.connect(self._open_directory)
-            button_layout.addWidget(self.open_dir_button)
-
-        # Pulsante per esportare la nuvola in memoria
-        if self.in_memory_pointcloud is not None and not self.pointcloud_path:
-            self.export_button = QPushButton("Esporta Nuvola...")
-            self.export_button.clicked.connect(self._export_pointcloud)
-            button_layout.addWidget(self.export_button)
-
-        # Pulsante di chiusura
-        self.close_button = QPushButton("Chiudi")
-        self.close_button.clicked.connect(self.accept)
-        button_layout.addWidget(self.close_button)
-
-        layout.addLayout(button_layout)
-
-    def _display_in_memory_pointcloud(self, pointcloud):
-        """
-        Visualizza una nuvola di punti direttamente dalla memoria.
-
-        Args:
-            pointcloud: Nuvola di punti come array NumPy
-        """
-        if not OPEN3D_AVAILABLE or pointcloud is None or len(pointcloud) == 0:
-            if hasattr(self, "image_label"):
-                self.image_label.setText("Visualizzazione 3D non disponibile")
-            return
-
-        try:
-            import tempfile
-
-            # Visualizza la nuvola Open3D
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(pointcloud)
-
-            # Aggiungi un sistema di coordinate per riferimento
-            coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=20)
-
-            # Crea visualizzatore
-            vis = o3d.visualization.Visualizer()
-            vis.create_window(visible=False, width=800, height=600)
-            vis.add_geometry(pcd)
-            vis.add_geometry(coord_frame)
-
-            # Configura vista
-            vis.get_render_option().point_size = 2.0
-            vis.get_render_option().background_color = np.array([0.9, 0.9, 0.9])
-            vis.poll_events()
-            vis.update_renderer()
-
-            # Cattura immagine
-            temp_img = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-            vis.capture_screen_image(temp_img.name)
-            vis.destroy_window()
-
-            # Memorizza il percorso dello screenshot
-            self.screenshot_path = temp_img.name
-
-            # Mostra immagine
-            pixmap = QPixmap(temp_img.name)
-            if hasattr(self, "image_label"):
-                self.image_label.setPixmap(pixmap.scaled(
-                    self.width(), self.height(),
-                    Qt.KeepAspectRatio, Qt.SmoothTransformation
-                ))
-                self.image_label.setText("")
-
-        except Exception as e:
-            logger.error(f"Errore nella visualizzazione della nuvola di punti in memoria: {e}")
-            if hasattr(self, "image_label"):
-                self.image_label.setText(f"Errore nella visualizzazione: {str(e)}")
-
-    def _export_pointcloud(self):
-        """Esporta la nuvola di punti in memoria su file."""
-        if self.in_memory_pointcloud is None or len(self.in_memory_pointcloud) == 0:
-            QMessageBox.warning(
-                self,
-                "Errore",
-                "Nessuna nuvola di punti in memoria da esportare."
-            )
-            return
-
-        try:
-            # Mostra dialog per selezionare file
-            file_path, _ = QFileDialog.getSaveFileName(
-                self,
-                "Esporta Nuvola di Punti",
-                os.path.join(str(Path.home()), "pointcloud.ply"),
-                "PLY Files (*.ply);;All Files (*)"
-            )
-
-            if not file_path:
-                return
-
-            # Assicura che l'estensione sia .ply
-            if not file_path.lower().endswith('.ply'):
-                file_path += '.ply'
-
-            # Crea directory se necessario
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
-            # Salva la nuvola
-            if OPEN3D_AVAILABLE:
-                # Usa Open3D
-                pcd = o3d.geometry.PointCloud()
-                pcd.points = o3d.utility.Vector3dVector(self.in_memory_pointcloud)
-                o3d.io.write_point_cloud(file_path, pcd)
-            else:
-                # Fallback a salvataggio manuale
-                with open(file_path, 'w') as f:
-                    # Scrivi header
-                    f.write("ply\n")
-                    f.write("format ascii 1.0\n")
-                    f.write(f"element vertex {len(self.in_memory_pointcloud)}\n")
-                    f.write("property float x\n")
-                    f.write("property float y\n")
-                    f.write("property float z\n")
-                    f.write("end_header\n")
-
-                    # Scrivi vertici
-                    for point in self.in_memory_pointcloud:
-                        f.write(f"{point[0]} {point[1]} {point[2]}\n")
-
-            # Aggiorna l'interfaccia
-            self.pointcloud_path = file_path
-            self.info_label.setText(
-                f"File: {os.path.basename(file_path)}\n"
-                f"Numero di punti: {len(self.in_memory_pointcloud):,}\n"
-                f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"Esportato con successo!"
-            )
-
-            # Abilita pulsanti per il file
-            button_layout = self.layout().itemAt(self.layout().count() - 1)
-            if isinstance(button_layout, QHBoxLayout):
-                # Rimuovi il pulsante di esportazione
-                for i in range(button_layout.count()):
-                    widget = button_layout.itemAt(i).widget()
-                    if widget and widget == getattr(self, 'export_button', None):
-                        widget.setVisible(False)
-                        break
-
-                # Aggiungi pulsanti per il file
-                if not hasattr(self, 'open_external_button'):
-                    self.open_external_button = QPushButton("Apri con Software Esterno")
-                    self.open_external_button.clicked.connect(self._open_pointcloud_external)
-                    button_layout.insertWidget(0, self.open_external_button)
-
-                if not hasattr(self, 'open_dir_button'):
-                    self.open_dir_button = QPushButton("Apri Directory")
-                    self.open_dir_button.clicked.connect(self._open_directory)
-                    button_layout.insertWidget(1, self.open_dir_button)
-
-            QMessageBox.information(
-                self,
-                "Esportazione Completata",
-                f"La nuvola di punti è stata esportata con successo in:\n{file_path}"
-            )
-
-        except Exception as e:
-            logger.error(f"Errore nell'esportazione della nuvola di punti: {e}")
-            QMessageBox.critical(
-                self,
-                "Errore",
-                f"Si è verificato un errore durante l'esportazione:\n{str(e)}"
-            )
-
-    def load_pointcloud(self, pointcloud_path):
-        """Carica e visualizza la nuvola di punti."""
-        if not OPEN3D_AVAILABLE:
-            return
-
-        try:
-            # Carica la nuvola di punti
-            pcd = o3d.io.read_point_cloud(pointcloud_path)
-
-            # Visualizza la nuvola e genera uno screenshot
-            vis = o3d.visualization.Visualizer()
-            vis.create_window(visible=False)
-            vis.add_geometry(pcd)
-
-            # Aggiungi un sistema di coordinate per riferimento
-            coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=20)
-            vis.add_geometry(coord_frame)
-
-            # Ottimizza la vista
-            vis.get_render_option().point_size = 2.0
-            vis.get_render_option().background_color = np.array([0.9, 0.9, 0.9])
-            vis.get_view_control().set_zoom(0.8)
-            vis.poll_events()
-            vis.update_renderer()
-
-            # Salva lo screenshot se non è già stato specificato
-            if not self.screenshot_path:
-                self.screenshot_path = os.path.join(
-                    os.path.dirname(pointcloud_path),
-                    os.path.basename(pointcloud_path).replace(".ply", "_preview.png")
-                )
-
-            # Cattura e salva lo screenshot
-            vis.capture_screen_image(self.screenshot_path)
-            vis.destroy_window()
-
-            # Aggiorna l'immagine nell'interfaccia
-            if hasattr(self, "image_label"):
-                pixmap = QPixmap(self.screenshot_path)
-                self.image_label.setPixmap(pixmap.scaled(
-                    self.width(), self.height(),
-                    Qt.KeepAspectRatio, Qt.SmoothTransformation
-                ))
-
-        except Exception as e:
-            logger.error(f"Errore nella visualizzazione della nuvola di punti: {e}")
-            if hasattr(self, "image_label"):
-                self.image_label.setText(f"Errore nel caricamento della nuvola di punti:\n{str(e)}")
-
-    def resizeEvent(self, event):
-        """Gestisce il ridimensionamento della finestra."""
-        super().resizeEvent(event)
-
-        # Ridimensiona l'immagine se disponibile
-        if hasattr(self, "image_label") and self.screenshot_path and os.path.exists(self.screenshot_path):
-            pixmap = QPixmap(self.screenshot_path)
-            self.image_label.setPixmap(pixmap.scaled(
-                self.width(), self.height(),
-                Qt.KeepAspectRatio, Qt.SmoothTransformation
-            ))
-
-    def _open_pointcloud_external(self):
-        """Apre la nuvola di punti con un software esterno."""
-        if not self.pointcloud_path or not os.path.exists(self.pointcloud_path):
-            return
-
-        try:
-            import platform
-            import subprocess
-
-            if platform.system() == "Windows":
-                os.startfile(self.pointcloud_path)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.call(["open", self.pointcloud_path])
-            else:  # Assume Linux
-                subprocess.call(["xdg-open", self.pointcloud_path])
-        except Exception as e:
-            logger.error(f"Errore nell'apertura del file con software esterno: {e}")
-            QMessageBox.warning(
-                self,
-                "Errore",
-                f"Impossibile aprire il file con un software esterno:\n{str(e)}"
-            )
-
-    def _open_directory(self):
-        """Apre la directory contenente la nuvola di punti."""
-        if not self.pointcloud_path:
-            return
-
-        try:
-            directory = os.path.dirname(self.pointcloud_path)
-
-            import platform
-            import subprocess
-
-            if platform.system() == "Windows":
-                os.startfile(directory)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.call(["open", directory])
-            else:  # Assume Linux
-                subprocess.call(["xdg-open", directory])
-        except Exception as e:
-            logger.error(f"Errore nell'apertura della directory: {e}")
-            QMessageBox.warning(
-                self,
-                "Errore",
-                f"Impossibile aprire la directory:\n{str(e)}"
-            )
-
-
-class LogViewerDialog(QDialog):
-    """Dialog per visualizzare i log della scansione."""
-
-    def __init__(self, parent=None, log_text=""):
-        super().__init__(parent)
-        self.setWindowTitle("Log della Scansione")
-        self.setMinimumSize(600, 400)
-
-        layout = QVBoxLayout(self)
-
-        # Area di testo per i log
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setPlainText(log_text)
-        layout.addWidget(self.log_text)
-
-        # Pulsante di chiusura
-        button_layout = QHBoxLayout()
-        self.close_button = QPushButton("Chiudi")
-        self.close_button.clicked.connect(self.accept)
-        button_layout.addStretch(1)
-        button_layout.addWidget(self.close_button)
-
-        layout.addLayout(button_layout)
-
-    def append_log(self, text):
-        """Aggiunge testo al log."""
-        current_text = self.log_text.toPlainText()
-        new_text = current_text + "\n" + text if current_text else text
-        self.log_text.setPlainText(new_text)
-        # Scrolla alla fine
-        self.log_text.moveCursor(self.log_text.textCursor().End)
 
 
 class ScanView(QWidget):
     """
-    Widget principale per la gestione delle scansioni 3D.
-    Permette di avviare scansioni, configurare parametri,
-    scegliere directory di output e visualizzare risultati.
+    Widget per la scansione 3D in tempo reale.
+    Integra direttamente lo streaming delle camere e la visualizzazione 3D.
     """
 
     # Segnali
     scan_started = Signal(dict)  # Configurazione scansione
-    scan_completed = Signal(str)  # Percorso della scansione
-    scan_failed = Signal(str)  # Messaggio di errore
+    scan_completed = Signal(str)  # Percorso di output
+    scan_failed = Signal(str)  # Messaggio errore
+    frame_processed = Signal(int, int, np.ndarray)  # camera_index, pattern_index, frame
 
     def __init__(self, scanner_controller=None, parent=None):
         super().__init__(parent)
         self.scanner_controller = scanner_controller
-        logger.info("Inizializzazione ScanView")
+        self.selected_scanner = None
 
         # Stato della scansione
         self.is_scanning = False
-        self.selected_scanner = None
-        self.current_scan_id = None
-        self.scan_log = ""
-        self.progress_dialog = None
-        self.test_thread = None
-        self.test_worker = None
-
-        # Directory di output per le scansioni e nuvole di punti
-        # IMPORTANTE: inizializzare output_dir PRIMA di usarlo per ScanFrameProcessor
+        self.scan_id = None
         self.output_dir = self._get_default_output_dir()
 
-        # Registra il gestore di frame
-        self._register_frame_handler()
-        logger.info("Gestore frame registrato")
+        # Frame processor
+        self.scan_processor = ScanFrameProcessor(output_dir=self.output_dir)
 
-        # Processore per i frame di scansione in tempo reale
-        self.scan_frame_processor = ScanFrameProcessor(output_dir=self.output_dir)
-
-        # Imposta callback per aggiornare l'interfaccia utente
-        def progress_callback(progress, message):
-            self.progress_bar.setValue(int(progress))
-            self.status_label.setText(message)
-
-            # Aggiorna il log occasionalmente
-            if int(progress) % 10 == 0:
-                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Progresso: {int(progress)}%, {message}\n"
-
-        def frame_callback(camera_index, pattern_index, frame):
-            # Aggiorna l'anteprima
-            self._update_preview_image()
-
-        self.scan_frame_processor.set_callbacks(progress_callback, frame_callback)
-
-        # Processor per la triangolazione
-        self.scan_processor = ScanProcessor()
-
-        # Configurazione della scansione
-        self.scan_config = {
-            "pattern_type": "PROGRESSIVE",
-            "num_patterns": 12,
-            "exposure_time": 0.5,
-            "quality": 3
-        }
-
-        # Configura l'interfaccia
+        # Setup UI
         self._setup_ui()
 
-        # Timer per aggiornare lo stato periodicamente
+        # Timer di stato
         self.status_timer = QTimer(self)
-        self.status_timer.timeout.connect(self._update_scan_status)
-        self.status_timer.start(1000)  # Aggiorna ogni secondo
+        self.status_timer.timeout.connect(self._update_status)
+        self.status_timer.start(500)  # Aggiorna ogni 500ms
 
-        # Aggiungi un timer per il controllo della connessione
-        self.connection_timer = QTimer(self)
-        self.connection_timer.timeout.connect(self._check_connection_status)
-        self.connection_timer.start(2000)  # Controlla ogni 2 secondi
+        # Connessione agli stream
+        self._stream_connected = False
+        self._frame_receiver_registered = False
 
-    def _check_connection_status(self):
-        """
-        Controlla periodicamente lo stato della connessione.
-        Versione migliorata per non fermare la scansione se lo streaming è attivo.
-        """
-        if self.scanner_controller and self.selected_scanner:
-            # Verifica se lo scanner è in streaming (stato più affidabile)
-            streaming_active = self.selected_scanner.status == ScannerStatus.STREAMING
-
-            # Verifica la connessione con priorità allo streaming
-            is_connected = streaming_active or self.scanner_controller.is_connected(self.selected_scanner.device_id)
-
-            # Aggiorna l'interfaccia solo se lo stato è cambiato
-            if self.start_scan_button.isEnabled() != is_connected:
-                self.start_scan_button.setEnabled(is_connected)
-
-                if is_connected:
-                    if streaming_active:
-                        self.status_label.setText(f"Connesso a {self.selected_scanner.name} (Streaming attivo)")
-                    else:
-                        self.status_label.setText(f"Connesso a {self.selected_scanner.name}")
-                else:
-                    self.status_label.setText("Scanner non connesso")
-
-                    # Non fermare la scansione se lo streaming è ancora attivo
-                    if self.is_scanning and not streaming_active:
-                        self._handle_scan_error("Connessione con lo scanner persa")
-
-    def _setup_ui(self):
-        """Configura l'interfaccia utente."""
-        # Layout principale
-        main_layout = QVBoxLayout(self)
-
-        # Sezione superiore: configurazione e controlli
-        top_section = QWidget()
-        top_layout = QHBoxLayout(top_section)
-
-        # Riquadro sinistro: Configurazione
-        config_group = QGroupBox("Configurazione Scansione")
-        config_layout = QFormLayout(config_group)
-
-        # Selettore directory di output
-        output_dir_layout = QHBoxLayout()
-        self.output_dir_edit = QLineEdit(str(self.output_dir))
-        self.output_dir_edit.setReadOnly(True)
-
-        self.browse_button = QToolButton()
-        self.browse_button.setText("...")
-        self.browse_button.clicked.connect(self._select_output_dir)
-
-        output_dir_layout.addWidget(self.output_dir_edit)
-        output_dir_layout.addWidget(self.browse_button)
-
-        config_layout.addRow("Directory di Output:", output_dir_layout)
-
-        # Nome della scansione
-        self.scan_name_edit = QLineEdit()
-        self.scan_name_edit.setText(f"Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-        config_layout.addRow("Nome Scansione:", self.scan_name_edit)
-
-        # Tipo di pattern (mostra solo la selezione corrente)
-        self.pattern_type_label = QLabel(self._get_pattern_type_name(self.scan_config["pattern_type"]))
-        config_layout.addRow("Tipo di Pattern:", self.pattern_type_label)
-
-        # Numero di pattern
-        self.num_patterns_label = QLabel(str(self.scan_config["num_patterns"]))
-        config_layout.addRow("Numero di Pattern:", self.num_patterns_label)
-
-        # Pulsante per modificare le opzioni avanzate
-        self.options_button = QPushButton("Opzioni Avanzate...")
-        self.options_button.clicked.connect(self._show_options_dialog)
-        config_layout.addRow("", self.options_button)
-
-        top_layout.addWidget(config_group)
-
-        # Riquadro destro: Controlli
-        controls_group = QGroupBox("Controlli Scansione")
-        controls_layout = QVBoxLayout(controls_group)
-
-        # Stato corrente
-        self.status_label = QLabel("Pronto")
-        self.status_label.setAlignment(Qt.AlignCenter)
-        controls_layout.addWidget(self.status_label)
-
-        # Barra di progresso
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        controls_layout.addWidget(self.progress_bar)
-
-        # Pulsanti di azione
-        action_layout = QHBoxLayout()
-
-        self.start_scan_button = QPushButton("Avvia Scansione")
-        self.start_scan_button.clicked.connect(self._start_scan)
-        self.start_scan_button.setEnabled(False)  # Disabilitato finché non viene selezionato uno scanner
-
-        self.stop_scan_button = QPushButton("Ferma Scansione")
-        self.stop_scan_button.clicked.connect(self._stop_scan)
-        self.stop_scan_button.setEnabled(False)  # Disabilitato finché non è in corso una scansione
-
-        self.test_scan_button = QPushButton("Test Capacità 3D")
-        self.test_scan_button.clicked.connect(self._test_scan_capability)
-        self.test_scan_button.setEnabled(False)  # Disabilitato finché non è selezionato uno scanner
-
-        action_layout.addWidget(self.start_scan_button)
-        action_layout.addWidget(self.stop_scan_button)
-        action_layout.addWidget(self.test_scan_button)  # Aggiungi il bottone al layout
-
-        controls_layout.addLayout(action_layout)
-
-        # Pulsanti per il post-scansione
-        post_scan_layout = QHBoxLayout()
-
-        self.process_button = QPushButton("Elabora Scansione")
-        self.process_button.clicked.connect(self._process_scan)
-        self.process_button.setEnabled(False)  # Disabilitato finché non c'è una scansione completata
-
-        self.view_log_button = QPushButton("Visualizza Log")
-        self.view_log_button.clicked.connect(self._show_log_dialog)
-        self.view_log_button.setEnabled(False)  # Disabilitato finché non c'è una scansione completata
-
-        post_scan_layout.addWidget(self.process_button)
-        post_scan_layout.addWidget(self.view_log_button)
-
-        controls_layout.addLayout(post_scan_layout)
-
-        top_layout.addWidget(controls_group)
-
-        main_layout.addWidget(top_section)
-
-        # Separatore
-        separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        main_layout.addWidget(separator)
-
-        # Sezione inferiore: Risultati della scansione
-        self.results_group = QGroupBox("Risultati della Scansione")
-        results_layout = QVBoxLayout(self.results_group)
-
-        # Area con scroll per le informazioni sulla scansione e immagini
-        results_scroll = QScrollArea()
-        results_scroll.setWidgetResizable(True)
-        results_scroll.setMinimumHeight(200)
-
-        results_content = QWidget()
-        self.results_content_layout = QVBoxLayout(results_content)
-
-        # Placeholder iniziale
-        placeholder_label = QLabel(
-            "Nessuna scansione disponibile. Avvia una nuova scansione per visualizzare i risultati.")
-        placeholder_label.setAlignment(Qt.AlignCenter)
-        placeholder_label.setStyleSheet("color: #666;")
-        self.results_content_layout.addWidget(placeholder_label)
-
-        # Widget per la visualizzazione 3D in tempo reale
-        self.realtime_viewer = RealtimeViewer3D()
-        results_layout.addWidget(self.realtime_viewer)
-
-        results_scroll.setWidget(results_content)
-        results_layout.addWidget(results_scroll)
-
-        # Pulsanti di azione per i risultati
-        results_actions = QHBoxLayout()
-
-        self.load_scan_button = QPushButton("Carica Scansione...")
-        self.load_scan_button.clicked.connect(self._load_existing_scan)
-
-        self.view_3d_button = QPushButton("Visualizza Nuvola di Punti")
-        self.view_3d_button.clicked.connect(self._view_pointcloud)
-        self.view_3d_button.setEnabled(False)  # Disabilitato finché non c'è una nuvola di punti
-
-        results_actions.addWidget(self.load_scan_button)
-        results_actions.addStretch(1)
-        results_actions.addWidget(self.view_3d_button)
-
-        results_layout.addLayout(results_actions)
-
-        main_layout.addWidget(self.results_group)
+        logger.info("ScanView inizializzato")
 
     def _get_default_output_dir(self):
         """Restituisce la directory di output predefinita."""
-        # Prova a leggere dalle impostazioni
-        settings = QSettings()
-        saved_dir = settings.value("scan/output_dir")
-        if saved_dir and os.path.isdir(saved_dir):
-            return Path(saved_dir)
-
-        # Altrimenti usa la directory predefinita
         return Path.home() / "UnLook" / "scans"
 
-    def _get_pattern_type_name(self, pattern_type):
-        """Restituisce il nome leggibile del tipo di pattern."""
-        pattern_names = {
-            "PROGRESSIVE": "Pattern Progressivi",
-            "GRAY_CODE": "Gray Code",
-            "BINARY_CODE": "Binary Code",
-            "PHASE_SHIFT": "Phase Shift"
-        }
-        return pattern_names.get(pattern_type, pattern_type)
+    def _setup_ui(self):
+        """Configura l'interfaccia utente."""
+        main_layout = QVBoxLayout(self)
 
-    def _test_scan_capability(self):
-        """Testa la capacità di scansione 3D del server con gestione errori migliorata."""
-        if not self.scanner_controller or not self.selected_scanner:
-            QMessageBox.warning(
-                self,
-                "Errore",
-                "Nessuno scanner selezionato. Seleziona uno scanner prima di eseguire il test."
-            )
-            return
+        # Sezione superiore: controlli e anteprima camere
+        top_section = QWidget()
+        top_layout = QVBoxLayout(top_section)
+        top_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Aggiorna lo scanner selezionato
-        self.selected_scanner = self.scanner_controller.selected_scanner
+        # Controlli principali
+        controls_layout = QHBoxLayout()
 
-        # Verifica che lo scanner sia connesso
-        if not self.scanner_controller.is_connected(self.selected_scanner.device_id):
-            QMessageBox.warning(
-                self,
-                "Errore",
-                "Lo scanner selezionato non è connesso. Connettiti prima di eseguire il test."
-            )
-            return
+        self.start_scan_button = QPushButton("▶ Avvia Scansione")
+        self.start_scan_button.setMinimumWidth(150)
+        self.start_scan_button.clicked.connect(self._start_scan)
+        self.start_scan_button.setEnabled(False)
 
-        # Aggiorna l'interfaccia
-        self.status_label.setText("Test delle capacità 3D in corso...")
-        self.progress_bar.setValue(10)
+        self.stop_scan_button = QPushButton("⏹ Ferma Scansione")
+        self.stop_scan_button.setMinimumWidth(150)
+        self.stop_scan_button.clicked.connect(self._stop_scan)
+        self.stop_scan_button.setEnabled(False)
 
-        # Crea un dialog di progresso per evitare il blocco dell'UI
-        progress_dialog = QProgressDialog("Verifica delle capacità di scansione 3D...", "Annulla", 0, 100, self)
-        progress_dialog.setWindowTitle("Test in corso")
-        progress_dialog.setWindowModality(Qt.WindowModal)
-        progress_dialog.setValue(10)
-        progress_dialog.show()
+        self.export_button = QPushButton("💾 Esporta")
+        self.export_button.setMinimumWidth(100)
+        self.export_button.clicked.connect(self._export_scan)
+        self.export_button.setEnabled(False)
 
-        # Processa eventi per aggiornare l'UI
-        QApplication.processEvents()
+        # Barra di stato e progresso
+        status_layout = QHBoxLayout()
 
-        # Invia il comando di test capacità con timeout aumentato
-        try:
-            logger.info("Esecuzione test capacità 3D")
-            progress_dialog.setValue(20)
-            QApplication.processEvents()
+        self.status_label = QLabel("Non connesso")
+        self.status_label.setStyleSheet("font-weight: bold;")
 
-            command_success = self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "CHECK_SCAN_CAPABILITY"
-            )
-
-            if not command_success:
-                progress_dialog.close()
-                self.status_label.setText("Errore nell'invio del comando di test")
-                QMessageBox.critical(
-                    self,
-                    "Errore",
-                    "Impossibile inviare il comando di test al server."
-                )
-                return
-
-            # Aggiorna la barra di progresso
-            progress_dialog.setValue(40)
-            progress_dialog.setLabelText("Attendo risposta dal server...")
-            QApplication.processEvents()
-
-            # Thread di monitoraggio per evitare blocchi nella UI
-            class ResponseThread(QThread):
-                response_received = Signal(dict)
-                timeout_occurred = Signal()
-
-                def __init__(self, scanner_controller, device_id, command_type, timeout):
-                    super().__init__()
-                    self.scanner_controller = scanner_controller
-                    self.device_id = device_id
-                    self.command_type = command_type
-                    self.timeout = timeout
-
-                def run(self):
-                    response = self.scanner_controller.wait_for_response(
-                        self.device_id,
-                        self.command_type,
-                        timeout=self.timeout
-                    )
-
-                    if response:
-                        self.response_received.emit(response)
-                    else:
-                        self.timeout_occurred.emit()
-
-            # Avvia thread di monitoraggio
-            response_thread = ResponseThread(
-                self.scanner_controller,
-                self.selected_scanner.device_id,
-                "CHECK_SCAN_CAPABILITY",
-                timeout=30.0  # 30 secondi di timeout
-            )
-
-            # Connetti i segnali
-            response_thread.response_received.connect(
-                lambda response: self._handle_capability_response(response, progress_dialog)
-            )
-
-            response_thread.timeout_occurred.connect(
-                lambda: self._handle_capability_timeout(progress_dialog)
-            )
-
-            response_thread.start()
-
-            # Loop di aggiornamento della UI durante l'attesa
-            while response_thread.isRunning():
-                QApplication.processEvents()
-                time.sleep(0.1)  # Piccola pausa per non sovraccaricare la CPU
-
-                # Verifica se l'utente ha annullato la dialog
-                if progress_dialog.wasCanceled():
-                    response_thread.quit()
-                    response_thread.wait(1000)  # Attendi fino a 1 secondo
-                    progress_dialog.close()
-                    self.status_label.setText("Test annullato dall'utente")
-                    return
-
-            # Il thread è terminato, assicurati che la dialog sia chiusa
-            if progress_dialog.isVisible():
-                progress_dialog.close()
-
-        except Exception as e:
-            if progress_dialog.isVisible():
-                progress_dialog.close()
-
-            logger.error(f"Errore nell'esecuzione del test: {e}")
-            self.status_label.setText(f"Errore: {str(e)}")
-            QMessageBox.critical(
-                self,
-                "Errore",
-                f"Si è verificato un errore durante il test:\n{str(e)}\n\n"
-                "Verifica la connessione di rete e che il server sia in esecuzione."
-            )
-
-    def _handle_capability_response(self, response, progress_dialog):
-        """Gestisce la risposta al test delle capacità."""
-        # Chiudi la dialog se è ancora aperta
-        if progress_dialog.isVisible():
-            progress_dialog.setValue(100)
-            progress_dialog.close()
-
-        # Verifica lo stato della risposta
-        capability_available = response.get("scan_capability", False)
-        capability_details = response.get("scan_capability_details", {})
-
-        # Salva il risultato del test per uso futuro
-        self._scan_capabilities_verified = capability_available
-
-        # Costruisci un messaggio dettagliato
-        if capability_available:
-            msg = "Il sistema dispone delle capacità di scansione 3D!\n\nDettagli:\n"
-
-            for key, value in capability_details.items():
-                msg += f"- {key}: {value}\n"
-
-            self.status_label.setText("Capacità di scansione 3D disponibili")
-            QMessageBox.information(
-                self,
-                "Test Completato",
-                msg
-            )
-
-            # Abilita il pulsante di avvio scansione
-            self.start_scan_button.setEnabled(True)
-            self.test_scan_button.setEnabled(True)
-        else:
-            error_msg = "Il sistema NON dispone delle capacità di scansione 3D.\n\nDettagli:\n"
-
-            for key, value in capability_details.items():
-                error_msg += f"- {key}: {value}\n"
-
-            # Aggiungi consigli per la risoluzione
-            error_msg += "\nSuggerimenti per la risoluzione:\n"
-            error_msg += "1. Verifica che il proiettore DLP sia collegato e acceso\n"
-            error_msg += "2. Controlla che l'I2C sia abilitato sul Raspberry Pi (sudo raspi-config)\n"
-            error_msg += "3. Verifica che l'indirizzo I2C e il bus siano corretti\n"
-            error_msg += "4. Riavvia il server UnLook per reinizializzare i componenti"
-
-            self.status_label.setText("Capacità di scansione 3D NON disponibili")
-            QMessageBox.warning(
-                self,
-                "Test Fallito",
-                error_msg
-            )
-
-    def _handle_capability_timeout(self, progress_dialog):
-        """Gestisce il timeout nella risposta al test delle capacità."""
-        # Chiudi la dialog se è ancora aperta
-        if progress_dialog.isVisible():
-            progress_dialog.close()
-
-        self.status_label.setText("Verifica dello stato del proiettore DLP...")
-
-        # Prova a verificare se il server è ancora connesso
-        ping_success = self.scanner_controller.send_command(
-            self.selected_scanner.device_id,
-            "PING",
-            {"timestamp": time.time()}
-        )
-
-        if ping_success:
-            # Il server è raggiungibile, ma potrebbe esserci un problema col proiettore
-            QMessageBox.warning(
-                self,
-                "Avviso",
-                "Il server è attivo ma non ha risposto alla verifica delle capacità 3D.\n\n"
-                "Potrebbe esserci un problema con il proiettore DLP. Verifica:\n"
-                "1. Che il proiettore sia collegato correttamente e acceso\n"
-                "2. Che l'I2C sia abilitato sul Raspberry Pi\n"
-                "3. Che l'indirizzo I2C sia configurato correttamente"
-            )
-        else:
-            self.status_label.setText("Server non raggiungibile")
-            QMessageBox.critical(
-                self,
-                "Errore",
-                "Il server non ha risposto ai tentativi di verifica."
-            )
-
-    def _update_test_progress(self, progress, message):
-        """Aggiorna il progresso del test delle capacità di scansione."""
-        if hasattr(self, 'progress_dialog') and self.progress_dialog:
-            self.progress_dialog.setValue(progress)
-            self.progress_dialog.setLabelText(message)
-        self.progress_bar.setValue(progress)
-        self.status_label.setText(message)
-
-    def _on_test_capability_finished(self, response):
-        """Gestisce il completamento del test delle capacità di scansione."""
-        # Chiudi il dialog di progresso
-        if hasattr(self, 'progress_dialog') and self.progress_dialog:
-            self.progress_dialog.close()
-            self.progress_dialog = None
-
-        # Ferma il thread
-        if hasattr(self, 'test_thread') and self.test_thread:
-            self.test_thread.quit()
-            self.test_thread.wait()
-            self.test_thread = None
-            self.test_worker = None
-
-        # Verifica lo stato della risposta
-        capability_available = response.get("scan_capability", False)
-        capability_details = response.get("scan_capability_details", {})
-
-        # Salva il risultato del test
-        self._scan_capabilities_verified = capability_available
-
-        # Costruisci un messaggio dettagliato
-        if capability_available:
-            msg = "Il sistema dispone delle capacità di scansione 3D!\n\nDettagli:\n"
-
-            for key, value in capability_details.items():
-                msg += f"- {key}: {value}\n"
-
-            self.status_label.setText("Capacità di scansione 3D disponibili")
-            QMessageBox.information(
-                self,
-                "Test Completato",
-                msg
-            )
-
-            # Abilita il pulsante di avvio scansione
-            self.start_scan_button.setEnabled(True)
-        else:
-            error_msg = "Il sistema NON dispone delle capacità di scansione 3D.\n\nDettagli:\n"
-
-            for key, value in capability_details.items():
-                error_msg += f"- {key}: {value}\n"
-
-            # Aggiungi consigli per la risoluzione
-            error_msg += "\nSuggerimenti per la risoluzione:\n"
-            error_msg += "1. Verifica che il proiettore DLP sia collegato e acceso\n"
-            error_msg += "2. Controlla che l'I2C sia abilitato sul Raspberry Pi (sudo raspi-config)\n"
-            error_msg += "3. Verifica che l'indirizzo I2C e il bus siano corretti\n"
-            error_msg += "4. Riavvia il server UnLook per reinizializzare i componenti"
-
-            self.status_label.setText("Capacità di scansione 3D NON disponibili")
-            QMessageBox.warning(
-                self,
-                "Test Fallito",
-                error_msg
-            )
-
-    def _on_test_capability_error(self, error_message):
-        """Gestisce un errore durante il test delle capacità di scansione."""
-        # Chiudi il dialog di progresso
-        if hasattr(self, 'progress_dialog') and self.progress_dialog:
-            self.progress_dialog.close()
-            self.progress_dialog = None
-
-        # Ferma il thread
-        if hasattr(self, 'test_thread') and self.test_thread:
-            self.test_thread.quit()
-            self.test_thread.wait()
-            self.test_thread = None
-            self.test_worker = None
-
-        # Aggiorna l'interfaccia
-        self.status_label.setText(f"Errore: {error_message}")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setMinimumWidth(200)
 
-        # Mostra un messaggio di errore
-        QMessageBox.critical(
-            self,
-            "Errore",
-            f"Si è verificato un errore durante il test:\n{error_message}\n\n"
-            "Verifica la connessione di rete e che il server sia in esecuzione."
+        # Assembla i controlli
+        controls_layout.addWidget(self.start_scan_button)
+        controls_layout.addWidget(self.stop_scan_button)
+        controls_layout.addStretch(1)
+        controls_layout.addWidget(self.export_button)
+
+        status_layout.addWidget(self.status_label)
+        status_layout.addStretch(1)
+        status_layout.addWidget(self.progress_bar)
+
+        top_layout.addLayout(controls_layout)
+        top_layout.addLayout(status_layout)
+
+        # Preview delle camere
+        preview_layout = QHBoxLayout()
+
+        self.left_preview = CameraPreviewWidget(0)
+        self.right_preview = CameraPreviewWidget(1)
+
+        preview_layout.addWidget(self.left_preview)
+        preview_layout.addWidget(self.right_preview)
+
+        top_layout.addLayout(preview_layout)
+
+        # Sezione inferiore: visualizzazione 3D
+        self.pointcloud_viewer = PointCloudViewerWidget()
+
+        # Splitter per regolare le dimensioni relative
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(top_section)
+        splitter.addWidget(self.pointcloud_viewer)
+        splitter.setSizes([int(self.height() * 0.6), int(self.height() * 0.4)])
+
+        main_layout.addWidget(splitter)
+
+        # Configura callback per il processore di scansione
+        self.scan_processor.set_callbacks(
+            progress_callback=self._on_scan_progress,
+            frame_callback=self._on_frame_processed
         )
 
-    def _select_output_dir(self):
-        """Mostra un dialogo per selezionare la directory di output."""
-        directory = QFileDialog.getExistingDirectory(
-            self,
-            "Seleziona Directory di Output",
-            str(self.output_dir),
-            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
-        )
-
-        if directory:
-            self.output_dir = Path(directory)
-            self.output_dir_edit.setText(str(self.output_dir))
-
-            # Salva nelle impostazioni
-            settings = QSettings()
-            settings.setValue("scan/output_dir", str(self.output_dir))
-
-    def _show_options_dialog(self):
-        """Mostra il dialogo per configurare le opzioni avanzate."""
-        dialog = ScanOptionsDialog(self, self.scan_config)
-        if dialog.exec():
-            self.scan_config = dialog.get_config()
-
-            # Aggiorna l'interfaccia con i nuovi valori
-            self.pattern_type_label.setText(self._get_pattern_type_name(self.scan_config["pattern_type"]))
-            self.num_patterns_label.setText(str(self.scan_config["num_patterns"]))
-
-    def _update_scan_status(self):
-        """Aggiorna lo stato della scansione."""
-        if not self.is_scanning or not self.scanner_controller:
-            return
-
-        # Aggiorna lo scanner selezionato
-        if not self.selected_scanner:
-            self.selected_scanner = self.scanner_controller.selected_scanner
-
-        if not self.selected_scanner:
+    def _connect_to_stream(self):
+        """Collega il widget agli stream delle camere."""
+        if self._stream_connected:
             return
 
         try:
-            # Ottieni lo stato dal server
-            command_success = self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "GET_SCAN_STATUS"
-            )
-
-            if not command_success:
-                logger.warning("Impossibile ottenere lo stato della scansione")
-                return
-
-            # Attendi la risposta
-            response = self.scanner_controller.wait_for_response(
-                self.selected_scanner.device_id,
-                "GET_SCAN_STATUS",
-                timeout=1.0
-            )
-
-            if not response:
-                return
-
-            # Estrai lo stato della scansione
-            scan_status = response.get("scan_status", {})
-            state = scan_status.get("state", "IDLE")
-            progress = scan_status.get("progress", 0.0)
-            error_message = scan_status.get("error_message", "")
-
-            # Aggiorna l'interfaccia
-            self.status_label.setText(f"Stato: {state}")
-            self.progress_bar.setValue(int(progress))
-
-            # Aggiungi al log
-            if state != "IDLE" and state != "COMPLETED":
-                log_entry = f"[{datetime.now().strftime('%H:%M:%S')}] Stato: {state}, Progresso: {progress:.1f}%"
-                if error_message:
-                    log_entry += f", Errore: {error_message}"
-
-                if log_entry not in self.scan_log:
-                    self.scan_log += log_entry + "\n"
-
-            # Ogni 3 aggiornamenti di stato, richiedi un'anteprima
-            if not hasattr(self, '_preview_counter'):
-                self._preview_counter = 0
-            self._preview_counter += 1
-
-            if self._preview_counter % 3 == 0 and state == "SCANNING":
-                # Richiedi un'anteprima della scansione
-                self._request_scan_preview()
-
-            # Controlla se la scansione è completata o in errore
-            if state == "COMPLETED":
-                self._handle_scan_completed()
-            elif state == "ERROR":
-                self._handle_scan_error(error_message)
-
-        except Exception as e:
-            logger.error(f"Errore nell'aggiornamento dello stato della scansione: {e}")
-
-    def refresh_scanner_state(self):
-        """
-        Aggiorna lo stato dello scanner quando la tab diventa attiva.
-        Versione migliorata per dare priorità allo streaming attivo.
-        """
-        if self.scanner_controller and self.scanner_controller.selected_scanner:
-            self.selected_scanner = self.scanner_controller.selected_scanner
-
-            # CORREZIONE: Invia un ping esplicito per verificare la connessione
-            if self.selected_scanner:
-                try:
-                    import socket
-                    # Ottieni l'IP locale
-                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    s.connect(("8.8.8.8", 80))
-                    local_ip = s.getsockname()[0]
-                    s.close()
-
-                    # Invia un ping con l'IP del client
-                    self.scanner_controller.send_command(
-                        self.selected_scanner.device_id,
-                        "PING",
-                        {
-                            "timestamp": time.time(),
-                            "client_ip": local_ip
-                        }
-                    )
-                except Exception as e:
-                    logger.debug(f"Errore nell'invio del ping di refresh: {e}")
-
-            # Verifica se lo scanner è in streaming (stato più affidabile)
-            streaming_active = self.selected_scanner.status == ScannerStatus.STREAMING
-
-            # Usa la connessione effettiva o lo stato di streaming
-            connected = streaming_active or self.scanner_controller.is_connected(self.selected_scanner.device_id)
-
-            # Aggiorna la UI in base allo stato più affidabile
-            self.start_scan_button.setEnabled(connected)
-            self.test_scan_button.setEnabled(connected)  # Abilita/disabilita anche il pulsante di test
-
-            # Aggiorna l'etichetta di stato
-            if connected:
-                if streaming_active:
-                    self.status_label.setText(f"Connesso a {self.selected_scanner.name} (Streaming attivo)")
-                else:
-                    self.status_label.setText(f"Connesso a {self.selected_scanner.name}")
-            else:
-                self.status_label.setText("Scanner non connesso")
-
-    def _start_scan(self):
-        """
-        Avvia una nuova scansione con gestione della connessione migliorata.
-        Versione con ping attivo e timeout estesi per mantenere la connessione durante tutta la scansione.
-        """
-        if self.is_scanning:
-            return
-
-        if not self.scanner_controller or not self.scanner_controller.selected_scanner:
-            QMessageBox.warning(
-                self,
-                "Errore",
-                "Nessuno scanner selezionato. Seleziona uno scanner prima di avviare la scansione."
-            )
-            return
-
-        # Aggiorna lo scanner selezionato
-        self.selected_scanner = self.scanner_controller.selected_scanner
-
-        # Verifica che lo scanner sia connesso
-        if not self.scanner_controller.is_connected(self.selected_scanner.device_id):
-            # Se lo scanner non è connesso, proviamo a riconnetterci
-            logger.info(f"Scanner {self.selected_scanner.name} non connesso, tentativo di riconnessione automatico")
-            success = self.scanner_controller.connect_to_scanner(self.selected_scanner.device_id)
-
-            if not success:
-                QMessageBox.warning(
-                    self,
-                    "Errore",
-                    "Lo scanner selezionato non è connesso. Connettiti prima di avviare la scansione."
-                )
-                return
-
-            # Breve pausa per assicurarsi che la connessione sia stabilita
-            time.sleep(0.5)
-
-        # MIGLIORAMENTO: Prima dell'avvio della scansione, invia un ping con timeout esteso
-        # per assicurarsi che la connessione sia solida
-        try:
-            import socket
-            # Ottieni l'IP locale
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-
-            # Invia un ping con informazioni estese
-            ping_success = self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "PING",
-                {
-                    "timestamp": time.time(),
-                    "client_ip": local_ip,
-                    "keep_connection": True,  # Flag per mantenere la connessione attiva
-                    "client_session_id": str(time.time())  # ID sessione unico
-                }
-            )
-
-            logger.info(f"Ping pre-scansione inviato con successo: {ping_success}")
-
-            # Attesa breve per assicurarsi che il ping venga elaborato
-            time.sleep(0.2)
-        except Exception as e:
-            logger.debug(f"Errore nell'invio del ping pre-scansione: {e}")
-
-        # Prima di avviare la scansione, ferma lo streaming se attivo
-        streaming_active = False
-        try:
-            # Ottieni un riferimento alla finestra principale
+            # Cerca il main window
             main_window = self.window()
+
+            # Cerca il widget di streaming
             if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
                 streaming_widget = main_window.streaming_widget
-                if hasattr(streaming_widget, 'is_streaming') and streaming_widget.is_streaming():
-                    logger.info("Arresto dello streaming prima di avviare la scansione")
-                    streaming_active = True
-                    streaming_widget.stop_streaming()
-                    # Breve pausa per assicurarsi che lo streaming sia fermato
-                    time.sleep(0.5)
-                    # Invia anche un comando esplicito di stop al server
-                    self.scanner_controller.send_command(
-                        self.selected_scanner.device_id,
-                        "STOP_STREAM"
-                    )
-                    time.sleep(0.2)  # Altra piccola pausa
-        except Exception as e:
-            logger.warning(f"Errore nell'arresto dello streaming prima della scansione: {e}")
 
-        # Prepara il percorso della scansione
-        scan_name = self.scan_name_edit.text()
-        if not scan_name:
-            scan_name = f"Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                # Accedi al ricevitore di stream
+                if hasattr(streaming_widget, 'stream_receiver') and streaming_widget.stream_receiver:
+                    # Collega il segnale frame_received ai nostri preview
+                    receiver = streaming_widget.stream_receiver
 
-        # Genera un ID unico per la scansione
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.current_scan_id = f"{scan_name}_{timestamp}"
-
-        # Avvia il processore di frame
-        self.scan_frame_processor.start_scan(
-            scan_id=self.current_scan_id,
-            num_patterns=self.scan_config.get("num_patterns", 12),
-            pattern_type=self.scan_config.get("pattern_type", "PROGRESSIVE")
-        )
-
-        # Prepara la configurazione
-        scan_config = self.scan_config.copy()
-
-        # MIGLIORAMENTO: Aggiungi informazioni del client alla configurazione
-        try:
-            import socket
-            scan_config["client_info"] = {
-                "ip": socket.gethostbyname(socket.gethostname()),
-                "hostname": socket.gethostname(),
-                "timestamp": time.time(),
-                "session_id": str(time.time())
-            }
-        except:
-            pass
-
-        # Aggiorna l'interfaccia
-        self.progress_bar.setValue(0)
-        self.status_label.setText("Inizializzazione scansione...")
-        self.start_scan_button.setEnabled(False)
-        self.stop_scan_button.setEnabled(True)
-        self.options_button.setEnabled(False)
-        self.browse_button.setEnabled(False)
-        self.scan_name_edit.setEnabled(False)
-
-        # Memorizza che lo streaming era attivo prima della scansione
-        self._streaming_was_active = streaming_active
-
-        # Reset del log
-        self.scan_log = f"[{datetime.now().strftime('%H:%M:%S')}] Avvio scansione: {self.current_scan_id}\n"
-        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Tipo di pattern: {scan_config['pattern_type']}\n"
-        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Numero di pattern: {scan_config['num_patterns']}\n"
-        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Tempo di esposizione: {scan_config['exposure_time']} sec\n"
-        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Qualità: {scan_config['quality']}\n"
-
-        # MODIFICA: Bypassa la verifica delle capacità 3D
-        # Assumi che il dispositivo abbia le capacità 3D
-        self._scan_capabilities_verified = True
-        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Verifica capacità 3D bypassata per prototipo\n"
-
-        # Invia il comando di avvio scansione al server
-        try:
-            logger.info(f"Avvio scansione: {self.current_scan_id}")
-
-            # Invia un ping prima del comando per verificare la connessione
-            ping_success = self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "PING",
-                {"timestamp": time.time()}
-            )
-
-            if not ping_success:
-                logger.warning("Il server non risponde al ping")
-                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Attenzione: il server non risponde al ping\n"
-
-            # Invia il comando di avvio scansione
-            command_success = self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "START_SCAN",
-                {"scan_config": scan_config}
-            )
-
-            if not command_success:
-                self._handle_scan_error("Impossibile inviare il comando di avvio scansione")
-                # Se lo streaming era attivo, ripristinalo
-                if streaming_active:
+                    # Disconnetti eventuali connessioni esistenti
                     try:
-                        main_window = self.window()
-                        if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
-                            logger.info("Ripristino dello streaming dopo errore di avvio scansione")
-                            time.sleep(0.5)  # Piccola pausa
-                            main_window.streaming_widget.start_streaming(self.selected_scanner)
-                    except Exception as e:
-                        logger.error(f"Errore nel ripristino dello streaming: {e}")
-                return
+                        receiver.frame_received.disconnect(self._on_frame_received)
+                    except:
+                        pass
 
-            # Imposta la scansione come attiva immediatamente
-            self.is_scanning = True
-            self.view_log_button.setEnabled(True)
+                    # Collega il segnale
+                    receiver.frame_received.connect(self._on_frame_received)
 
-            # Aggiorna il log
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Comando di avvio scansione inviato, in attesa di conferma...\n"
+                    # Imposta il processore di scan frame
+                    if hasattr(receiver, 'set_frame_processor'):
+                        receiver.set_frame_processor(self.scan_processor)
 
-            # MIGLIORAMENTO: Aggiungi un timer per l'invio di ping durante la scansione
-            self._scan_keepalive_timer = QTimer(self)
-            self._scan_keepalive_timer.timeout.connect(self._send_scan_keepalive)
-            self._scan_keepalive_timer.start(2000)  # Invia un ping ogni 2 secondi
+                    # Abilita routing diretto
+                    if hasattr(receiver, 'enable_direct_routing'):
+                        receiver.enable_direct_routing(True)
 
-            # Log dell'avvio del timer keepalive
-            logger.info("Timer keepalive scansione avviato")
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Timer keepalive scansione avviato\n"
-
-            # Avvia un timer per il polling dello stato invece di aspettare sincronamente
-            self._start_status_polling_timer()
-
-            # Emetti il segnale di scansione avviata
-            self.scan_started.emit(scan_config)
-
+                    self._stream_connected = True
+                    logger.info("Connesso agli stream delle camere")
+                    return True
         except Exception as e:
-            logger.error(f"Errore nell'avvio della scansione: {e}")
-            self._handle_scan_error(str(e))
+            logger.error(f"Errore nella connessione agli stream: {e}")
 
-            # Se lo streaming era attivo, ripristinalo
-            if streaming_active:
-                try:
-                    main_window = self.window()
-                    if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
-                        logger.info("Ripristino dello streaming dopo errore di avvio scansione")
-                        time.sleep(0.5)  # Piccola pausa
-                        main_window.streaming_widget.start_streaming(self.selected_scanner)
-                except Exception as e:
-                    logger.error(f"Errore nel ripristino dello streaming: {e}")
+        return False
 
-    def _handle_capability_check_response(self, response, progress_dialog):
-        """Gestisce la risposta alla verifica delle capacità durante l'avvio della scansione."""
-        # Aggiorna il dialog
-        progress_dialog.setValue(60)
-        QApplication.processEvents()
-
-        # Verifica il risultato
-        capability_available = response.get("scan_capability", False)
-        capability_details = response.get("scan_capability_details", {})
-
-        if not capability_available:
-            progress_dialog.close()
-
-            error_details = "Unknown error"
-            if capability_details:
-                if isinstance(capability_details, dict):
-                    error_details = json.dumps(capability_details, indent=2)
-                else:
-                    error_details = str(capability_details)
-
-            error_msg = f"Lo scanner non supporta la scansione 3D: {error_details}\n\n"
-            error_msg += "Verifica che:\n"
-            error_msg += "1. Il proiettore DLP sia collegato e acceso\n"
-            error_msg += "2. L'I2C sia abilitato sul Raspberry Pi\n"
-            error_msg += "3. L'indirizzo I2C sia configurato correttamente\n"
-            error_msg += "4. Il server sia stato avviato con i permessi appropriati"
-
-            self._handle_scan_error(error_msg)
-            return
-
-        # Segna che il test delle capacità è stato completato con successo
-        self._scan_capabilities_verified = True
-
-        # Continua il dialog - non lo chiudiamo qui perché il metodo chiamante proseguirà con l'avvio scansione
-
-    def _handle_capability_check_timeout(self, progress_dialog):
-        """Gestisce il timeout nella verifica delle capacità durante l'avvio della scansione."""
-        progress_dialog.close()
-        self.status_label.setText("Server non ha risposto alla verifica delle capacità")
-
-        # Prova a verificare se il server è ancora connesso
-        ping_success = self.scanner_controller.send_command(
-            self.selected_scanner.device_id,
-            "PING",
-            {"timestamp": time.time()}
-        )
-
-        if ping_success:
-            # Il server è raggiungibile, ma potrebbe esserci un problema col proiettore
-            QMessageBox.warning(
-                self,
-                "Avviso",
-                "Il server è attivo ma non ha risposto alla verifica delle capacità 3D.\n\n"
-                "Potrebbe esserci un problema con il proiettore DLP. Verifica:\n"
-                "1. Che il proiettore sia collegato correttamente e acceso\n"
-                "2. Che l'I2C sia abilitato sul Raspberry Pi\n"
-                "3. Che l'indirizzo I2C sia configurato correttamente"
-            )
-        else:
-            QMessageBox.critical(
-                self,
-                "Errore",
-                "Il server non ha risposto ai tentativi di verifica."
-            )
-
-        self._reset_ui_after_scan()
-
-    def _handle_capability_check_failed(self, progress_dialog):
-        """Gestisce l'errore nell'invio del comando per la verifica delle capacità."""
-        progress_dialog.close()
-        self.status_label.setText("Errore nell'invio del comando di verifica")
-
-        QMessageBox.critical(
-            self,
-            "Errore",
-            "Impossibile inviare il comando di verifica capacità al server."
-        )
-
-        self._reset_ui_after_scan()
-
-    def _start_status_polling_timer(self):
-        """Avvia un timer per il polling dello stato della scansione con migliore gestione degli errori."""
-        # Se esiste già un timer di polling, fermalo
-        if hasattr(self, '_polling_timer') and self._polling_timer:
-            try:
-                self._polling_timer.stop()
-                self._polling_timer.deleteLater()
-            except Exception as e:
-                logger.debug(f"Errore nella pulizia del timer precedente: {e}")
-
-        # Crea un nuovo timer
-        self._polling_timer = QTimer(self)
-        self._polling_timer.timeout.connect(self._poll_scan_status)
-        # Polling frequente all'inizio (ogni 1 secondo)
-        self._polling_timer.start(1000)
-
-        # Contatore per tenere traccia dei tentativi di polling
-        self._polling_attempts = 0
-
-        # Contatore per errori consecutivi
-        self._polling_errors = 0
-
-        # Imposta un timeout di sicurezza per la scansione (5 minuti)
-        self._scan_safety_timeout = QTimer(self)
-        self._scan_safety_timeout.setSingleShot(True)
-        self._scan_safety_timeout.timeout.connect(self._scan_safety_timeout_handler)
-        self._scan_safety_timeout.start(300000)  # 5 minuti
-
-        logger.info("Timer di polling dello stato della scansione avviato")
-
-    def _scan_safety_timeout_handler(self):
-        """Gestore per il timeout di sicurezza della scansione."""
-        if self.is_scanning:
-            logger.warning("Timeout di sicurezza della scansione raggiunto (5 minuti)")
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Timeout di sicurezza della scansione raggiunto (5 minuti)\n"
-
-            # Chiedi all'utente se vuole continuare a attendere
-            reply = QMessageBox.question(
-                self,
-                "Scansione in corso da molto tempo",
-                "La scansione è in corso da 5 minuti senza completamento.\n"
-                "Vuoi continuare ad attendere o interrompere la scansione?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes
-            )
-
-            if reply == QMessageBox.No:
-                self._stop_scan()
-            else:
-                # Reset del timeout per altri 5 minuti
-                self._scan_safety_timeout.start(300000)
-
-    def _poll_scan_status(self):
-        """Esegue il polling dello stato della scansione in modo più robusto."""
-        if not self.is_scanning or not self.selected_scanner:
-            # Se la scansione è stata fermata o lo scanner non è più disponibile, ferma il polling
-            if hasattr(self, '_polling_timer') and self._polling_timer:
-                self._polling_timer.stop()
-            return
-
-        self._polling_attempts += 1
-        logger.debug(f"Polling dello stato scansione (tentativo {self._polling_attempts})")
-
-        # Gestione del backoff per ridurre la frequenza di polling nel tempo
-        if self._polling_attempts > 10 and self._polling_attempts <= 30:
-            # Dopo 10 tentativi, rallenta a 2 secondi
-            if self._polling_timer.interval() != 2000:
-                self._polling_timer.setInterval(2000)
-                logger.info("Polling rallentato a 2 secondi")
-        elif self._polling_attempts > 30 and self._polling_attempts <= 60:
-            # Dopo 30 tentativi, rallenta a 5 secondi
-            if self._polling_timer.interval() != 5000:
-                self._polling_timer.setInterval(5000)
-                logger.info("Polling rallentato a 5 secondi")
-        elif self._polling_attempts > 60:
-            # Dopo 60 tentativi, rallenta a 10 secondi
-            if self._polling_timer.interval() != 10000:
-                self._polling_timer.setInterval(10000)
-                logger.info("Polling rallentato a 10 secondi")
+    def _register_frame_handler(self):
+        """Registra il gestore dei frame per la scansione."""
+        if self._frame_receiver_registered:
+            return True
 
         try:
-            # Invia il comando di stato scansione senza bloccare
-            command_success = self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "GET_SCAN_STATUS"
-            )
+            # Cerca il main window
+            main_window = self.window()
 
-            if not command_success:
-                logger.warning("Impossibile inviare il comando GET_SCAN_STATUS")
-                self._polling_errors += 1
-                return
+            # Cerca il widget di streaming
+            if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
+                streaming_widget = main_window.streaming_widget
 
-            # Reset del contatore di errori se il comando è stato inviato con successo
-            self._polling_errors = 0
+                # Accedi al ricevitore di stream
+                if hasattr(streaming_widget, 'stream_receiver') and streaming_widget.stream_receiver:
+                    receiver = streaming_widget.stream_receiver
 
-            # Attesa non bloccante della risposta - usa timeout breve di 1 secondo
-            response = self.scanner_controller.wait_for_response(
-                self.selected_scanner.device_id,
-                "GET_SCAN_STATUS",
-                timeout=1.0
-            )
+                    # Collega i segnali se disponibili
+                    if hasattr(receiver, 'scan_frame_received'):
+                        try:
+                            receiver.scan_frame_received.disconnect(self._on_scan_frame_received)
+                        except:
+                            pass
 
-            if not response:
-                # Se non abbiamo ricevuto risposta, non incrementare errori, riproveremo al prossimo ciclo
-                return
+                        receiver.scan_frame_received.connect(self._on_scan_frame_received)
 
-            # Elabora la risposta ricevuta
-            self._handle_status_response(response)
+                    # Imposta il processore di frame
+                    if hasattr(receiver, 'set_frame_processor'):
+                        receiver.set_frame_processor(self.scan_processor)
 
+                    # Abilita il routing diretto
+                    if hasattr(receiver, 'enable_direct_routing'):
+                        receiver.enable_direct_routing(True)
+
+                    self._frame_receiver_registered = True
+                    logger.info("Frame handler registrato con successo")
+                    return True
         except Exception as e:
-            logger.error(f"Errore nel polling dello stato: {str(e)}")
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nel polling: {str(e)}\n"
-            self._polling_errors += 1
+            logger.error(f"Errore nella registrazione del frame handler: {e}")
 
-    def _handle_status_response(self, response):
-        """Gestisce la risposta allo stato della scansione."""
-        try:
-            # Estrai lo stato della scansione
-            scan_status = response.get("scan_status", {})
-            state = scan_status.get("state", "UNKNOWN")
-            progress = scan_status.get("progress", 0.0)
-            error_message = scan_status.get("error_message", "")
+        return False
 
-            # Aggiorna l'interfaccia
-            self.status_label.setText(f"Stato: {state}")
-            self.progress_bar.setValue(int(progress))
+    def _on_frame_received(self, camera_index: int, frame: np.ndarray, timestamp: float):
+        """Gestisce la ricezione di un frame dallo stream."""
+        # Aggiorna il preview corrispondente
+        if camera_index == 0:
+            self.left_preview.update_frame(frame, timestamp)
+        elif camera_index == 1:
+            self.right_preview.update_frame(frame, timestamp)
 
-            # Aggiungi al log ogni 5 polling o quando lo stato cambia
-            if self._polling_attempts % 5 == 0 or state != "SCANNING":
-                log_entry = f"[{datetime.now().strftime('%H:%M:%S')}] Stato: {state}, Progresso: {progress:.1f}%"
-                if error_message:
-                    log_entry += f", Errore: {error_message}"
-                self.scan_log += log_entry + "\n"
-
-            # Aggiorna le anteprime delle immagini ogni 3 polling
-            if state == "SCANNING" and self._polling_attempts % 3 == 0:
-                self._update_preview_image()
-
-            # Controlla se la scansione è completata o in errore
-            if state == "COMPLETED":
-                self._handle_scan_completed()
-                if hasattr(self, '_polling_timer') and self._polling_timer:
-                    self._polling_timer.stop()
-            elif state == "ERROR":
-                self._handle_scan_error(error_message)
-                if hasattr(self, '_polling_timer') and self._polling_timer:
-                    self._polling_timer.stop()
-            elif state == "IDLE" and self._polling_attempts > 10:
-                # Se dopo diversi tentativi lo stato è ancora IDLE, potrebbe esserci un problema
-                self._handle_scan_error("Lo scanner non ha avviato la scansione")
-                if hasattr(self, '_polling_timer') and self._polling_timer:
-                    self._polling_timer.stop()
-
-            # Reset del contatore di errori se abbiamo ricevuto una risposta valida
-            self._polling_errors = 0
-
-        except Exception as e:
-            logger.error(f"Errore nell'elaborazione della risposta di stato: {e}")
-            self._polling_errors += 1
-
-    def _send_scan_keepalive(self):
-        """
-        Invia un segnale keepalive durante la scansione per mantenere la connessione attiva.
-        Questa funzione viene chiamata periodicamente dal timer durante la scansione.
-        """
-        if not self.is_scanning or not self.scanner_controller or not self.selected_scanner:
-            # Se la scansione è terminata, ferma il timer
-            if hasattr(self, '_scan_keepalive_timer') and self._scan_keepalive_timer.isActive():
-                self._scan_keepalive_timer.stop()
-                logger.info("Timer keepalive scansione fermato")
-            return
-
-        try:
-            import socket
-            # Ottieni l'IP locale
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-
-            # Invia un ping keepalive
-            self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "PING",
-                {
-                    "timestamp": time.time(),
-                    "client_ip": local_ip,
-                    "keep_connection": True,
-                    "is_scanning": True,
-                    "scan_id": self.current_scan_id
-                }
-            )
-            logger.debug("Keepalive scansione inviato")
-        except Exception as e:
-            logger.debug(f"Errore nell'invio del keepalive scansione: {e}")
-
-    def _handle_status_timeout(self):
-        """Gestisce il timeout nella risposta allo stato della scansione."""
-        logger.warning("Timeout nella richiesta dello stato della scansione")
-
-        # Incrementa il contatore di errori
-        self._polling_errors += 1
-
-        # Se ci sono troppi errori consecutivi, chiedi all'utente
-        if self._polling_errors >= 5:
-            reply = QMessageBox.question(
-                self,
-                "Problemi di comunicazione",
-                "Il server non risponde alle richieste di stato.\n"
-                "Vuoi continuare la scansione?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-
-            if reply == QMessageBox.No:
-                self._handle_scan_error("Troppi timeout consecutivi")
-                if hasattr(self, '_polling_timer') and self._polling_timer:
-                    self._polling_timer.stop()
-            else:
-                # Reset del contatore di errori
-                self._polling_errors = 0
-
-    def _stop_scan(self):
-        """Interrompe la scansione in corso."""
-        if not self.is_scanning or not self.selected_scanner:
-            return
-
-        # Chiedi conferma all'utente
-        reply = QMessageBox.question(
-            self,
-            "Interrompere la scansione",
-            "Sei sicuro di voler interrompere la scansione in corso?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-
-        if reply != QMessageBox.Yes:
-            return
-
-        # Aggiorna l'interfaccia
-        self.status_label.setText("Interruzione scansione...")
-
-        # Aggiorna il log
-        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Richiesta interruzione scansione\n"
-
-        # Invia il comando di interruzione
-        try:
-            command_success = self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "STOP_SCAN"
-            )
-
-            if not command_success:
-                logger.warning("Impossibile inviare il comando di interruzione")
-                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nell'invio del comando di interruzione\n"
-                return
-
-            # Attendi la risposta
-            response = self.scanner_controller.wait_for_response(
-                self.selected_scanner.device_id,
-                "STOP_SCAN",
-                timeout=15.0
-            )
-
-            # Aggiorna il log
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Scansione interrotta\n"
-
-            # Reset dello stato
-            self.is_scanning = False
-
-            # Aggiorna l'interfaccia
-            self._reset_ui_after_scan()
-
-        except Exception as e:
-            logger.error(f"Errore nell'interruzione della scansione: {e}")
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nell'interruzione: {str(e)}\n"
-
-    def _handle_scan_completed(self):
-        """Gestisce il completamento della scansione."""
+    def _on_scan_frame_received(self, camera_index: int, frame: np.ndarray, frame_info: Dict):
+        """Gestisce la ricezione di un frame di scansione."""
         if not self.is_scanning:
             return
 
-        # Aggiorna il log
-        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Scansione completata con successo\n"
-
-        # Aggiorna lo stato
-        self.is_scanning = False
-
-        # CORREZIONE: Arresta i timer di sicurezza
-        if hasattr(self, '_scan_safety_timeout') and self._scan_safety_timeout.isActive():
-            self._scan_safety_timeout.stop()
-
-        # Aggiorna l'interfaccia
-        self.status_label.setText("Scansione completata")
-        self.progress_bar.setValue(100)
-
-        # Reset dell'interfaccia
-        self._reset_ui_after_scan()
-
-        # Abilita i pulsanti di post-scansione
-        self.process_button.setEnabled(True)
-        self.view_log_button.setEnabled(True)
-
-        # Aggiorna la sezione dei risultati
-        self._update_results_section()
-
-        # Emetti il segnale di completamento
-        scan_path = os.path.join(str(self.output_dir), self.current_scan_id)
-        self.scan_completed.emit(scan_path)
-
-        # Salva il log della scansione
-        self._save_scan_log(scan_path)
-
-        # Ripristina lo streaming se era attivo prima della scansione
-        self._restore_streaming_if_needed()
-
-        # Chiedi all'utente se vuole elaborare i dati
-        reply = QMessageBox.question(
-            self,
-            "Scansione Completata",
-            "La scansione è stata completata con successo. Vuoi elaborare i dati ora?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
-
-        if reply == QMessageBox.Yes:
-            self._process_scan()
-
-    def _request_scan_preview(self):
-        """Richiede un'anteprima della scansione in corso al server."""
-        if not self.is_scanning or not self.scanner_controller or not self.selected_scanner:
-            logger.debug("Impossibile richiedere anteprima: scansione non attiva o scanner non selezionato")
-            return False
-
         try:
-            # Invia la richiesta di anteprima
-            command_success = self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "GET_SCAN_PREVIEW",
-                {"scan_id": self.current_scan_id}
-            )
+            # Aggiorna i preview
+            if camera_index == 0:
+                self.left_preview.update_frame(frame, frame_info.get('timestamp'))
+            elif camera_index == 1:
+                self.right_preview.update_frame(frame, frame_info.get('timestamp'))
 
-            if not command_success:
-                logger.debug("Impossibile inviare il comando GET_SCAN_PREVIEW")
-                return False
+            # Processa il frame se la scansione è attiva
+            pattern_index = frame_info.get('pattern_index', 0)
 
-            # Attendi la risposta con un timeout breve (non bloccare l'UI)
-            response = self.scanner_controller.wait_for_response(
-                self.selected_scanner.device_id,
-                "GET_SCAN_PREVIEW",
-                timeout=1.0  # Timeout breve per non bloccare l'UI
-            )
+            # Emetti il segnale di frame processato
+            self.frame_processed.emit(camera_index, pattern_index, frame)
 
-            if not response:
-                logger.debug("Nessuna risposta alla richiesta GET_SCAN_PREVIEW")
-                return False
-
-            # Elabora la risposta
-            if response.get("status") == "ok":
-                # Ottieni i dati delle immagini
-                preview_data = response.get("preview_data", {})
-                left_data = preview_data.get("left")
-                right_data = preview_data.get("right")
-
-                if left_data or right_data:
-                    # Visualizza le anteprime
-                    self._process_preview_images(response)
-                    return True
-
-            return False
         except Exception as e:
-            logger.error(f"Errore nella richiesta di anteprima: {e}")
-            return False
+            logger.error(f"Errore nell'elaborazione del frame di scansione: {e}")
 
-    def _save_scan_log(self, scan_path):
-        """Salva il log della scansione su file."""
+    def _on_scan_progress(self, progress):
+        """Callback per l'avanzamento della scansione."""
         try:
-            # Assicurati che la directory esista
-            os.makedirs(scan_path, exist_ok=True)
-
-            log_file = os.path.join(scan_path, "scan_log.txt")
-            with open(log_file, 'w') as f:
-                f.write(self.scan_log)
-            logger.info(f"Log della scansione salvato su {log_file}")
-        except Exception as e:
-            logger.error(f"Errore nel salvataggio del log della scansione: {e}")
-
-    def _restore_streaming_if_needed(self):
-        """Ripristina lo streaming se era attivo prima della scansione."""
-        if hasattr(self, '_streaming_was_active') and self._streaming_was_active:
-            try:
-                # Ottieni un riferimento alla finestra principale
-                main_window = self.window()
-                if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
-                    streaming_widget = main_window.streaming_widget
-                    logger.info("Ripristino dello streaming dopo la scansione")
-
-                    # Piccola pausa per assicurarsi che il server sia pronto
-                    time.sleep(0.5)
-
-                    # Prima invia un ping per verificare che il server sia reattivo
-                    if self.scanner_controller and self.selected_scanner:
-                        self.scanner_controller.send_command(
-                            self.selected_scanner.device_id,
-                            "PING",
-                            {"timestamp": time.time()}
-                        )
-
-                        # Piccola pausa
-                        time.sleep(0.2)
-
-                        # Avvia lo streaming
-                        streaming_widget.start_streaming(self.selected_scanner)
-
-                        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Streaming ripristinato\n"
-                        logger.info("Streaming ripristinato dopo la scansione")
-            except Exception as e:
-                logger.error(f"Errore nel ripristino dello streaming: {e}")
-
-    def _handle_scan_error(self, error_message):
-        """Gestisce un errore durante la scansione."""
-        # Aggiorna il log
-        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nella scansione: {error_message}\n"
-
-        # Aggiorna lo stato
-        self.is_scanning = False
-
-        # CORREZIONE: Arresta i timer di sicurezza
-        if hasattr(self, '_scan_safety_timeout') and self._scan_safety_timeout.isActive():
-            self._scan_safety_timeout.stop()
-
-        # CORREZIONE: Arresta il timer di polling se attivo
-        if hasattr(self, '_polling_timer') and self._polling_timer.isActive():
-            self._polling_timer.stop()
-
-        # Aggiorna l'interfaccia
-        self.status_label.setText(f"Errore: {error_message}")
-
-        # Reset dell'interfaccia
-        self._reset_ui_after_scan()
-
-        # Abilita il pulsante di visualizzazione del log
-        self.view_log_button.setEnabled(True)
-
-        # Mostra un messaggio di errore
-        QMessageBox.critical(
-            self,
-            "Errore nella Scansione",
-            f"Si è verificato un errore durante la scansione:\n{error_message}"
-        )
-
-        # Emetti il segnale di errore
-        self.scan_failed.emit(error_message)
-
-    def _reset_ui_after_scan(self):
-        """Ripristina l'interfaccia utente dopo una scansione."""
-        self.start_scan_button.setEnabled(True)
-        self.stop_scan_button.setEnabled(False)
-        self.options_button.setEnabled(True)
-        self.browse_button.setEnabled(True)
-        self.scan_name_edit.setEnabled(True)
-
-    def _update_preview_image(self, scan_dir=None):
-        """
-        Aggiorna l'anteprima delle immagini durante la scansione, operando esclusivamente in memoria.
-        Elimina completamente la dipendenza dalla lettura di file dal disco.
-
-        Args:
-            scan_dir: Directory della scansione (non utilizzato nella versione in-memory)
-        """
-        # OTTIMIZZAZIONE: Accedi direttamente ai frame in memoria attraverso ScanFrameProcessor
-        if hasattr(self, 'scan_frame_processor') and self.scan_frame_processor:
-            # Cerca i frame di pattern più recenti nella memoria
-            try:
-                # Ottieni i pattern più recenti (assumendo che higher pattern_index = more recent)
-                progress = self.scan_frame_processor.get_scan_progress()
-                patterns_received = progress.get("patterns_received", 0)
-
-                if patterns_received >= 2:  # Abbiamo almeno white e black
-                    # Trova l'ultimo pattern ricevuto
-                    # Ottieni direttamente dal buffer circolare interno
-                    frame_buffer = getattr(self.scan_frame_processor, '_frame_buffer', None)
-                    if frame_buffer:
-                        # Ottieni pattern con coppie complete (entrambe le camere)
-                        pattern_indices = frame_buffer.get_patterns_with_complete_pairs()
-
-                        if pattern_indices:
-                            # Prendi il pattern più recente
-                            latest_idx = max(pattern_indices)
-
-                            # Ottieni la coppia di frame
-                            left_frame, right_frame = frame_buffer.get_frame_pair(latest_idx)
-
-                            if left_frame is not None and right_frame is not None:
-                                # Visualizza i frame
-                                self._display_preview_frames(left_frame, right_frame)
-
-                                # NOVITÀ: Visualizza anche la nuvola di punti in tempo reale se disponibile
-                                pointcloud = self.scan_frame_processor.get_realtime_pointcloud()
-                                if pointcloud is not None and len(pointcloud) > 100:
-                                    # Visualizza la nuvola di punti (limitata a 30K punti per prestazioni)
-                                    if len(pointcloud) > 30000:
-                                        # Campionamento causale per visualizzazione rapida
-                                        indices = np.random.choice(len(pointcloud), 30000, replace=False)
-                                        display_cloud = pointcloud[indices]
-                                    else:
-                                        display_cloud = pointcloud
-
-                                    self._display_realtime_pointcloud(display_cloud)
-
-                                return
-
-            except Exception as e:
-                logger.debug(f"Errore nell'accesso diretto ai frame in memoria: {e}")
-
-        # Se il metodo in-memory fallisce, non cercare più su disco ma mostra un messaggio
-        if hasattr(self, 'preview_widget') and not self.preview_widget.isVisible():
-            # Crea un widget di anteprima con messaggio informativo
-            self.preview_widget.setVisible(True)
-            if hasattr(self, 'left_preview'):
-                self.left_preview.setText("In attesa dei frame...")
-            if hasattr(self, 'right_preview'):
-                self.right_preview.setText("In attesa dei frame...")
-
-    def _display_preview_frames(self, left_img, right_img):
-        """
-        Visualizza i frame di anteprima nell'interfaccia utente in modo efficiente.
-
-        Args:
-            left_img: Frame della camera sinistra
-            right_img: Frame della camera destra
-        """
-        try:
-            # Crea o aggiorna il widget per l'anteprima
-            if not hasattr(self, 'preview_widget') or not self.preview_widget:
-                # Crea un nuovo widget
-                self.preview_widget = QWidget()
-                preview_layout = QHBoxLayout(self.preview_widget)
-
-                self.left_preview = QLabel("Camera sinistra")
-                self.left_preview.setAlignment(Qt.AlignCenter)
-                self.left_preview.setMinimumSize(320, 240)
-
-                self.right_preview = QLabel("Camera destra")
-                self.right_preview.setAlignment(Qt.AlignCenter)
-                self.right_preview.setMinimumSize(320, 240)
-
-                preview_layout.addWidget(self.left_preview)
-                preview_layout.addWidget(self.right_preview)
-
-                # Aggiungi il widget all'interfaccia
-                self.results_content_layout.insertWidget(0, self.preview_widget)
-
-            # OTTIMIZZAZIONE: Ridimensiona una sola volta se le dimensioni sono uguali
-            # Questo evita calcoli ripetuti di scaling quando non necessario
-            if left_img.shape[:2] == right_img.shape[:2]:
-                # Ridimensiona per la visualizzazione
-                scale = min(320 / left_img.shape[1], 240 / left_img.shape[0])
-                width = int(left_img.shape[1] * scale)
-                height = int(left_img.shape[0] * scale)
-
-                # Ridimensiona le immagini
-                left_img_resized = cv2.resize(left_img, (width, height), interpolation=cv2.INTER_AREA)
-                right_img_resized = cv2.resize(right_img, (width, height), interpolation=cv2.INTER_AREA)
-
-                # Converti in formato Qt
-                left_img_rgb = cv2.cvtColor(left_img_resized, cv2.COLOR_BGR2RGB)
-                right_img_rgb = cv2.cvtColor(right_img_resized, cv2.COLOR_BGR2RGB)
-
-                # Crea QImage e QPixmap
-                h, w, c = left_img_rgb.shape
-                left_qimg = QImage(left_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
-                left_pixmap = QPixmap.fromImage(left_qimg)
-
-                h, w, c = right_img_rgb.shape
-                right_qimg = QImage(right_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
-                right_pixmap = QPixmap.fromImage(right_qimg)
+            # Estrai informazioni dal progresso
+            if isinstance(progress, dict):
+                percent = progress.get('progress', 0)
+                message = progress.get('message', '')
+                state = progress.get('state', 'SCANNING')
             else:
-                # Ridimensiona separatamente
-                # Camera sinistra
-                scale_left = min(320 / left_img.shape[1], 240 / left_img.shape[0])
-                width_left = int(left_img.shape[1] * scale_left)
-                height_left = int(left_img.shape[0] * scale_left)
-                left_img_resized = cv2.resize(left_img, (width_left, height_left), interpolation=cv2.INTER_AREA)
-                left_img_rgb = cv2.cvtColor(left_img_resized, cv2.COLOR_BGR2RGB)
-                h, w, c = left_img_rgb.shape
-                left_qimg = QImage(left_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
-                left_pixmap = QPixmap.fromImage(left_qimg)
+                # Formato semplice
+                percent = progress
+                message = ''
+                state = 'SCANNING'
 
-                # Camera destra
-                scale_right = min(320 / right_img.shape[1], 240 / right_img.shape[0])
-                width_right = int(right_img.shape[1] * scale_right)
-                height_right = int(right_img.shape[0] * scale_right)
-                right_img_resized = cv2.resize(right_img, (width_right, height_right), interpolation=cv2.INTER_AREA)
-                right_img_rgb = cv2.cvtColor(right_img_resized, cv2.COLOR_BGR2RGB)
-                h, w, c = right_img_rgb.shape
-                right_qimg = QImage(right_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
-                right_pixmap = QPixmap.fromImage(right_qimg)
+            # Aggiorna UI
+            self.progress_bar.setValue(int(percent))
 
-            # Mostra le immagini
-            self.left_preview.setPixmap(left_pixmap)
-            self.left_preview.setText("")
-
-            self.right_preview.setPixmap(right_pixmap)
-            self.right_preview.setText("")
-
-            # Mostra il widget di anteprima
-            self.preview_widget.setVisible(True)
-
-            # Aggiorna la schermata
-            QApplication.processEvents()
-
+            if message:
+                self.status_label.setText(message)
         except Exception as e:
-            logger.error(f"Errore nella visualizzazione dei frame di anteprima: {e}")
+            logger.error(f"Errore nell'aggiornamento del progresso: {e}")
 
-    def _display_realtime_pointcloud(self, pointcloud):
-        """
-        Visualizza la nuvola di punti in tempo reale.
-
-        Args:
-            pointcloud: Nuvola di punti come array numpy
-        """
-        if not OPEN3D_AVAILABLE or pointcloud is None or len(pointcloud) == 0:
-            return
-
+    def _on_frame_processed(self, camera_index, pattern_index, frame_info):
+        """Callback per frame processati."""
         try:
-            # Crea o aggiorna il widget per la visualizzazione 3D
-            if not hasattr(self, 'pointcloud_preview') or not self.pointcloud_preview:
-                # Crea un nuovo widget
-                self.pointcloud_preview = QLabel("Nuvola di punti in tempo reale")
-                self.pointcloud_preview.setAlignment(Qt.AlignCenter)
-                self.pointcloud_preview.setMinimumSize(640, 480)
+            # Verifica se è un aggiornamento della nuvola di punti
+            if frame_info and frame_info.get('type') == 'pointcloud_update':
+                # Aggiorna la visualizzazione 3D
+                pointcloud = frame_info.get('pointcloud')
+                if pointcloud is not None and len(pointcloud) > 0:
+                    self.pointcloud_viewer.update_pointcloud(pointcloud)
 
-                # Aggiungi il widget all'interfaccia sotto le anteprime
-                if hasattr(self, 'preview_widget') and self.preview_widget:
-                    idx = self.results_content_layout.indexOf(self.preview_widget)
-                    self.results_content_layout.insertWidget(idx + 1, self.pointcloud_preview)
-                else:
-                    self.results_content_layout.insertWidget(0, self.pointcloud_preview)
-
-            # Genera un'immagine della nuvola di punti
-            import tempfile
-
-            # Crea una directory temporanea se non esiste
-            if not hasattr(self, '_temp_dir') or not os.path.isdir(self._temp_dir):
-                self._temp_dir = tempfile.mkdtemp(prefix="unlook_preview_")
-
-            # Percorso per lo screenshot
-            screenshot_path = os.path.join(self._temp_dir, "pointcloud_preview.png")
-
-            # Crea un visualizzatore Open3D
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(pointcloud)
-
-            # Opzionale: applica un filtro per rimuovere outlier
-            if len(pointcloud) > 100:
-                try:
-                    pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-                except Exception as e:
-                    logger.debug(f"Errore nell'applicazione del filtro outlier: {e}")
-
-            # Aggiungi un sistema di coordinate per riferimento
-            coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=20)
-
-            # Crea una finestra di visualizzazione nascosta
-            vis = o3d.visualization.Visualizer()
-            vis.create_window(visible=False, width=640, height=480)
-            vis.add_geometry(pcd)
-            vis.add_geometry(coord_frame)
-
-            # Ottimizza la vista
-            vis.get_render_option().point_size = 2.0
-            vis.get_render_option().background_color = np.array([0.9, 0.9, 0.9])
-            vis.get_view_control().set_zoom(0.8)
-            vis.poll_events()
-            vis.update_renderer()
-
-            # Cattura lo screenshot
-            vis.capture_screen_image(screenshot_path)
-            vis.destroy_window()
-
-            # Mostra lo screenshot
-            pixmap = QPixmap(screenshot_path)
-            self.pointcloud_preview.setPixmap(pixmap)
-            self.pointcloud_preview.setText("")
-
-            # Aggiorna l'interfaccia
-            QApplication.processEvents()
-
+                    # Abilita esportazione
+                    self.export_button.setEnabled(True)
         except Exception as e:
-            logger.error(f"Errore nella visualizzazione della nuvola di punti in tempo reale: {e}")
+            logger.error(f"Errore nel callback frame_processed: {e}")
 
-    def _process_preview_images(self, preview_response):
-        """
-        Elabora le immagini di anteprima ricevute dal server.
-
-        Args:
-            preview_response: Risposta del server con le immagini di anteprima
-        """
-        try:
-            # Estrai le immagini di anteprima
-            preview_data = preview_response.get("preview_data", {})
-            left_data = preview_data.get("left")
-            right_data = preview_data.get("right")
-
-            if not left_data or not right_data:
-                return
-
-            # Il server potrebbe inviare i dati in formato base64
-            import base64
-            import numpy as np
-
-            # Crea o aggiorna il widget per l'anteprima
-            if not hasattr(self, 'preview_widget') or not self.preview_widget:
-                # Crea un nuovo widget
-                self.preview_widget = QWidget()
-                preview_layout = QHBoxLayout(self.preview_widget)
-
-                self.left_preview = QLabel("Camera sinistra")
-                self.left_preview.setAlignment(Qt.AlignCenter)
-                self.left_preview.setMinimumSize(320, 240)
-
-                self.right_preview = QLabel("Camera destra")
-                self.right_preview.setAlignment(Qt.AlignCenter)
-                self.right_preview.setMinimumSize(320, 240)
-
-                preview_layout.addWidget(self.left_preview)
-                preview_layout.addWidget(self.right_preview)
-
-                # Aggiungi il widget all'interfaccia
-                self.results_content_layout.insertWidget(0, self.preview_widget)
-
-            # Elabora l'immagine sinistra
-            if left_data and OPENCV_AVAILABLE:
-                try:
-                    # Decodifica l'immagine
-                    if isinstance(left_data, str):
-                        # Immagine in formato base64
-                        left_bytes = base64.b64decode(left_data)
-                        left_array = np.frombuffer(left_bytes, dtype=np.uint8)
-                        left_img = cv2.imdecode(left_array, cv2.IMREAD_COLOR)
-                    else:
-                        # Immagine in formato binario
-                        left_array = np.frombuffer(left_data, dtype=np.uint8)
-                        left_img = cv2.imdecode(left_array, cv2.IMREAD_COLOR)
-
-                    if left_img is not None:
-                        # Ridimensiona per la visualizzazione
-                        scale = min(320 / left_img.shape[1], 240 / left_img.shape[0])
-                        width = int(left_img.shape[1] * scale)
-                        height = int(left_img.shape[0] * scale)
-                        left_img_resized = cv2.resize(left_img, (width, height), interpolation=cv2.INTER_AREA)
-
-                        # Converti in formato Qt
-                        left_img_rgb = cv2.cvtColor(left_img_resized, cv2.COLOR_BGR2RGB)
-                        h, w, c = left_img_rgb.shape
-                        left_qimg = QImage(left_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
-                        left_pixmap = QPixmap.fromImage(left_qimg)
-
-                        # Mostra l'immagine
-                        self.left_preview.setPixmap(left_pixmap)
-                        self.left_preview.setText("")
-                except Exception as e:
-                    logger.debug(f"Errore elaborazione anteprima sinistra: {e}")
-
-            # Elabora l'immagine destra
-            if right_data and OPENCV_AVAILABLE:
-                try:
-                    # Decodifica l'immagine
-                    if isinstance(right_data, str):
-                        # Immagine in formato base64
-                        right_bytes = base64.b64decode(right_data)
-                        right_array = np.frombuffer(right_bytes, dtype=np.uint8)
-                        right_img = cv2.imdecode(right_array, cv2.IMREAD_COLOR)
-                    else:
-                        # Immagine in formato binario
-                        right_array = np.frombuffer(right_data, dtype=np.uint8)
-                        right_img = cv2.imdecode(right_array, cv2.IMREAD_COLOR)
-
-                    if right_img is not None:
-                        # Ridimensiona per la visualizzazione
-                        scale = min(320 / right_img.shape[1], 240 / right_img.shape[0])
-                        width = int(right_img.shape[1] * scale)
-                        height = int(right_img.shape[0] * scale)
-                        right_img_resized = cv2.resize(right_img, (width, height), interpolation=cv2.INTER_AREA)
-
-                        # Converti in formato Qt
-                        right_img_rgb = cv2.cvtColor(right_img_resized, cv2.COLOR_BGR2RGB)
-                        h, w, c = right_img_rgb.shape
-                        right_qimg = QImage(right_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
-                        right_pixmap = QPixmap.fromImage(right_qimg)
-
-                        # Mostra l'immagine
-                        self.right_preview.setPixmap(right_pixmap)
-                        self.right_preview.setText("")
-                except Exception as e:
-                    logger.debug(f"Errore elaborazione anteprima destra: {e}")
-
-            # Mostra il widget di anteprima
-            self.preview_widget.setVisible(True)
-
-            # Aggiorna la schermata
-            QApplication.processEvents()
-
-        except Exception as e:
-            logger.error(f"Errore nell'elaborazione delle anteprime: {e}")
-
-    def _process_scan(self):
-        """
-        Elabora i dati della scansione per generare la nuvola di punti 3D.
-        Versione riprogettata per operare esclusivamente in-memory senza dipendenza dai file su disco.
-        """
-        if not self.current_scan_id:
-            QMessageBox.warning(
-                self,
-                "Errore",
-                "Nessuna scansione disponibile da elaborare."
-            )
+    def _start_scan(self):
+        """Avvia una nuova scansione."""
+        if self.is_scanning:
             return
 
-        # Verifica disponibilità della scansione in memoria
-        if not hasattr(self, 'scan_frame_processor') or not self.scan_frame_processor:
-            QMessageBox.critical(
-                self,
-                "Errore",
-                "Processore di frame non disponibile. Impossibile elaborare la scansione."
-            )
-            return
-
-        # Verifica se abbiamo già una nuvola di punti in tempo reale
-        pointcloud = self.scan_frame_processor.get_realtime_pointcloud()
-        if pointcloud is not None and len(pointcloud) > 100:
-            # Abbiamo già una nuvola di punti valida in memoria
-            logger.info(f"Utilizzando nuvola di punti già disponibile in memoria con {len(pointcloud)} punti")
-
-            # Aggiorna l'interfaccia
-            self.status_label.setText("Nuvola di punti già disponibile")
-            self.progress_bar.setValue(100)
-
-            # Abilita il pulsante di visualizzazione 3D
-            self.view_3d_button.setEnabled(True)
-
-            # Aggiorna il viewer 3D
-            if hasattr(self, 'realtime_viewer'):
-                self.realtime_viewer.update_pointcloud(pointcloud)
-
-            # Aggiorna la sezione dei risultati
-            self._update_results_section(has_pointcloud=True)
-
-            # Notifica di completamento
-            QMessageBox.information(
-                self,
-                "Elaborazione Completata",
-                f"La nuvola di punti è già disponibile in memoria con {len(pointcloud):,} punti.\n\n"
-                f"Vuoi visualizzarla ora?"
-            )
-
-            # Visualizza la nuvola di punti
-            self._view_pointcloud()
-            return
-
-        # Se non abbiamo già una nuvola in memoria, avvia l'elaborazione
-        # Aggiorna il log
-        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Inizio elaborazione della scansione\n"
-
-        # Configura le callback per il progresso
-        def progress_callback(progress, message):
-            self.progress_bar.setValue(int(progress))
-            self.status_label.setText(message)
-
-            # Aggiorna il log occasionalmente
-            if int(progress) % 10 == 0:
-                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Progresso: {int(progress)}%, {message}\n"
-
-        def completion_callback(success, message, result):
-            if success:
-                # Aggiorna il log
-                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Elaborazione completata: {message}\n"
-
-                # Aggiorna l'interfaccia
-                self.status_label.setText("Elaborazione completata")
-                self.progress_bar.setValue(100)
-
-                # Abilita il pulsante di visualizzazione 3D
-                self.view_3d_button.setEnabled(True)
-
-                # Aggiorna la sezione dei risultati
-                self._update_results_section(has_pointcloud=True)
-
-                # Mostra un messaggio
-                QMessageBox.information(
-                    self,
-                    "Elaborazione Completata",
-                    f"L'elaborazione della scansione è stata completata con successo.\n"
-                    f"Sono stati generati {len(result):,} punti.\n\n"
-                    f"Vuoi visualizzare la nuvola di punti ora?"
-                )
-
-                # Visualizza la nuvola di punti
-                self._view_pointcloud()
-            else:
-                # Aggiorna il log
-                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nell'elaborazione: {message}\n"
-
-                # Aggiorna l'interfaccia
-                self.status_label.setText(f"Errore nell'elaborazione: {message}")
-
-                # Mostra un messaggio di errore
-                QMessageBox.critical(
-                    self,
-                    "Errore nell'Elaborazione",
-                    f"Si è verificato un errore durante l'elaborazione della scansione:\n{message}"
-                )
-
-        # Aggiorna l'interfaccia
-        self.status_label.setText("Elaborazione in corso...")
-        self.progress_bar.setValue(0)
-        self.process_button.setEnabled(False)
-
-        try:
-            # Prova a utilizzare il triangolatore già presente nel ScanFrameProcessor
-            triangulator = getattr(self.scan_frame_processor, '_triangulator', None)
-
-            if triangulator:
-                # Configura le callback
-                triangulator.set_callbacks(progress_callback, completion_callback)
-
-                # Ottieni i frame direttamente dal buffer
-                frame_buffer = getattr(self.scan_frame_processor, '_frame_buffer', None)
-
-                if frame_buffer:
-                    # Ottieni tutti i pattern con coppie complete
-                    pattern_indices = frame_buffer.get_patterns_with_complete_pairs()
-
-                    # Prepara le coppie di frame
-                    frame_pairs = []
-                    for idx in pattern_indices:
-                        pair = frame_buffer.get_frame_pair(idx)
-                        if pair:
-                            frame_pairs.append((idx, pair[0], pair[1]))
-
-                    # Ordina per indice pattern
-                    frame_pairs.sort(key=lambda x: x[0])
-
-                    if len(frame_pairs) < 2:
-                        QMessageBox.warning(
-                            self,
-                            "Dati insufficienti",
-                            "Non ci sono abbastanza frame per elaborare la scansione."
-                        )
-                        self.process_button.setEnabled(True)
-                        return
-
-                    # Elabora i frame
-                    triangulator.triangulate_frames(frame_pairs)
-                    return
-
-            # Se non è stato possibile utilizzare il triangolatore interno,
-            # mostra un messaggio di errore
-            QMessageBox.critical(
-                self,
-                "Errore",
-                "Impossibile accedere al triangolatore interno.\n"
-                "Verifica che la scansione sia stata inizializzata correttamente."
-            )
-            self.process_button.setEnabled(True)
-
-        except Exception as e:
-            logger.error(f"Errore nell'elaborazione: {e}")
-            self.status_label.setText(f"Errore: {str(e)}")
-            QMessageBox.critical(
-                self,
-                "Errore",
-                f"Si è verificato un errore durante l'elaborazione:\n{str(e)}"
-            )
-            self.process_button.setEnabled(True)
-
-    def _download_scan_data(self):
-        """Scarica i dati della scansione dal server."""
+        # Verifica connessione scanner
         if not self.selected_scanner or not self.scanner_controller:
             QMessageBox.warning(
                 self,
-                "Errore",
-                "Nessuno scanner selezionato per il download."
+                "Scanner non selezionato",
+                "Seleziona uno scanner prima di avviare la scansione."
             )
-            return False
+            return
 
-        if not self.current_scan_id:
+        # Verifica connessione stream
+        if not self._connect_to_stream():
             QMessageBox.warning(
                 self,
-                "Errore",
-                "Nessuna scansione disponibile per il download."
+                "Stream non disponibile",
+                "Lo stream delle camere non è disponibile.\nAvvia lo streaming prima di iniziare la scansione."
             )
-            return False
+            return
 
-        # Aggiorna l'interfaccia
-        self.status_label.setText("Download dati in corso...")
-        self.progress_bar.setValue(0)
+        # Registra il gestore dei frame
+        self._register_frame_handler()
 
-        # Aggiorna il log
-        self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Inizio download dei dati della scansione\n"
+        # Genera ID scansione
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.scan_id = f"Scan_{timestamp}"
 
-        # Scarica i dati
+        # Avvia la scansione
         try:
-            # Assicura che il processor sia disponibile
-            if not hasattr(self, 'scan_processor') or not self.scan_processor:
-                self.scan_processor = ScanProcessor(str(self.output_dir))
+            # Prepara il processore
+            self.scan_processor.start_scan(
+                scan_id=self.scan_id,
+                num_patterns=24,  # Numero standard di pattern
+                pattern_type="PROGRESSIVE"  # Tipo di pattern standard
+            )
 
-            # Configura una callback per il progresso
-            def download_progress(progress, message):
-                self.progress_bar.setValue(int(progress))
-                self.status_label.setText(message)
-
-                # Aggiorna il log occasionalmente
-                if int(progress) % 10 == 0:
-                    self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Download: {int(progress)}%, {message}\n"
-
-            self.scan_processor.set_callbacks(download_progress, None)
-
-            # Esegui il download
-            success = self.scan_processor.download_scan_data(
-                self.selected_scanner,
-                self.current_scan_id
+            # Invia comando al server per avviare la proiezione dei pattern
+            success = self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "START_SCAN",
+                {
+                    "scan_id": self.scan_id,
+                    "pattern_type": "PROGRESSIVE",
+                    "num_patterns": 24,
+                    "quality": 3
+                }
             )
 
             if not success:
-                # Aggiorna il log
-                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nel download dei dati\n"
-
-                # Aggiorna l'interfaccia
-                self.status_label.setText("Errore nel download dei dati")
-
-                # Mostra un messaggio di errore
                 QMessageBox.critical(
                     self,
                     "Errore",
-                    "Impossibile scaricare i dati della scansione dal server."
+                    "Impossibile inviare il comando di avvio al server."
                 )
-                return False
+                self.scan_processor.stop_scan()
+                return
 
-            # Aggiorna il log
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Download completato con successo\n"
+            # Imposta stato
+            self.is_scanning = True
 
-            # Aggiorna l'interfaccia
-            self.status_label.setText("Download completato")
-            self.progress_bar.setValue(100)
+            # Aggiorna UI
+            self.status_label.setText("Scansione in corso...")
+            self.progress_bar.setValue(0)
+            self.start_scan_button.setEnabled(False)
+            self.stop_scan_button.setEnabled(True)
 
-            return True
+            # Emetti segnale
+            self.scan_started.emit({
+                "scan_id": self.scan_id,
+                "timestamp": timestamp
+            })
+
+            logger.info(f"Scansione avviata: {self.scan_id}")
 
         except Exception as e:
-            logger.error(f"Errore nel download dei dati: {e}")
-
-            # Aggiorna il log
-            self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Errore nel download: {str(e)}\n"
-
-            # Aggiorna l'interfaccia
-            self.status_label.setText(f"Errore nel download: {str(e)}")
-
-            # Mostra un messaggio di errore
+            logger.error(f"Errore nell'avvio della scansione: {e}")
             QMessageBox.critical(
                 self,
                 "Errore",
-                f"Si è verificato un errore durante il download dei dati:\n{str(e)}"
+                f"Si è verificato un errore nell'avvio della scansione:\n{str(e)}"
             )
 
-            return False
-
-    def _register_frame_handler(self):
-        """
-        Registra un gestore per ricevere i frame della scansione in tempo reale.
-        Versione migliorata con gestione più robusta e inizializzazione corretta.
-        """
-        try:
-            # Inizializza ScanFrameProcessor se necessario
-            if not hasattr(self, 'scan_frame_processor') or self.scan_frame_processor is None:
-                from client.processing.scan_frame_processor import ScanFrameProcessor
-                self.scan_frame_processor = ScanFrameProcessor(output_dir=self.output_dir)
-                logger.info("ScanFrameProcessor creato con successo")
-
-                # Imposta le callback
-                def progress_callback(progress):
-                    if isinstance(progress, dict):
-                        # Nuovo formato progresso
-                        percent = progress.get("progress", 0)
-                        message = progress.get("message", "")
-                    else:
-                        # Vecchio formato
-                        percent = progress
-                        message = ""
-
-                    # Aggiorna UI con controlli di sicurezza
-                    if hasattr(self, 'progress_bar'):
-                        self.progress_bar.setValue(int(percent))
-                    if hasattr(self, 'status_label') and message:
-                        self.status_label.setText(message)
-
-                def frame_callback(camera_index, pattern_index, frame_info):
-                    # Aggiorna preview con controlli di sicurezza
-                    if hasattr(self, '_update_preview_image'):
-                        self._update_preview_image()
-
-                self.scan_frame_processor.set_callbacks(progress_callback, frame_callback)
-
-            # Ottieni riferimento allo streaming_widget dalla finestra principale
-            main_window = self.window()
-            if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
-                streaming_widget = main_window.streaming_widget
-
-                # Se lo streaming widget ha un receiver, colleghiamo la funzione di scan_frame_received
-                if hasattr(streaming_widget, 'stream_receiver') and streaming_widget.stream_receiver:
-                    stream_receiver = streaming_widget.stream_receiver
-
-                    # Verifica che il segnale esiste
-                    if hasattr(stream_receiver, 'scan_frame_received'):
-                        # Disconnetti eventuali connessioni precedenti per evitare duplicati
-                        try:
-                            stream_receiver.scan_frame_received.disconnect(self._handle_scan_frame)
-                        except Exception:
-                            pass  # Ignora errori se non era connesso
-
-                        # Collega il segnale
-                        stream_receiver.scan_frame_received.connect(self._handle_scan_frame)
-                        logger.info("Segnale scan_frame_received collegato con successo")
-
-                        # Imposta il routing diretto
-                        if hasattr(stream_receiver, 'set_frame_processor'):
-                            stream_receiver.set_frame_processor(self.scan_frame_processor)
-                            if hasattr(stream_receiver, 'enable_direct_routing'):
-                                stream_receiver.enable_direct_routing(True)
-                                logger.info("Routing diretto configurato con successo")
-                    else:
-                        logger.warning("Il segnale scan_frame_received non esiste nello stream_receiver")
-                else:
-                    logger.warning("Stream receiver non trovato")
-            else:
-                logger.warning("Streaming widget non trovato nella finestra principale")
-
-        except Exception as e:
-            import traceback
-            logger.error(f"Errore nella registrazione del frame handler: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
-    def _verify_scan_components(self):
-        """Verifica che tutti i componenti critici per la scansione siano inizializzati correttamente."""
-        try:
-            # Verifica ScanFrameProcessor
-            if not hasattr(self, 'scan_frame_processor') or self.scan_frame_processor is None:
-                logger.error("ERRORE CRITICO: ScanFrameProcessor non inizializzato")
-                return False
-
-            # Verifica il triangolatore interno
-            if not hasattr(self.scan_frame_processor, '_triangulator'):
-                logger.error("ERRORE CRITICO: '_triangulator' non esiste in ScanFrameProcessor")
-                return False
-
-            if self.scan_frame_processor._triangulator is None:
-                logger.error("ERRORE CRITICO: Triangolatore interno nullo")
-                return False
-
-            # Verifica frame buffer
-            if not hasattr(self.scan_frame_processor, '_frame_buffer'):
-                logger.error("ERRORE CRITICO: '_frame_buffer' non esiste in ScanFrameProcessor")
-                return False
-
-            logger.info("Verifica componenti completata con successo!")
-            return True
-        except Exception as e:
-            logger.error(f"Errore nella verifica dei componenti: {e}")
-            return False
-
-    def _handle_scan_frame(self, camera_index, frame, frame_info):
-        """
-        Gestore centralizzato per i frame di scansione.
-        Versione ottimizzata per velocità e robustezza con migliore gestione dell'inizializzazione.
-        """
-        # Gestione speciale per aggiornamenti della nuvola di punti
-        if frame_info.get("type") == "pointcloud_update" and hasattr(self, 'realtime_viewer'):
-            try:
-                # Estrai la nuvola di punti e aggiorna il visualizzatore
-                pointcloud = frame_info.get("pointcloud")
-                if pointcloud is not None and len(pointcloud) > 0:
-                    self.realtime_viewer.update_pointcloud(pointcloud)
-                    # Abilita pulsanti durante la scansione
-                    self.view_3d_button.setEnabled(True)
-                    # Salva la nuvola corrente per uso futuro
-                    self._current_pointcloud = pointcloud
-                return
-            except Exception as e:
-                logger.error(f"Errore nell'aggiornamento della visualizzazione 3D: {e}")
-                return  # Ritorna per evitare ulteriori elaborazioni
-
-        # Estrai informazioni minimali necessarie
-        pattern_index = frame_info.get("pattern_index", -1)
-        scan_id = frame_info.get("scan_id", self.current_scan_id)
-        is_scan_frame = frame_info.get("is_scan_frame", False)
-
-        # Verifica che sia un frame di scansione
-        if not is_scan_frame:
-            return
-
-        # Prima verifica critica: il processore di frame è disponibile e inizializzato?
-        if not hasattr(self, 'scan_frame_processor') or self.scan_frame_processor is None:
-            logger.error("ScanFrameProcessor non disponibile, impossibile elaborare il frame")
-            return
-
-        # Verifica se c'è una scansione attiva - se non c'è, inizializza in modo sicuro
-        if not self.is_scanning and pattern_index >= 0:
-            # Logga l'evento prima di inizializzare
-            logger.info(f"Inizializzazione automatica della scansione per frame con pattern_index={pattern_index}")
-
-            # Inizializzazione automatica in modo sicuro
-            if self.current_scan_id is None:
-                timestamp = int(time.time())
-                self.current_scan_id = f"AutoScan_{timestamp}"
-                # Inizializza il processore PRIMA di attivare lo stato di scansione
-                if not self.scan_frame_processor.is_scanning:
-                    try:
-                        # Prima avvia la scansione nel processore
-                        success = self.scan_frame_processor.start_scan(scan_id=self.current_scan_id)
-                        if not success:
-                            logger.error("Impossibile avviare la scansione nel processore, frame ignorato")
-                            return
-                        # Solo se l'inizializzazione del processore è riuscita, imposta lo stato locale
-                        self.is_scanning = True
-                        # Aggiorna l'interfaccia
-                        self.status_label.setText(f"Scansione automatica avviata: {self.current_scan_id}")
-                        self.progress_bar.setValue(0)
-                        self.stop_scan_button.setEnabled(True)
-                        logger.info(f"Scansione automatica avviata con successo: {self.current_scan_id}")
-                    except Exception as e:
-                        logger.error(f"Errore nell'inizializzazione automatica della scansione: {e}")
-                        return
-                else:
-                    # Il processore è già in stato di scansione, sincronizza lo stato locale
-                    self.is_scanning = True
-                    logger.info("Stato di scansione sincronizzato con il processore")
-            else:
-                # Il current_scan_id è già impostato, verifica solo che il processore sia attivo
-                if not self.scan_frame_processor.is_scanning:
-                    try:
-                        success = self.scan_frame_processor.start_scan(scan_id=self.current_scan_id)
-                        if not success:
-                            logger.error(
-                                "Impossibile avviare la scansione nel processore con ID esistente, frame ignorato")
-                            return
-                        self.is_scanning = True
-                    except Exception as e:
-                        logger.error(f"Errore nell'avvio della scansione con ID esistente: {e}")
-                        return
-                else:
-                    self.is_scanning = True
-
-        # Se non siamo in stato di scansione dopo i tentativi di inizializzazione, ignora il frame
+    def _stop_scan(self):
+        """Ferma la scansione in corso."""
         if not self.is_scanning:
-            logger.warning(f"Frame ignorato: nessuna scansione attiva per pattern_index={pattern_index}")
             return
 
-        # Verifica il frame
-        if frame is None or frame.size == 0:
-            logger.error(f"Frame {pattern_index} nullo o vuoto")
-            return
-
-        # Verifica l'ID della scansione
-        if not scan_id:
-            scan_id = self.current_scan_id or f"Scan_{int(time.time())}"
-
-        # ELABORAZIONE DIRETTA: usa il processore ottimizzato
         try:
-            # Verifica finale
-            if not self.scan_frame_processor.is_scanning:
-                logger.error("Stato inconsistente: variabile locale is_scanning=True ma processore non attivo")
-                # Tenta di riavviare la scansione nel processore
-                try:
-                    success = self.scan_frame_processor.start_scan(scan_id=scan_id)
-                    if not success:
-                        logger.error("Impossibile riavviare la scansione nel processore, frame ignorato")
-                        return
-                except Exception as e:
-                    logger.error(f"Errore nel riavvio della scansione: {e}")
-                    return
+            # Invia comando di stop al server
+            if self.selected_scanner and self.scanner_controller:
+                self.scanner_controller.send_command(
+                    self.selected_scanner.device_id,
+                    "STOP_SCAN"
+                )
 
-            # Elabora il frame in modo sicuro
-            try:
-                # Approccio più sicuro: chiamata diretta invece di usare invokeMethod
-                self.scan_frame_processor.process_frame(camera_index, frame.copy(), frame_info.copy())
+            # Ferma il processore
+            stats = self.scan_processor.stop_scan()
 
-                # Aggiorna anche l'anteprima nell'UI
-                if camera_index == 1:  # Solo dopo camera destra
-                    self._update_preview_image()
-            except Exception as e:
-                logger.error(f"Errore nell'elaborazione diretta del frame: {e}")
-                import traceback
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                # Non propagare l'eccezione per evitare crash
+            # Aggiorna stato
+            self.is_scanning = False
+
+            # Aggiorna UI
+            self.status_label.setText("Scansione completata")
+            self.progress_bar.setValue(100)
+            self.start_scan_button.setEnabled(True)
+            self.stop_scan_button.setEnabled(False)
+
+            # Abilita esportazione se abbiamo una nuvola
+            if self.pointcloud_viewer.pointcloud is not None:
+                self.export_button.setEnabled(True)
+
+            logger.info(f"Scansione fermata: {self.scan_id}")
 
         except Exception as e:
-            logger.error(f"Errore generale nell'elaborazione del frame: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Errore nell'arresto della scansione: {e}")
+            QMessageBox.critical(
+                self,
+                "Errore",
+                f"Si è verificato un errore nell'arresto della scansione:\n{str(e)}"
+            )
 
-    def _setup_frame_receiver(self):
-        """
-        Configura un ricevitore dedicato per i frame di scansione.
-        Versione migliorata con maggiore robustezza e gestione errori.
-        """
-        try:
-            import zmq
-            import threading
+            # Ripristina stato UI
+            self.is_scanning = False
+            self.start_scan_button.setEnabled(True)
+            self.stop_scan_button.setEnabled(False)
 
-            def frame_receiver_thread():
-                """Thread dedicato a ricevere i frame di scansione"""
-                logger.info("Avvio thread ricevitore frame di scansione")
+    def _export_scan(self):
+        """Esporta i risultati della scansione."""
+        # Semplicemente delega all'export del visualizzatore
+        self.pointcloud_viewer._export_pointcloud()
 
-                try:
-                    # Crea un contesto ZMQ
-                    context = zmq.Context()
+    def _update_status(self):
+        """Aggiorna lo stato periodicamente."""
+        # Verifica connessione scanner
+        if self.scanner_controller and self.selected_scanner:
+            is_connected = self.scanner_controller.is_connected(self.selected_scanner.device_id)
 
-                    # Crea un socket PULL per ricevere i frame (pattern PUSH-PULL più affidabile)
-                    socket = context.socket(zmq.PULL)
+            # Abilita/disabilita pulsante avvio
+            self.start_scan_button.setEnabled(is_connected and not self.is_scanning)
 
-                    # Configura socket per maggiore affidabilità
-                    socket.setsockopt(zmq.RCVTIMEO, 5000)  # 5 secondi timeout
-                    socket.setsockopt(zmq.LINGER, 0)  # Non attendere alla chiusura
-
-                    # Ottieni porta e indirizzo del server
-                    if self.selected_scanner:
-                        server_ip = self.selected_scanner.ip_address
-                        # La porta per i frame è la porta di comando + 2
-                        frame_port = self.selected_scanner.port + 2
-
-                        # Connetti al server
-                        endpoint = f"tcp://{server_ip}:{frame_port}"
-                        logger.info(f"Connessione a {endpoint} per ricevere frame")
-                        socket.connect(endpoint)
-
-                        # Invia un segnale di ready al server
-                        ready_sent = False
-
-                        # Loop di ricezione con maggiore robustezza
-                        while True:
-                            try:
-                                # Ricezione con timeout
-                                message = socket.recv_json()
-
-                                if message and message.get("type") == "SCAN_FRAME":
-                                    # Aggiorna il timestamp dell'ultima attività
-                                    self._last_client_activity = time.time()
-                                    # Processa il frame ricevuto
-                                    self._on_scan_frame_received(self.selected_scanner.device_id, message)
-                                    # Log meno frequente
-                                    if message.get("frame_info", {}).get("pattern_index", 0) % 5 == 0:
-                                        logger.info(
-                                            f"Frame {message.get('frame_info', {}).get('pattern_index')} ricevuto")
-
-                            except zmq.Again:
-                                # Timeout nella ricezione, invia un segnale di 'still alive'
-                                if self.selected_scanner and self.scanner_controller:
-                                    try:
-                                        # Ogni 3 secondi invia un ping per mantenere viva la connessione
-                                        if not ready_sent or time.time() % 3 < 0.1:
-                                            self.scanner_controller.send_command(
-                                                self.selected_scanner.device_id,
-                                                "PING",
-                                                {
-                                                    "timestamp": time.time(),
-                                                    "receiving_frames": True,
-                                                    "scan_id": self.current_scan_id
-                                                }
-                                            )
-                                            ready_sent = True
-                                    except:
-                                        pass
-                                continue
-                            except Exception as e:
-                                logger.error(f"Errore nella ricezione frame: {e}")
-                                time.sleep(1)  # Pausa per evitare loop di errore
-
-                    # Pulizia
-                    socket.close()
-                    context.term()
-
-                except Exception as e:
-                    logger.error(f"Errore nel thread ricevitore frame: {e}")
-                    import traceback
-                    logger.error(f"Traceback: {traceback.format_exc()}")
-
-            # Avvia il thread
-            self._frame_receiver_thread = threading.Thread(target=frame_receiver_thread)
-            self._frame_receiver_thread.daemon = True
-            self._frame_receiver_thread.start()
-            logger.info("Thread ricevitore frame avviato con successo")
-
-        except Exception as e:
-            logger.error(f"Errore nella configurazione del ricevitore frame: {e}")
-
-    def _on_scan_frame_received(self, device_id: str, message: Dict[str, Any]):
-        """
-        Gestisce la ricezione di un frame di scansione in tempo reale con gestione errori migliorata.
-        Versione migliorata con maggiore robustezza nel salvataggio delle immagini.
-        """
-        try:
-            # Verifica minima del messaggio
-            if not message:
-                logger.warning("Messaggio di frame vuoto")
-                return
-
-            # Estrai informazioni dal messaggio con robustezza
-            frame_info = message.get("frame_info", {})
-            if not frame_info:
-                logger.warning("Informazioni frame mancanti nel messaggio")
-                return
-
-            pattern_index = frame_info.get("pattern_index", 0)
-            pattern_name = frame_info.get("pattern_name", "unknown")
-            scan_id = message.get("scan_id", self.current_scan_id)
-
-            # Log ridotto per evitare spam
-            if pattern_index % 5 == 0 or pattern_index < 5:
-                logger.info(f"Ricevuto frame {pattern_index} ({pattern_name}) da {device_id}")
-
-            # Se non c'è un ID di scansione, usa quello corrente o crea un nuovo ID
-            if not scan_id:
-                if self.current_scan_id:
-                    scan_id = self.current_scan_id
+            # Aggiorna stato se non in scansione
+            if not self.is_scanning:
+                if is_connected:
+                    self.status_label.setText(f"Connesso a {self.selected_scanner.name}")
                 else:
-                    # Crea un nuovo ID come fallback
-                    scan_id = f"Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                    self.current_scan_id = scan_id
-                    logger.info(f"Creato nuovo scan_id: {scan_id}")
-
-            # Prepara la directory per salvare i frame, con gestione robusta dei percorsi
-            scan_dir = Path(os.path.join(str(self.output_dir), scan_id))
-            left_dir = scan_dir / "left"
-            right_dir = scan_dir / "right"
-
-            # Crea le directory con gestione robusta
-            try:
-                scan_dir.mkdir(parents=True, exist_ok=True)
-                left_dir.mkdir(exist_ok=True)
-                right_dir.mkdir(exist_ok=True)
-            except Exception as e:
-                logger.error(f"Errore nella creazione delle directory: {e}")
-                # Tenta di utilizzare una directory temporanea come fallback
-                import tempfile
-                temp_dir = Path(tempfile.mkdtemp(prefix="unlook_scan_"))
-                scan_dir = temp_dir
-                left_dir = scan_dir / "left"
-                right_dir = scan_dir / "right"
-                left_dir.mkdir(exist_ok=True)
-                right_dir.mkdir(exist_ok=True)
-                logger.warning(f"Usando directory temporanea: {scan_dir}")
-
-            # Verifica i dati dei frame con gestione robusta
-            left_frame_data = message.get("left_frame")
-            right_frame_data = message.get("right_frame")
-
-            if not left_frame_data or not right_frame_data:
-                logger.warning(f"Dati frame mancanti per pattern {pattern_index}")
-                return
-
-            # Decodifica i dati dei frame - AGGIUNGI QUESTO FIX
-            import base64
-            try:
-                # Verifica se i dati sono già in formato binario o necessitano decodifica base64
-                if isinstance(left_frame_data, str):
-                    left_frame_data = base64.b64decode(left_frame_data)
-                if isinstance(right_frame_data, str):
-                    right_frame_data = base64.b64decode(right_frame_data)
-            except Exception as e:
-                logger.error(f"Errore nella decodifica base64: {e}")
-                return
-
-            # Definisci nomi file con estensione corretta e percorsi assoluti
-            left_file = os.path.join(left_dir, f"{pattern_index:04d}_{pattern_name}.png")
-            right_file = os.path.join(right_dir, f"{pattern_index:04d}_{pattern_name}.png")
-
-            # Salvataggio diretto dei dati binari con controllo errori migliorato
-            try:
-                # Metodo 1: Salvataggio binario diretto
-                with open(left_file, "wb") as f:
-                    f.write(left_frame_data)
-                logger.debug(f"File sinistro salvato: {left_file}")
-
-                with open(right_file, "wb") as f:
-                    f.write(right_frame_data)
-                logger.debug(f"File destro salvato: {right_file}")
-
-                # Verifica che i file esistano e hanno dimensione > 0
-                if not os.path.exists(left_file) or os.path.getsize(left_file) == 0:
-                    logger.error(f"File sinistro non creato o vuoto: {left_file}")
-
-                if not os.path.exists(right_file) or os.path.getsize(right_file) == 0:
-                    logger.error(f"File destro non creato o vuoto: {right_file}")
-
-                # Log informativo
-                logger.info(f"Frame {pattern_index} salvato con successo")
-
-            except Exception as e:
-                logger.error(f"Errore nel salvataggio diretto: {e}")
-
-                # Metodo alternativo: decodifica e salva tramite OpenCV
-                try:
-                    import numpy as np
-                    import cv2
-
-                    # Decodifica il frame sinistro
-                    left_np = np.frombuffer(left_frame_data, np.uint8)
-                    left_img = cv2.imdecode(left_np, cv2.IMREAD_UNCHANGED)
-
-                    # Decodifica il frame destro
-                    right_np = np.frombuffer(right_frame_data, np.uint8)
-                    right_img = cv2.imdecode(right_np, cv2.IMREAD_UNCHANGED)
-
-                    # Salva solo se la decodifica è riuscita
-                    if left_img is not None and left_img.size > 0:
-                        cv2.imwrite(left_file, left_img)
-                        logger.info(f"Frame sinistro salvato via OpenCV: {left_file}")
-
-                    if right_img is not None and right_img.size > 0:
-                        cv2.imwrite(right_file, right_img)
-                        logger.info(f"Frame destro salvato via OpenCV: {right_file}")
-                except Exception as e2:
-                    logger.error(f"Anche il salvataggio alternativo è fallito: {e2}")
-
-                    # Tentativo di fallback con nomi file alternativi
-                    try:
-                        alt_left_file = os.path.join(left_dir, f"{pattern_index:04d}_{pattern_name}.jpg")
-                        alt_right_file = os.path.join(right_dir, f"{pattern_index:04d}_{pattern_name}.jpg")
-
-                        with open(alt_left_file, "wb") as f:
-                            f.write(left_frame_data)
-
-                        with open(alt_right_file, "wb") as f:
-                            f.write(right_frame_data)
-
-                        logger.info(f"Frame {pattern_index} salvato con estensione alternativa")
-                    except Exception as e3:
-                        logger.error(f"Tutti i tentativi di salvataggio falliti: {e3}")
-
-            # Aggiorna l'anteprima delle immagini
-            self._update_preview_image()
-
-        except Exception as e:
-            logger.error(f"Errore generale nella gestione del frame ricevuto: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
-    def _load_existing_scan(self):
-        """Carica una scansione esistente."""
-        # Seleziona la directory
-        directory = QFileDialog.getExistingDirectory(
-            self,
-            "Seleziona Directory della Scansione",
-            str(self.output_dir),
-            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
-        )
-
-        if not directory:
-            return
-
-        # Verifica che sia una directory di scansione valida
-        scan_id = os.path.basename(directory)
-        left_dir = os.path.join(directory, "left")
-        right_dir = os.path.join(directory, "right")
-
-        if not os.path.isdir(left_dir) or not os.path.isdir(right_dir):
-            QMessageBox.warning(
-                self,
-                "Directory Non Valida",
-                f"La directory selezionata non sembra contenere una scansione valida:\n{directory}\n\n"
-                "Verifica che la directory contenga le sottodirectory 'left' e 'right'."
-            )
-            return
-
-        # Aggiorna lo stato
-        self.current_scan_id = scan_id
-
-        # Aggiorna l'interfaccia
-        self.status_label.setText(f"Scansione caricata: {scan_id}")
-
-        # Verifica se esiste già una nuvola di punti
-        pointcloud_path = os.path.join(directory, "pointcloud.ply")
-        has_pointcloud = os.path.isfile(pointcloud_path)
-
-        # Abilita/disabilita i pulsanti appropriati
-        self.process_button.setEnabled(True)
-        self.view_3d_button.setEnabled(has_pointcloud)
-
-        # Aggiorna la sezione dei risultati
-        self._update_results_section(has_pointcloud)
-
-        # Carica il log se disponibile
-        self._load_scan_log(directory)
-
-    def _load_scan_log(self, scan_dir):
-        """Carica il log della scansione se disponibile."""
-        log_file = os.path.join(scan_dir, "scan_log.txt")
-
-        if os.path.isfile(log_file):
-            try:
-                with open(log_file, 'r') as f:
-                    self.scan_log = f.read()
-                    self.view_log_button.setEnabled(True)
-            except Exception as e:
-                logger.error(f"Errore nel caricamento del log: {e}")
-                self.scan_log = f"[{datetime.now().strftime('%H:%M:%S')}] Scansione caricata da: {scan_dir}\n"
+                    self.status_label.setText("Scanner non connesso")
         else:
-            self.scan_log = f"[{datetime.now().strftime('%H:%M:%S')}] Scansione caricata da: {scan_dir}\n"
+            self.status_label.setText("Scanner non selezionato")
+            self.start_scan_button.setEnabled(False)
 
-    def _show_log_dialog(self):
-        """Mostra il dialogo con i log della scansione."""
-        dialog = LogViewerDialog(self, self.scan_log)
-        dialog.exec()
+        # Se in scansione, aggiorna info da scan_processor
+        if self.is_scanning:
+            progress = self.scan_processor.get_scan_progress()
+            self.progress_bar.setValue(int(progress.get('progress', 0)))
 
-    def _view_pointcloud(self):
-        """
-        Visualizza la nuvola di punti 3D direttamente dalla memoria.
-        Versione riprogettata per eliminare la dipendenza dal filesystem.
-        """
-        if not self.current_scan_id:
-            return
+            # Aggiorna stato solo ogni 10 chiamate per non sovrascrivere i messaggi importanti
+            if not hasattr(self, '_status_update_counter'):
+                self._status_update_counter = 0
 
-        # Cerca una nuvola di punti in memoria
-        pointcloud = None
+            self._status_update_counter += 1
 
-        # Prima controlla se abbiamo una nuvola salvata nell'istanza corrente
-        if hasattr(self, '_current_pointcloud') and self._current_pointcloud is not None:
-            pointcloud = self._current_pointcloud
-        # Altrimenti prova a ottenerla dal processore
-        elif hasattr(self, 'scan_frame_processor') and self.scan_frame_processor:
-            pointcloud = self.scan_frame_processor.get_realtime_pointcloud()
+            if self._status_update_counter % 10 == 0:
+                patterns = progress.get('patterns_received', 0)
+                frames = progress.get('frames_total', 0)
+                self.status_label.setText(f"Scansione in corso: {patterns} pattern, {frames} frame totali")
 
-        if pointcloud is not None and len(pointcloud) > 100:
-            # Usa direttamente la nuvola di punti in memoria
-            # Genera un'immagine temporanea se necessario
-            screenshot_path = None
-
-            # Genera screenshot per il dialog
-            try:
-                import tempfile
-                import open3d as o3d
-
-                # Crea una directory temporanea se non esiste
-                if not hasattr(self, '_temp_dir') or not os.path.isdir(self._temp_dir):
-                    self._temp_dir = tempfile.mkdtemp(prefix="unlook_preview_")
-
-                # Percorso per lo screenshot
-                screenshot_path = os.path.join(self._temp_dir, f"pointcloud_preview_{int(time.time())}.png")
-
-                # Crea un visualizzatore Open3D
-                pcd = o3d.geometry.PointCloud()
-                pcd.points = o3d.utility.Vector3dVector(pointcloud)
-
-                # Opzionale: applica un filtro per rimuovere outlier
-                if len(pointcloud) > 100:
-                    try:
-                        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-                    except Exception as e:
-                        logger.debug(f"Errore nell'applicazione del filtro outlier: {e}")
-
-                # Aggiungi un sistema di coordinate per riferimento
-                coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=20)
-
-                # Crea una finestra di visualizzazione nascosta
-                vis = o3d.visualization.Visualizer()
-                vis.create_window(visible=False, width=640, height=480)
-                vis.add_geometry(pcd)
-                vis.add_geometry(coord_frame)
-
-                # Ottimizza la vista
-                vis.get_render_option().point_size = 2.0
-                vis.get_render_option().background_color = np.array([0.9, 0.9, 0.9])
-                vis.get_view_control().set_zoom(0.8)
-                vis.poll_events()
-                vis.update_renderer()
-
-                # Cattura lo screenshot
-                vis.capture_screen_image(screenshot_path)
-                vis.destroy_window()
-
-            except Exception as e:
-                logger.error(f"Errore nella generazione dello screenshot: {e}")
-                screenshot_path = None
-
-            # Opzionalmente, salva la nuvola di punti su disco in background
-            pointcloud_path = None
-            if self.current_scan_id:
-                try:
-                    scan_dir = os.path.join(str(self.output_dir), self.current_scan_id)
-                    os.makedirs(scan_dir, exist_ok=True)
-                    pointcloud_path = os.path.join(scan_dir, "pointcloud.ply")
-
-                    # Salva su un thread separato per non bloccare la UI
-                    def save_pointcloud_thread(pcd_data, path):
-                        try:
-                            import open3d as o3d
-                            pcd = o3d.geometry.PointCloud()
-                            pcd.points = o3d.utility.Vector3dVector(pcd_data)
-                            o3d.io.write_point_cloud(path, pcd)
-                            logger.info(f"Nuvola di punti salvata su: {path}")
-                        except Exception as e:
-                            logger.error(f"Errore nel salvataggio della nuvola di punti: {e}")
-
-                    import threading
-                    save_thread = threading.Thread(
-                        target=save_pointcloud_thread,
-                        args=(pointcloud, pointcloud_path)
-                    )
-                    save_thread.daemon = True
-                    save_thread.start()
-
-                except Exception as e:
-                    logger.error(f"Errore nella preparazione del salvataggio: {e}")
-                    pointcloud_path = None
-
-            # Mostra il visualizzatore con i dati in memoria
-            dialog = PointCloudViewerDialog(self, pointcloud_path, screenshot_path, in_memory_pointcloud=pointcloud)
-            dialog.exec()
-            return
-
-        # Se non abbiamo una nuvola in memoria, prova a caricarla da disco (fallback)
-        scan_dir = os.path.join(str(self.output_dir), self.current_scan_id)
-        pointcloud_path = os.path.join(scan_dir, "pointcloud.ply")
-
-        # Verifica che il file esista
-        if not os.path.isfile(pointcloud_path):
-            QMessageBox.warning(
-                self,
-                "Nuvola non trovata",
-                "Nessuna nuvola di punti disponibile. Elabora prima la scansione per generarla."
-            )
-            return
-
-        # Percorso dello screenshot se esiste
-        screenshot_path = os.path.join(scan_dir, "pointcloud_preview.png")
-        if not os.path.isfile(screenshot_path):
-            screenshot_path = None
-
-        # Mostra il visualizzatore
-        dialog = PointCloudViewerDialog(self, pointcloud_path, screenshot_path)
-        dialog.exec()
-
-    def _update_results_section(self, has_pointcloud=False):
-        """Aggiorna la sezione dei risultati della scansione."""
-        if not self.current_scan_id:
-            return
-
-        # Percorso della scansione
-        scan_dir = os.path.join(str(self.output_dir), self.current_scan_id)
-
-        # Pulisci il layout corrente
-        while self.results_content_layout.count():
-            item = self.results_content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        # Aggiungi le informazioni sulla scansione
-        info_label = QLabel(f"Scansione: {self.current_scan_id}")
-        info_label.setFont(QFont("Arial", 12, QFont.Bold))
-        self.results_content_layout.addWidget(info_label)
-
-        # Aggiungi dettagli dalla configurazione se disponibile
-        config_file = os.path.join(scan_dir, "scan_config.json")
-        if os.path.isfile(config_file):
-            try:
-                with open(config_file, 'r') as f:
-                    config = json.load(f)
-
-                    details = "Dettagli Scansione:\n"
-
-                    if "config" in config:
-                        scan_config = config["config"]
-                        details += f"- Tipo di Pattern: {self._get_pattern_type_name(scan_config.get('pattern_type', 'PROGRESSIVE'))}\n"
-                        details += f"- Numero di Pattern: {scan_config.get('num_patterns', 'N/A')}\n"
-                        details += f"- Tempo di Esposizione: {scan_config.get('exposure_time', 'N/A')} sec\n"
-                        details += f"- Qualità: {scan_config.get('quality', 'N/A')}\n"
-
-                    if "timestamp" in config:
-                        details += f"- Data: {config.get('timestamp', 'N/A')}\n"
-
-                    details_label = QLabel(details)
-                    self.results_content_layout.addWidget(details_label)
-            except Exception as e:
-                logger.error(f"Errore nel caricamento della configurazione: {e}")
-
-        # Verifica se c'è una nuvola di punti
-        pointcloud_path = os.path.join(scan_dir, "pointcloud.ply")
-        if os.path.isfile(pointcloud_path):
-            pointcloud_info = f"Nuvola di Punti: {os.path.basename(pointcloud_path)}\n"
-            pointcloud_info += f"- Dimensione: {os.path.getsize(pointcloud_path) / 1024:.1f} KB\n"
-
-            # Se Open3D è disponibile, ottieni il numero di punti
-            if OPEN3D_AVAILABLE:
-                try:
-                    pcd = o3d.io.read_point_cloud(pointcloud_path)
-                    num_points = len(pcd.points)
-                    pointcloud_info += f"- Numero di Punti: {num_points:,}\n"
-                except Exception as e:
-                    logger.error(f"Errore nella lettura della nuvola di punti: {e}")
-
-            pointcloud_label = QLabel(pointcloud_info)
-            self.results_content_layout.addWidget(pointcloud_label)
-        elif has_pointcloud:
-            pointcloud_label = QLabel("La nuvola di punti non è stata trovata.")
-            self.results_content_layout.addWidget(pointcloud_label)
-        else:
-            pointcloud_label = QLabel("Nessuna nuvola di punti disponibile. Elabora la scansione per generarla.")
-            self.results_content_layout.addWidget(pointcloud_label)
-
-        # Aggiungi anteprima se disponibile
-        preview_path = os.path.join(scan_dir, "pointcloud_preview.png")
-
-        if os.path.isfile(preview_path):
-            preview_label = QLabel()
-            preview_label.setAlignment(Qt.AlignCenter)
-            pixmap = QPixmap(preview_path)
-            preview_label.setPixmap(pixmap.scaled(
-                400, 300,
-                Qt.KeepAspectRatio, Qt.SmoothTransformation
-            ))
-            self.results_content_layout.addWidget(preview_label)
-        elif OPENCV_AVAILABLE and os.path.isdir(os.path.join(scan_dir, "left")):
-            # Se non c'è un'anteprima della nuvola, mostra un'immagine acquisita
-            try:
-                # Cerca immagini nella directory left
-                left_images = glob.glob(os.path.join(scan_dir, "left", "*.png"))
-
-                if left_images:
-                    # Prendi una delle immagini (preferibilmente white)
-                    sample_image = next((img for img in left_images if "white" in img.lower()), left_images[0])
-
-                    # Carica l'immagine
-                    img = cv2.imread(sample_image)
-
-                    # Scalala per la visualizzazione
-                    scale = min(400 / img.shape[1], 300 / img.shape[0])
-                    width = int(img.shape[1] * scale)
-                    height = int(img.shape[0] * scale)
-                    img_resized = cv2.resize(img, (width, height))
-
-                    # Converti in formato Qt
-                    img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-                    h, w, c = img_rgb.shape
-                    qimg = QImage(img_rgb.data, w, h, w * c, QImage.Format_RGB888)
-                    pixmap = QPixmap.fromImage(qimg)
-
-                    # Mostra l'anteprima
-                    preview_label = QLabel()
-                    preview_label.setAlignment(Qt.AlignCenter)
-                    preview_label.setPixmap(pixmap)
-                    self.results_content_layout.addWidget(preview_label)
-            except Exception as e:
-                logger.error(f"Errore nella generazione dell'anteprima: {e}")
-
-        # Aggiungi spaziatura
-        self.results_content_layout.addStretch(1)
-
-    def set_scanner_controller(self, scanner_controller):
+    def set_scanner_controller(self, controller):
         """Imposta il controller dello scanner."""
-        self.scanner_controller = scanner_controller
-
-        # Abilita il pulsante di avvio scansione se c'è uno scanner selezionato
-        self.start_scan_button.setEnabled(
-            self.scanner_controller and
-            self.scanner_controller.selected_scanner and
-            self.scanner_controller.is_connected(self.scanner_controller.selected_scanner.device_id)
-        )
+        self.scanner_controller = controller
+        self._update_status()
 
     def update_selected_scanner(self, scanner):
         """Aggiorna lo scanner selezionato."""
         self.selected_scanner = scanner
+        self._update_status()
 
-        # Verifica se lo scanner è connesso
-        is_connected = (scanner is not None and
-                        self.scanner_controller and
-                        self.scanner_controller.is_connected(scanner.device_id))
+        # Prova a connettersi agli stream
+        self._connect_to_stream()
 
-        # Abilita/disabilita i pulsanti
-        self.start_scan_button.setEnabled(is_connected)
-        self.test_scan_button.setEnabled(is_connected)  # Abilita/disabilita anche il pulsante di test
+    def refresh_scanner_state(self):
+        """Aggiorna lo stato dello scanner (richiamato quando la tab diventa attiva)."""
+        self._update_status()
+        self._connect_to_stream()
 
-        # Aggiorna l'etichetta di stato
-        if is_connected:
-            self.status_label.setText(f"Connesso a {scanner.name}")
-        else:
-            self.status_label.setText("Scanner non connesso")
-
-    def closeEvent(self, event):
-        """Gestisce l'evento di chiusura della finestra."""
-        # Ferma eventuali thread in esecuzione
-        if hasattr(self, 'test_thread') and self.test_thread:
-            self.test_thread.quit()
-            self.test_thread.wait()
-            self.test_thread = None
-            self.test_worker = None
-
-        # Chiudi eventuali dialog aperti
-        if hasattr(self, 'progress_dialog') and self.progress_dialog:
-            self.progress_dialog.close()
-            self.progress_dialog = None
-
-        # Ferma eventuali timer
-        if hasattr(self, 'status_timer'):
-            self.status_timer.stop()
-
-        if hasattr(self, '_polling_timer') and self._polling_timer and self._polling_timer.isActive():
-            self._polling_timer.stop()
-
-        if hasattr(self, '_scan_safety_timeout') and self._scan_safety_timeout and self._scan_safety_timeout.isActive():
-            self._scan_safety_timeout.stop()
-
-        # Continua con l'evento di chiusura
-        super().closeEvent(event)
+    # Metodi aggiuntivi per compatibilità con l'implementazione originale
+    def get_realtime_pointcloud(self):
+        """Restituisce l'ultima nuvola di punti generata."""
+        return self.pointcloud_viewer.pointcloud
