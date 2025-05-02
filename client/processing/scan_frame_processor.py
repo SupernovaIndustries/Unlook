@@ -13,6 +13,7 @@ import time
 import logging
 import threading
 import cv2
+import uuid
 import numpy as np
 from pathlib import Path
 from datetime import datetime
