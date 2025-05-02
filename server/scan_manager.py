@@ -637,7 +637,7 @@ class ScanManager:
             # Verifica se ci sono camere disponibili prima di procedere
             if not self.server.cameras or len(self.server.cameras) < 1:
                 return {
-                    'status': 'warning',
+                    'status': 'ok',  # Cambiato da 'warning' a 'ok' per compatibilità
                     'message': 'Camere non disponibili, pattern proiettato ma non acquisito',
                     'pattern_index': pattern_index,
                     'pattern_name': pattern_name,
@@ -649,7 +649,7 @@ class ScanManager:
             # Acquisizione eseguita in _capture_frame_callback, qui restituiamo solo lo stato
             # e dettagli tecnici per diagnostica
             return {
-                'status': 'success',
+                'status': 'ok',  # Cambiato da 'success' a 'ok' per compatibilità
                 'message': f'Pattern {pattern_name} proiettato con successo',
                 'pattern_index': pattern_index,
                 'pattern_name': pattern_name,

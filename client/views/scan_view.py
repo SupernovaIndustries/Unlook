@@ -86,58 +86,72 @@ class CameraPreviewWidget(QWidget):
 
     @Slot(np.ndarray, float)
     def update_frame(self, frame: np.ndarray, timestamp: float = None):
-        """Aggiorna il frame visualizzato con calcolo lag."""
+        """Aggiorna il frame visualizzato con calcolo lag ottimizzato."""
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
             return
 
-        # Memorizza e analizza il frame
-        self._frame = frame.copy()
+        # Solo memorizza il frame senza elaborazioni costose
+        self._frame = frame  # Non usiamo .copy() per evitare copie superflue
         self._frame_count += 1
 
-        # Converti il frame in QImage per visualizzazione
+        # Conversione ottimizzata del frame in QImage
         height, width = frame.shape[:2]
         bytes_per_line = frame.strides[0]
 
-        if len(frame.shape) == 3 and frame.shape[2] == 3:
-            # Frame a colori BGR -> RGB
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            qt_image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
-        else:
-            # Frame in scala di grigi
-            qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+        # Evita conversioni di colore superflue
+        try:
+            if len(frame.shape) == 3 and frame.shape[2] == 3:
+                # Frame a colori BGR -> RGB
+                # Usiamo una visualizzazione invece di una copia dove possibile
+                # Questo è un compromesso tra velocità e correttezza
+                if self._frame_count % 2 == 0:  # Solo 1 frame su 2 fa la conversione completa
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    qt_image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                else:
+                    # Approssimazione BGR->RGB scambiando solo i canali nella QImage
+                    qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_BGR888)
+            else:
+                # Frame in scala di grigi (più veloce)
+                qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+        except Exception as e:
+            logger.warning(f"Errore conversione QImage: {e}")
+            return
 
-        # Visualizza il frame
+        # Visualizza il frame - no scaling durante acquisizione pattern
         pixmap = QPixmap.fromImage(qt_image)
-        self.display_label.setPixmap(pixmap.scaled(
-            self.display_label.width(), self.display_label.height(),
-            Qt.KeepAspectRatio, Qt.SmoothTransformation
-        ))
-        self.display_label.setStyleSheet("")  # Rimuovi stile sfondo nero
+        # Scaling ottimizzato solo se necessario
+        if self.display_label.width() < width or self.display_label.height() < height:
+            pixmap = pixmap.scaled(
+                self.display_label.width(), self.display_label.height(),
+                Qt.KeepAspectRatio, Qt.FastTransformation  # Usa FastTransformation per velocità
+            )
+        self.display_label.setPixmap(pixmap)
 
-        # Calcola FPS
+        # Calcola FPS con media esponenziale più stabile
         current_time = time.time()
         if self._last_update_time > 0:
             time_diff = current_time - self._last_update_time
             if time_diff > 0:
                 fps = 1.0 / time_diff
-                # Media mobile per stabilizzare
-                alpha = 0.1
-                self._fps = (1.0 - alpha) * self._fps + alpha * fps
+                # Media mobile con peso maggiore sui valori recenti
+                self._fps = (0.8 * self._fps) + (0.2 * fps)
 
         self._last_update_time = current_time
 
         # Calcola lag se è stato fornito un timestamp
         if timestamp is not None:
             self._lag_ms = int((time.time() - timestamp) * 1000)
-            self._update_lag_label()
-        else:
-            self.lag_label.setText("Lag: N/A")
-            self.lag_label.setStyleSheet("color: gray;")
 
-        # Aggiorna etichetta informativa
-        camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
-        fps_text = f"{self._fps:.1f} FPS" if self._fps > 0 else ""
-        self.info_label.setText(f"Camera {camera_name} | {width}x{height} | {fps_text}")
+            # Aggiorna etichetta lag solo se è cambiato significativamente
+            if abs(self._lag_ms - self._last_lag_ms) > 20 or self._frame_count % 10 == 0:
+                self._update_lag_label()
+                self._last_lag_ms = self._lag_ms
+
+        # Aggiorna etichetta informativa solo saltuariamente per ridurre carico UI
+        if self._frame_count % 15 == 0:
+            camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
+            fps_text = f"{self._fps:.1f} FPS" if self._fps > 0 else ""
+            self.info_label.setText(f"Camera {camera_name} | {width}x{height} | {fps_text}")
 
     def _update_lag_label(self):
         """Aggiorna l'etichetta del lag e imposta il colore appropriato."""
@@ -667,7 +681,7 @@ class ScanView(QWidget):
             logger.error(f"Errore nell'aggiornamento del progresso: {e}")
 
     def _on_frame_processed(self, camera_index, pattern_index, frame_info):
-        """Callback per frame processati."""
+        """Callback per frame processati con monitoraggio sincronizzazione."""
         try:
             # Verifica se è un aggiornamento della nuvola di punti
             if frame_info and frame_info.get('type') == 'pointcloud_update':
@@ -675,9 +689,25 @@ class ScanView(QWidget):
                 pointcloud = frame_info.get('pointcloud')
                 if pointcloud is not None and len(pointcloud) > 0:
                     self.pointcloud_viewer.update_pointcloud(pointcloud)
-
                     # Abilita esportazione
                     self.export_button.setEnabled(True)
+
+            # Monitoraggio del frame acquisito se è un frame di scansione
+            elif frame_info and frame_info.get('pattern_index') is not None:
+                pattern_idx = frame_info.get('pattern_index')
+                timestamp = frame_info.get('timestamp')
+                server_timestamp = frame_info.get('server_timestamp')
+
+                # Se abbiamo sia il timestamp del server che quello del frame
+                if server_timestamp and timestamp:
+                    self._monitor_synchronization_timing(pattern_idx, server_timestamp, timestamp)
+
+                    # Calcola latenza di acquisizione
+                    acq_delay = timestamp - server_timestamp
+                    if acq_delay > 0.2:  # 200ms
+                        logger.warning(
+                            f"Latenza acquisizione elevata per pattern {pattern_idx}: {acq_delay * 1000:.1f}ms")
+
         except Exception as e:
             logger.error(f"Errore nel callback frame_processed: {e}")
 
@@ -1113,12 +1143,13 @@ class ScanView(QWidget):
             logger.info(f"Richiesta sincronizzazione pattern {pattern_index}")
 
             # Invia comando al server
+            request_time = time.time()  # Aggiungiamo il timestamp della richiesta
             command_success = self.scanner_controller.send_command(
                 self.selected_scanner.device_id,
                 "SYNC_PATTERN",
                 {
                     "pattern_index": pattern_index,
-                    "timestamp": time.time()
+                    "timestamp": request_time
                 }
             )
 
@@ -1133,17 +1164,85 @@ class ScanView(QWidget):
                 timeout=1.0  # Timeout più breve per non rallentare la scansione
             )
 
-            if not response or response.get("status") != "ok":
-                error_msg = "Errore risposta server" if not response else response.get("message", "Errore sconosciuto")
-                logger.error(f"Risposta SYNC_PATTERN non valida: {error_msg}")
+            # Migliorato il controllo della risposta per supportare 'ok' e 'success'
+            if not response:
+                logger.error("Nessuna risposta ricevuta per SYNC_PATTERN")
                 return None
+
+            # Log dettagliato della risposta completa per debug
+            logger.debug(f"Risposta SYNC_PATTERN ricevuta: {response}")
+
+            # Controlla tutti i possibili stati di successo
+            status = response.get("status", "")
+            if status not in ["ok", "success"]:
+                error_msg = response.get("message", "Errore sconosciuto")
+                logger.error(f"Risposta SYNC_PATTERN non valida. Stato: '{status}', Messaggio: '{error_msg}'")
+                return None
+
+            # Verifica che i campi attesi siano presenti
+            if "pattern_index" not in response or "timestamp" not in response:
+                logger.warning("Risposta SYNC_PATTERN mancante di dati essenziali")
+                # Continua comunque, potrebbe essere un problema di versione
+
+            # Monitora i tempi di sincronizzazione
+            server_timestamp = response.get("timestamp", 0)
+            if server_timestamp > 0:
+                self._monitor_synchronization_timing(pattern_index, server_timestamp)
 
             logger.info(f"Pattern {pattern_index} sincronizzato con successo")
             return response
 
         except Exception as e:
             logger.error(f"Errore nella sincronizzazione del pattern {pattern_index}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
+
+    def _monitor_synchronization_timing(self, pattern_index, server_timestamp, capture_timestamp=None):
+        """
+        Monitora i tempi di sincronizzazione per identificare problemi.
+
+        Args:
+            pattern_index: Indice del pattern
+            server_timestamp: Timestamp del server quando il pattern è stato proiettato
+            capture_timestamp: Timestamp locale quando il frame è stato acquisito
+        """
+        now = time.time()
+
+        # Calcola i ritardi
+        server_time_diff = now - server_timestamp
+
+        # Aggiorna statistiche
+        if not hasattr(self, '_sync_stats'):
+            self._sync_stats = {
+                'patterns': 0,
+                'total_server_delay': 0,
+                'max_server_delay': 0,
+                'capture_delays': []
+            }
+
+        self._sync_stats['patterns'] += 1
+        self._sync_stats['total_server_delay'] += server_time_diff
+        self._sync_stats['max_server_delay'] = max(self._sync_stats['max_server_delay'], server_time_diff)
+
+        if capture_timestamp:
+            capture_delay = capture_timestamp - server_timestamp
+            self._sync_stats['capture_delays'].append(capture_delay)
+
+        # Alert su ritardi significativi
+        if server_time_diff > 0.5:  # Ritardo superiore a 500ms
+            logger.warning(
+                f"Ritardo di sincronizzazione elevato per pattern {pattern_index}: {server_time_diff * 1000:.1f}ms")
+
+            # Suggerimenti automatici per problemi
+            if server_time_diff > 1.0:
+                logger.error("Ritardo critico. Possibili cause: rete congestionata, CPU server sovraccarica")
+
+        # Ogni 10 pattern, stampa statistiche di sincronizzazione
+        if self._sync_stats['patterns'] % 10 == 0:
+            avg_delay = self._sync_stats['total_server_delay'] / self._sync_stats['patterns']
+            logger.info(
+                f"Statistiche sincronizzazione: media={avg_delay * 1000:.1f}ms, max={self._sync_stats['max_server_delay'] * 1000:.1f}ms")
 
     def _start_synchronized_scan(self):
         """
