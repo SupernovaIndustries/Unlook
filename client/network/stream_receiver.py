@@ -25,9 +25,11 @@ logger = logging.getLogger(__name__)
 class StreamReceiver(QObject):
     """
     Gestore principale per la ricezione di stream video.
-    Versione migliorata con gestione di dual camera e riconnessione automatica.
+    Versione migliorata con gestione di dual camera, riconnessione automatica,
+    e supporto per frame di scansione 3D.
     """
     frame_received = Signal(int, np.ndarray, float)  # camera_index, frame, timestamp
+    scan_frame_received = Signal(int, np.ndarray, dict)  # camera_index, frame, frame_info
     connected = Signal()
     disconnected = Signal()
     error = Signal(str)  # error_message
@@ -62,6 +64,7 @@ class StreamReceiver(QObject):
 
             # Collega i segnali
             self._receiver_thread.frame_decoded.connect(self._on_frame_decoded)
+            self._receiver_thread.scan_frame_received.connect(self._on_scan_frame_received)
             self._receiver_thread.connection_state_changed.connect(self._on_connection_state_changed)
             self._receiver_thread.error_occurred.connect(self._on_error)
 
@@ -93,6 +96,7 @@ class StreamReceiver(QObject):
             if self._receiver_thread:
                 try:
                     self._receiver_thread.frame_decoded.disconnect()
+                    self._receiver_thread.scan_frame_received.disconnect()
                     self._receiver_thread.connection_state_changed.disconnect()
                     self._receiver_thread.error_occurred.disconnect()
                 except Exception as e:
@@ -153,6 +157,15 @@ class StreamReceiver(QObject):
         # Propaga il segnale
         self.frame_received.emit(camera_index, frame, timestamp)
 
+    @Slot(int, np.ndarray, dict)
+    def _on_scan_frame_received(self, camera_index: int, frame: np.ndarray, frame_info: dict):
+        """Gestisce un frame di scansione ricevuto."""
+        # Aggiorna l'insieme delle camere attive
+        self._cameras_active.add(camera_index)
+
+        # Propaga il segnale
+        self.scan_frame_received.emit(camera_index, frame, frame_info)
+
     @Slot(bool)
     def _on_connection_state_changed(self, connected: bool):
         """Gestisce il cambiamento dello stato della connessione."""
@@ -175,9 +188,11 @@ class StreamReceiverThread(QThread):
     """
     Thread dedicato per ricevere lo stream video senza buffering.
     Processa ed emette ogni frame direttamente senza code intermedie.
-    Versione ottimizzata con riconnessione automatica e gestione robusta degli errori.
+    Versione ottimizzata con riconnessione automatica, gestione robusta degli errori,
+    e supporto per frame di scansione 3D.
     """
     frame_decoded = Signal(int, np.ndarray, float)  # camera_index, frame, timestamp
+    scan_frame_received = Signal(int, np.ndarray, dict)  # camera_index, frame, frame_info
     connection_state_changed = Signal(bool)  # connected
     error_occurred = Signal(str)  # error_message
 
@@ -300,6 +315,10 @@ class StreamReceiverThread(QThread):
                             camera_index = header.get("camera")
                             timestamp = header.get("timestamp")
                             format_str = header.get("format")
+
+                            # Verifica se questo è un frame di scansione
+                            is_scan_frame = header.get("is_scan_frame", False)
+
                         except json.JSONDecodeError:
                             logger.warning("Header JSON non valido")
                             continue
@@ -340,8 +359,30 @@ class StreamReceiverThread(QThread):
                                     logger.warning(f"Decodifica fallita per frame della camera {camera_index}")
                                     continue
 
-                                # Emetti il frame decodificato direttamente
-                                self.frame_decoded.emit(camera_index, frame, timestamp)
+                                # Se è un frame di scansione, emetti il segnale specifico
+                                if is_scan_frame:
+                                    # Estraiamo le informazioni aggiuntive per i frame di scansione
+                                    scan_id = header.get("scan_id")
+                                    pattern_index = header.get("pattern_index")
+                                    pattern_name = header.get("pattern_name")
+
+                                    # Creiamo un dizionario con le informazioni del frame
+                                    frame_info = {
+                                        "scan_id": scan_id,
+                                        "pattern_index": pattern_index,
+                                        "pattern_name": pattern_name,
+                                        "timestamp": timestamp
+                                    }
+
+                                    # Emetti il segnale specifico per i frame di scansione
+                                    self.scan_frame_received.emit(camera_index, frame, frame_info)
+
+                                    if pattern_index is not None and pattern_index % 5 == 0:
+                                        logger.info(
+                                            f"Frame di scansione {pattern_index} ricevuto per camera {camera_index}")
+                                else:
+                                    # Emetti il frame decodificato direttamente
+                                    self.frame_decoded.emit(camera_index, frame, timestamp)
 
                             except Exception as decode_error:
                                 logger.warning(f"Errore nella decodifica: {decode_error}")

@@ -545,7 +545,7 @@ class ScanManager:
                                  right_frame_data: bytes) -> bool:
         """
         Notifica il client di nuovi frame acquisiti durante la scansione.
-        Versione semplificata con socket dedicato per garantire maggiore affidabilità.
+        Versione migliorata che usa lo stream socket esistente invece di crearne uno dedicato.
 
         Args:
             frame_info: Informazioni sul frame (indice, nome pattern, timestamp)
@@ -556,7 +556,6 @@ class ScanManager:
             True se la notifica è stata inviata con successo, False altrimenti
         """
         try:
-            import zmq
             pattern_index = frame_info.get('pattern_index', 'sconosciuto')
             logger.info(f"Tentativo invio frame {pattern_index} al client")
 
@@ -565,44 +564,53 @@ class ScanManager:
                 logger.warning("Nessun riferimento al server disponibile")
                 return False
 
-            # Codifica i dati in base64 per la trasmissione
-            import base64
-            left_b64 = base64.b64encode(left_frame_data).decode('utf-8')
-            right_b64 = base64.b64encode(right_frame_data).decode('utf-8')
+            # Utilizziamo il socket di streaming esistente invece di crearne uno dedicato
+            if not hasattr(self.server, 'stream_socket') or not self.server.stream_socket:
+                logger.error("Socket di streaming non disponibile")
+                return False
 
-            # Prepara il messaggio
-            message = {
-                "type": "SCAN_FRAME",
-                "frame_info": frame_info,
-                "left_frame": left_b64,
-                "right_frame": right_b64,
-                "scan_id": getattr(self._scan_controller, 'current_scan_id', None),
-                "timestamp": time.time()
-            }
-
-            # Usa un socket dedicato PUSH per l'invio dei frame
-            # Questo approccio è più affidabile rispetto ai metodi precedenti
+            # Invia il frame sinistro
             try:
-                # Inizializza il socket se non esiste
-                if not hasattr(self, '_frame_socket'):
-                    context = zmq.Context.instance()
-                    self._frame_socket = context.socket(zmq.PUSH)
-                    # Imposta timeout più lunghi per evitare blocchi
-                    self._frame_socket.setsockopt(zmq.SNDTIMEO, 2000)  # 2 secondi
-                    # Imposta linger a 0 per evitare blocchi alla chiusura
-                    self._frame_socket.setsockopt(zmq.LINGER, 0)
-                    # Porta dedicata per frame scan: porta comandi + 2
-                    frame_port = self.server.config["server"]["command_port"] + 2
-                    self._frame_socket.bind(f"tcp://*:{frame_port}")
-                    logger.info(f"Socket dedicato per frame creato sulla porta {frame_port}")
+                # Crea l'header con metadata che identifica questo come frame di scansione
+                left_header = {
+                    "camera": 0,  # Camera sinistra
+                    "frame": pattern_index,
+                    "timestamp": time.time(),
+                    "format": "jpeg",
+                    "is_scan_frame": True,  # Flag per identificare i frame di scansione
+                    "scan_id": frame_info.get('scan_id', getattr(self, 'current_scan_id', None)),
+                    "pattern_index": pattern_index,
+                    "pattern_name": frame_info.get('pattern_name', '')
+                }
 
-                # Invia il messaggio
-                self._frame_socket.send_json(message)
-                logger.info(f"Frame {pattern_index} inviato tramite socket dedicato")
+                # Invia header e dati usando lo stesso pattern dello streaming video
+                self.server.stream_socket.send_json(left_header, zmq.SNDMORE)
+                self.server.stream_socket.send(left_frame_data, copy=False)
+
+                # Breve pausa per evitare sovraccarico del socket
+                time.sleep(0.01)
+
+                # Crea l'header per il frame destro
+                right_header = {
+                    "camera": 1,  # Camera destra
+                    "frame": pattern_index,
+                    "timestamp": time.time(),
+                    "format": "jpeg",
+                    "is_scan_frame": True,  # Flag per identificare i frame di scansione
+                    "scan_id": frame_info.get('scan_id', getattr(self, 'current_scan_id', None)),
+                    "pattern_index": pattern_index,
+                    "pattern_name": frame_info.get('pattern_name', '')
+                }
+
+                # Invia header e dati usando lo stesso pattern dello streaming video
+                self.server.stream_socket.send_json(right_header, zmq.SNDMORE)
+                self.server.stream_socket.send(right_frame_data, copy=False)
+
+                logger.info(f"Frame {pattern_index} inviato tramite socket di streaming")
                 return True
 
-            except Exception as e:
-                logger.error(f"Errore nell'invio tramite socket dedicato: {e}")
+            except zmq.ZMQError as e:
+                logger.error(f"Errore ZMQ nell'invio frame: {e}")
                 return False
 
         except Exception as e:
@@ -706,7 +714,7 @@ class ScanManager:
     def _capture_frame_callback(self, pattern_index: int) -> Tuple[np.ndarray, np.ndarray]:
         """
         Callback per l'acquisizione dei frame dalle camere e invio al client.
-        Versione migliorata con maggiore robustezza.
+        Versione migliorata con maggiore robustezza e integrazione con lo streaming.
 
         Args:
             pattern_index: Indice del pattern corrente
@@ -751,45 +759,43 @@ class ScanManager:
                 return (None, None)
 
             # Converti il formato se necessario
-            if len(left_frame.shape) == 3 and cam_info.get("mode") == "grayscale":
-                left_frame = cv2.cvtColor(left_frame, cv2.COLOR_RGB2GRAY)
+            for cam_info in self.server.cameras:
+                if cam_info["name"] == "left" and len(left_frame.shape) == 3 and cam_info.get("mode") == "grayscale":
+                    left_frame = cv2.cvtColor(left_frame, cv2.COLOR_RGB2GRAY)
+                elif cam_info["name"] == "right" and len(right_frame.shape) == 3 and cam_info.get(
+                        "mode") == "grayscale":
+                    right_frame = cv2.cvtColor(right_frame, cv2.COLOR_RGB2GRAY)
 
-            if len(right_frame.shape) == 3 and cam_info.get("mode") == "grayscale":
-                right_frame = cv2.cvtColor(right_frame, cv2.COLOR_RGB2GRAY)
+            # Compressione JPEG degli frame per l'invio
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 90]
+            _, left_encoded = cv2.imencode('.jpg', left_frame, encode_params)
+            _, right_encoded = cv2.imencode('.jpg', right_frame, encode_params)
 
-            # Tenta di inviare i frame al client in formato JPEG
-            try:
-                # Compressione JPEG degli frame
-                encode_params = [cv2.IMWRITE_JPEG_QUALITY, 90]
-                _, left_encoded = cv2.imencode('.jpg', left_frame, encode_params)
-                _, right_encoded = cv2.imencode('.jpg', right_frame, encode_params)
+            # Determina il nome del pattern in base all'indice
+            pattern_name = ""
+            if pattern_index == 0:
+                pattern_name = "white"
+            elif pattern_index == 1:
+                pattern_name = "black"
+            elif pattern_index < 2 + self._scan_config['num_patterns']:
+                pattern_name = f"vertical_{pattern_index - 2}"
+            else:
+                pattern_name = f"horizontal_{pattern_index - 2 - self._scan_config['num_patterns']}"
 
-                # Determina il nome del pattern in base all'indice
-                pattern_name = ""
-                if pattern_index == 0:
-                    pattern_name = "white"
-                elif pattern_index == 1:
-                    pattern_name = "black"
-                elif pattern_index < 2 + self._scan_config['num_patterns']:
-                    pattern_name = f"vertical_{pattern_index - 2}"
-                else:
-                    pattern_name = f"horizontal_{pattern_index - 2 - self._scan_config['num_patterns']}"
+            # Informazioni sul frame
+            frame_info = {
+                "pattern_index": pattern_index,
+                "pattern_name": pattern_name,
+                "scan_id": getattr(self, 'current_scan_id', None),
+                "timestamp": time.time()
+            }
 
-                # Informazioni sul frame
-                frame_info = {
-                    "pattern_index": pattern_index,
-                    "pattern_name": pattern_name,
-                    "timestamp": time.time()
-                }
-
-                # Invio dei frame al client
-                self.notify_client_new_frames(
-                    frame_info,
-                    left_encoded.tobytes(),
-                    right_encoded.tobytes()
-                )
-            except Exception as e:
-                logger.error(f"Errore nell'invio dei frame al client: {e}")
+            # Invio dei frame al client tramite il socket di streaming
+            self.notify_client_new_frames(
+                frame_info,
+                left_encoded.tobytes(),
+                right_encoded.tobytes()
+            )
 
             return (left_frame, right_frame)
 
