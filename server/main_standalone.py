@@ -1590,9 +1590,9 @@ class UnLookServer:
                     # Calcola il prossimo tempo di acquisizione
                     next_frame_time = current_time + current_interval
 
-                    # Cattura il frame con timeout per evitare blocchi
+                    # Cattura il frame - CORRETTO: senza timeout che non è supportato
                     try:
-                        frame = camera.capture_array(timeout=0.05)  # 50ms timeout
+                        frame = camera.capture_array()  # Rimosso il parametro timeout
                     except Exception as capture_err:
                         logger.error(f"Errore nella cattura: {capture_err}")
                         time.sleep(0.01)
@@ -1694,6 +1694,41 @@ class UnLookServer:
         finally:
             logger.info(f"Thread di streaming camera {camera_index} terminato dopo {frame_count} frame")
 
+    def _safe_capture_with_timeout(self, camera, timeout=0.1):
+        """
+        Cattura un frame con timeout usando un thread separato.
+
+        Args:
+            camera: Oggetto Picamera2
+            timeout: Timeout in secondi
+
+        Returns:
+            Frame acquisito o None in caso di timeout
+        """
+        result = [None]
+
+        def capture_thread():
+            try:
+                result[0] = camera.capture_array()
+            except Exception as e:
+                logger.error(f"Errore nella cattura: {e}")
+                result[0] = None
+
+        # Avvia thread di cattura
+        t = threading.Thread(target=capture_thread)
+        t.daemon = True
+        t.start()
+
+        # Attendi con timeout
+        t.join(timeout)
+
+        # Se il thread è ancora vivo, la cattura è in timeout
+        if t.is_alive():
+            logger.warning("Timeout nella cattura del frame")
+            return None
+
+        return result[0]
+    
     def _capture_frames(self) -> bool:
         """
         Cattura un singolo frame da tutte le camere attive.
