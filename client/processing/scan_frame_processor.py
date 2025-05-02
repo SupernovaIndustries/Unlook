@@ -107,6 +107,9 @@ class ScanFrameProcessor:
         except Exception as e:
             logger.error(f"Errore nel salvataggio della configurazione: {e}")
 
+        # Avvia l'elaborazione in tempo reale
+        self._start_realtime_processing()
+
         logger.info(f"Iniziata nuova sessione di scansione con ID: {scan_id}")
         return scan_id
 
@@ -274,6 +277,10 @@ class ScanFrameProcessor:
             # Inizializza le strutture dati per l'elaborazione
             self._realtime_pointcloud = None
             self._realtime_processing_thread = None
+            self._pointcloud_lock = threading.Lock()
+
+            # Flag per tracciare lo stato di elaborazione realtime
+            self._realtime_processing_active = True
 
             # Avvia un thread per l'elaborazione in background
             import threading
@@ -289,12 +296,30 @@ class ScanFrameProcessor:
                     # Configura le callback
                     def progress_callback(progress, message):
                         logger.debug(f"Elaborazione in tempo reale: {progress}%, {message}")
+                        if self._progress_callback:
+                            self._progress_callback({
+                                "progress": progress,
+                                "message": message,
+                                "state": "TRIANGULATING",
+                                "frames_total": sum(self.frame_counters.values())
+                            })
 
                     def completion_callback(success, message, result):
                         logger.info(f"Aggiornamento nuvola di punti: {message}")
                         if success and result is not None:
                             with self._pointcloud_lock:
                                 self._realtime_pointcloud = result
+                                # Notifica nuova nuvola disponibile
+                                if hasattr(self, "_frame_callback") and self._frame_callback:
+                                    try:
+                                        self._frame_callback(-1, -1, {
+                                            "type": "pointcloud_update",
+                                            "pointcloud": result,
+                                            "num_points": len(result),
+                                            "timestamp": time.time()
+                                        })
+                                    except Exception as e:
+                                        logger.error(f"Errore nella callback pointcloud: {e}")
 
                     processor.set_callbacks(progress_callback, completion_callback)
 
@@ -303,25 +328,71 @@ class ScanFrameProcessor:
                     temp_dir = tempfile.mkdtemp(prefix="unlook_realtime_")
                     temp_path = Path(temp_dir)
 
-                    # Loop di elaborazione
+                    # Loop di elaborazione con controllo più frequente
                     last_processed_pattern = -1
-                    while self.is_scanning:
+                    min_patterns_for_update = 4  # Richiede almeno 4 pattern per un aggiornamento (2 white/black + 2 pattern)
+
+                    update_interval = 2  # Aggiorna ogni 2 nuovi pattern
+
+                    while self.is_scanning and self._realtime_processing_active:
                         try:
                             # Ottieni tutti i pattern disponibili
                             pattern_indices = sorted(self.pattern_frames.keys())
 
-                            # Verifica se ci sono nuovi pattern da elaborare
-                            if pattern_indices and pattern_indices[-1] > last_processed_pattern:
+                            # Verifica se abbiamo white+black+almeno 2 pattern
+                            white_black_present = False
+                            if 0 in pattern_indices and 1 in pattern_indices:
+                                white_black_present = (0 in self.pattern_frames and
+                                                       0 in self.pattern_frames[0] and
+                                                       1 in self.pattern_frames[0] and
+                                                       1 in self.pattern_frames and
+                                                       0 in self.pattern_frames[1] and
+                                                       1 in self.pattern_frames[1])
+
+                            # Se abbiamo un numero sufficiente di nuovi pattern e i frame di riferimento
+                            if (pattern_indices and
+                                    max(pattern_indices) >= min_patterns_for_update and
+                                    white_black_present and
+                                    max(pattern_indices) > last_processed_pattern and
+                                    (max(pattern_indices) - last_processed_pattern >= update_interval or
+                                     last_processed_pattern < min_patterns_for_update)):
+
+                                logger.info(f"Avvio elaborazione incrementale con {len(pattern_indices)} pattern")
+
                                 # Prepara i dati per l'elaborazione
-                                for idx in range(last_processed_pattern + 1, pattern_indices[-1] + 1):
+                                # Prima elimina eventuali file precedenti dalla directory temporanea
+                                for f in os.listdir(temp_dir):
+                                    try:
+                                        os.remove(os.path.join(temp_dir, f))
+                                    except:
+                                        pass
+
+                                # Ricrea le sottodirectory
+                                left_dir = temp_path / "left"
+                                right_dir = temp_path / "right"
+                                left_dir.mkdir(exist_ok=True)
+                                right_dir.mkdir(exist_ok=True)
+
+                                # Salva i frame di riferimento
+                                if 0 in self.pattern_frames and 1 in self.pattern_frames:
+                                    # Salva white frames (pattern 0)
+                                    if 0 in self.pattern_frames[0] and 1 in self.pattern_frames[0]:
+                                        cv2.imwrite(str(left_dir / "0000_white.png"), self.pattern_frames[0][0])
+                                        cv2.imwrite(str(right_dir / "0000_white.png"), self.pattern_frames[0][1])
+
+                                    # Salva black frames (pattern 1)
+                                    if 0 in self.pattern_frames[1] and 1 in self.pattern_frames[1]:
+                                        cv2.imwrite(str(left_dir / "0001_black.png"), self.pattern_frames[1][0])
+                                        cv2.imwrite(str(right_dir / "0001_black.png"), self.pattern_frames[1][1])
+
+                                # Salva pattern frames (da pattern 2 in poi)
+                                num_patterns_saved = 0
+                                for idx in pattern_indices:
+                                    if idx < 2:  # Salta white e black che abbiamo già salvato
+                                        continue
+
                                     if idx in self.pattern_frames and 0 in self.pattern_frames[idx] and 1 in \
                                             self.pattern_frames[idx]:
-                                        # Salva temporaneamente i frame per l'elaborazione
-                                        left_dir = temp_path / "left"
-                                        right_dir = temp_path / "right"
-                                        left_dir.mkdir(exist_ok=True)
-                                        right_dir.mkdir(exist_ok=True)
-
                                         # Ottieni i frame
                                         left_frame = self.pattern_frames[idx][0]
                                         right_frame = self.pattern_frames[idx][1]
@@ -332,36 +403,45 @@ class ScanFrameProcessor:
                                         # Salva i frame temporaneamente
                                         cv2.imwrite(str(left_dir / f"{idx:04d}_{pattern_name}.png"), left_frame)
                                         cv2.imwrite(str(right_dir / f"{idx:04d}_{pattern_name}.png"), right_frame)
+                                        num_patterns_saved += 1
 
                                 # Aggiorna l'ultimo pattern elaborato
-                                last_processed_pattern = pattern_indices[-1]
+                                last_processed_pattern = max(pattern_indices)
 
-                                # Carica e elabora i dati
-                                processor.load_local_scan(temp_dir)
-                                processor.process_scan(use_threading=False)
+                                # Se abbiamo salvato abbastanza pattern, elabora
+                                if num_patterns_saved >= 2:  # Almeno 2 pattern oltre a white/black
+                                    logger.info(f"Elaborazione di {num_patterns_saved} pattern...")
 
-                                # Aggiungi un ritardo per non sovraccaricare la CPU
-                                time.sleep(0.5)
-                            else:
-                                # Nessun nuovo pattern, attendi
-                                time.sleep(0.2)
+                                    # Carica e elabora i dati
+                                    processor.load_local_scan(temp_dir)
+
+                                    # Avvia elaborazione con flag per elaborazione incrementale
+                                    processor.process_scan(use_threading=False, incremental=True)
+
+                                    logger.info(f"Elaborazione incrementale completata")
+
+                            # Pausa per ridurre carico CPU
+                            time.sleep(0.5)
 
                         except Exception as e:
                             logger.error(f"Errore nell'elaborazione in tempo reale: {e}")
+                            import traceback
+                            logger.error(f"Traceback: {traceback.format_exc()}")
                             time.sleep(1.0)  # Pausa più lunga in caso di errore
 
                     # Pulizia
-                    import shutil
-                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    try:
+                        import shutil
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                    except:
+                        pass
+
                     logger.info("Thread di elaborazione in tempo reale terminato")
 
                 except Exception as e:
                     logger.error(f"Errore fatale nel thread di elaborazione in tempo reale: {e}")
                     import traceback
                     logger.error(f"Traceback: {traceback.format_exc()}")
-
-            # Crea il mutex per proteggere l'accesso alla nuvola di punti
-            self._pointcloud_lock = threading.Lock()
 
             # Avvia il thread
             self._realtime_processing_thread = threading.Thread(target=realtime_processing_thread)

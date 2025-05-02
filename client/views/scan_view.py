@@ -117,9 +117,332 @@ try:
 except ImportError:
     OPENCV_AVAILABLE = False
 
+try:
+    from PyQt5.QtWebEngineWidgets import QWebEngineView
+    WEBENGINE_AVAILABLE = True
+except ImportError:
+    try:
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+        WEBENGINE_AVAILABLE = True
+    except ImportError:
+        WEBENGINE_AVAILABLE = False
+        logger.warning("QtWebEngine non disponibile. Sarà usata una visualizzazione 3D semplificata.")
+
 # Configura logging
 logger = logging.getLogger(__name__)
 
+
+class RealtimeViewer3D(QWidget):
+    """Widget per la visualizzazione in tempo reale della nuvola di punti 3D."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.pointcloud = None
+        self.last_update_time = 0
+        self._setup_ui()
+
+    def _setup_ui(self):
+        """Configura l'interfaccia utente del visualizzatore."""
+        layout = QVBoxLayout(self)
+
+        # Usa WebEngine se disponibile per una visualizzazione 3D interattiva
+        if WEBENGINE_AVAILABLE:
+            self.web_view = QWebEngineView()
+            self.web_view.setMinimumHeight(300)
+            layout.addWidget(self.web_view)
+
+            # Carica una pagina HTML con Three.js per la visualizzazione
+            self._load_threejs_viewer()
+        else:
+            # Fallback a un semplice widget di visualizzazione
+            self.view_label = QLabel("Visualizzazione nuvola di punti")
+            self.view_label.setAlignment(Qt.AlignCenter)
+            self.view_label.setMinimumHeight(300)
+            self.view_label.setStyleSheet("background-color: #f0f0f0; border: 1px solid #ccc;")
+            layout.addWidget(self.view_label)
+
+        # Aggiunge informazioni sulla nuvola di punti
+        self.info_label = QLabel("Nessuna nuvola di punti disponibile")
+        self.info_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.info_label)
+
+        # Aggiungi controlli per la visualizzazione
+        controls_layout = QHBoxLayout()
+
+        self.center_button = QPushButton("Centra Vista")
+        self.center_button.clicked.connect(self._center_view)
+
+        self.reset_button = QPushButton("Reset")
+        self.reset_button.clicked.connect(self._reset_view)
+
+        controls_layout.addWidget(self.center_button)
+        controls_layout.addWidget(self.reset_button)
+
+        layout.addLayout(controls_layout)
+
+    def _load_threejs_viewer(self):
+        """Carica il visualizzatore Three.js."""
+        if not hasattr(self, 'web_view'):
+            return
+
+        # HTML base per il visualizzatore
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>UnLook 3D Viewer</title>
+            <style>
+                body { margin: 0; overflow: hidden; }
+                canvas { width: 100%; height: 100%; display: block; }
+            </style>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+            <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js"></script>
+        </head>
+        <body>
+            <script>
+                // Variabili globali
+                let scene, camera, renderer, controls;
+                let pointcloud;
+
+                // Inizializza la scena
+                function init() {
+                    // Crea scena
+                    scene = new THREE.Scene();
+                    scene.background = new THREE.Color(0xf0f0f0);
+
+                    // Crea camera
+                    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                    camera.position.z = 200;
+
+                    // Crea renderer
+                    renderer = new THREE.WebGLRenderer({ antialias: true });
+                    renderer.setSize(window.innerWidth, window.innerHeight);
+                    document.body.appendChild(renderer.domElement);
+
+                    // Aggiungi controlli
+                    controls = new THREE.OrbitControls(camera, renderer.domElement);
+                    controls.enableDamping = true;
+                    controls.dampingFactor = 0.25;
+
+                    // Aggiungi luci
+                    const ambientLight = new THREE.AmbientLight(0xcccccc, 0.5);
+                    scene.add(ambientLight);
+
+                    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                    directionalLight.position.set(1, 1, 1).normalize();
+                    scene.add(directionalLight);
+
+                    // Aggiungi griglia e assi
+                    const gridHelper = new THREE.GridHelper(200, 20);
+                    scene.add(gridHelper);
+
+                    const axesHelper = new THREE.AxesHelper(100);
+                    scene.add(axesHelper);
+
+                    // Gestisci resize
+                    window.addEventListener('resize', onWindowResize, false);
+
+                    // Avvia animazione
+                    animate();
+                }
+
+                // Aggiorna dimensioni al resize
+                function onWindowResize() {
+                    camera.aspect = window.innerWidth / window.innerHeight;
+                    camera.updateProjectionMatrix();
+                    renderer.setSize(window.innerWidth, window.innerHeight);
+                }
+
+                // Loop di animazione
+                function animate() {
+                    requestAnimationFrame(animate);
+                    controls.update();
+                    renderer.render(scene, camera);
+                }
+
+                // Funzione per aggiornare la nuvola di punti
+                function updatePointCloud(points) {
+                    // Rimuovi nuvola esistente
+                    if (pointcloud) {
+                        scene.remove(pointcloud);
+                    }
+
+                    if (!points || points.length === 0) {
+                        return;
+                    }
+
+                    // Crea geometria
+                    const geometry = new THREE.BufferGeometry();
+                    const vertices = new Float32Array(points.length * 3);
+
+                    for (let i = 0; i < points.length; i++) {
+                        vertices[i*3] = points[i][0];
+                        vertices[i*3+1] = points[i][1];
+                        vertices[i*3+2] = points[i][2];
+                    }
+
+                    geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+
+                    // Crea materiale
+                    const material = new THREE.PointsMaterial({
+                        size: 1.5,
+                        color: 0x0088ff,
+                        sizeAttenuation: true
+                    });
+
+                    // Crea nuvola di punti
+                    pointcloud = new THREE.Points(geometry, material);
+                    scene.add(pointcloud);
+
+                    // Centra camera sulla nuvola
+                    geometry.computeBoundingSphere();
+                    const center = geometry.boundingSphere.center;
+                    const radius = geometry.boundingSphere.radius;
+
+                    camera.position.set(center.x, center.y, center.z + radius * 2);
+                    controls.target.set(center.x, center.y, center.z);
+                    camera.updateProjectionMatrix();
+                    controls.update();
+                }
+
+                // Funzione per centrare la vista
+                function centerView() {
+                    if (pointcloud) {
+                        const geometry = pointcloud.geometry;
+                        geometry.computeBoundingSphere();
+                        const center = geometry.boundingSphere.center;
+                        const radius = geometry.boundingSphere.radius;
+
+                        controls.target.set(center.x, center.y, center.z);
+                        camera.position.set(center.x, center.y, center.z + radius * 2);
+                        camera.updateProjectionMatrix();
+                        controls.update();
+                    }
+                }
+
+                // Funzione per resettare la vista
+                function resetView() {
+                    camera.position.set(0, 0, 200);
+                    controls.target.set(0, 0, 0);
+                    camera.updateProjectionMatrix();
+                    controls.update();
+                }
+
+                // Inizializza
+                document.addEventListener('DOMContentLoaded', init);
+            </script>
+        </body>
+        </html>
+        """
+
+        # Carica l'HTML nel widget
+        self.web_view.setHtml(html)
+
+    def update_pointcloud(self, pointcloud):
+        """
+        Aggiorna la nuvola di punti visualizzata.
+
+        Args:
+            pointcloud: Nuvola di punti come array NumPy
+        """
+        # Limita aggiornamenti troppo frequenti (max uno ogni 0.5 secondi)
+        current_time = time.time()
+        if current_time - self.last_update_time < 0.5:
+            return
+
+        self.last_update_time = current_time
+        self.pointcloud = pointcloud
+
+        if pointcloud is None or len(pointcloud) == 0:
+            self.info_label.setText("Nessuna nuvola di punti disponibile")
+            return
+
+        # Aggiorna informazioni
+        self.info_label.setText(f"Nuvola di punti: {len(pointcloud)} punti")
+
+        # Se stiamo usando WebEngine, aggiorna la nuvola nel visualizzatore 3D
+        if WEBENGINE_AVAILABLE and hasattr(self, 'web_view'):
+            # Converti la nuvola in formato JSON per JavaScript
+            import json
+            points_list = pointcloud.tolist()
+
+            # Limita a max 20,000 punti per performance
+            if len(points_list) > 20000:
+                import random
+                points_list = random.sample(points_list, 20000)
+
+            points_json = json.dumps(points_list)
+
+            # Chiama la funzione JavaScript per aggiornare la nuvola
+            js_code = f"updatePointCloud({points_json});"
+            self.web_view.page().runJavaScript(js_code)
+        else:
+            # Se WebEngine non è disponibile, genera un'immagine statica
+            self._update_static_image(pointcloud)
+
+    def _update_static_image(self, pointcloud):
+        """Genera un'immagine statica della nuvola di punti."""
+        if not hasattr(self, 'view_label'):
+            return
+
+        if not OPEN3D_AVAILABLE or pointcloud is None or len(pointcloud) == 0:
+            self.view_label.setText("Visualizzazione 3D non disponibile")
+            return
+
+        try:
+            import tempfile
+
+            # Crea nuvola Open3D
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(pointcloud)
+
+            # Aggiungi un sistema di coordinate per riferimento
+            coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=20)
+
+            # Crea visualizzatore
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(visible=False, width=800, height=600)
+            vis.add_geometry(pcd)
+            vis.add_geometry(coord_frame)
+
+            # Configura vista
+            vis.get_render_option().point_size = 2.0
+            vis.get_render_option().background_color = np.array([0.9, 0.9, 0.9])
+            vis.poll_events()
+            vis.update_renderer()
+
+            # Cattura immagine
+            temp_img = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            vis.capture_screen_image(temp_img.name)
+            vis.destroy_window()
+
+            # Mostra immagine
+            pixmap = QPixmap(temp_img.name)
+            self.view_label.setPixmap(pixmap.scaled(
+                self.view_label.width(), self.view_label.height(),
+                Qt.KeepAspectRatio, Qt.SmoothTransformation
+            ))
+
+            # Elimina file temporaneo
+            try:
+                os.unlink(temp_img.name)
+            except:
+                pass
+
+        except Exception as e:
+            logger.error(f"Errore nella generazione dell'immagine statica: {e}")
+            self.view_label.setText(f"Errore nella visualizzazione: {str(e)}")
+
+    def _center_view(self):
+        """Centra la vista sulla nuvola di punti."""
+        if WEBENGINE_AVAILABLE and hasattr(self, 'web_view'):
+            self.web_view.page().runJavaScript("centerView();")
+
+    def _reset_view(self):
+        """Ripristina la vista predefinita."""
+        if WEBENGINE_AVAILABLE and hasattr(self, 'web_view'):
+            self.web_view.page().runJavaScript("resetView();")
 
 class TestCapabilityWorker(QObject):
     """Worker per eseguire il test delle capacità di scansione in un thread separato."""
@@ -738,6 +1061,10 @@ class ScanView(QWidget):
         placeholder_label.setAlignment(Qt.AlignCenter)
         placeholder_label.setStyleSheet("color: #666;")
         self.results_content_layout.addWidget(placeholder_label)
+
+        # Widget per la visualizzazione 3D in tempo reale
+        self.realtime_viewer = RealtimeViewer3D()
+        results_layout.addWidget(self.realtime_viewer)
 
         results_scroll.setWidget(results_content)
         results_layout.addWidget(results_scroll)
@@ -2681,6 +3008,24 @@ class ScanView(QWidget):
             frame: Frame come array NumPy
             frame_info: Informazioni sul frame (pattern_index, pattern_name, ecc.)
         """
+        # Gestione speciale per aggiornamenti della nuvola di punti
+        if frame_info.get("type") == "pointcloud_update" and hasattr(self, 'realtime_viewer'):
+            try:
+                # Estrai la nuvola di punti e aggiorna il visualizzatore
+                pointcloud = frame_info.get("pointcloud")
+                if pointcloud is not None and len(pointcloud) > 0:
+                    self.realtime_viewer.update_pointcloud(pointcloud)
+                    logger.info(f"Aggiornata visualizzazione con nuvola di {len(pointcloud)} punti")
+
+                    # Abilita pulsanti di interazione durante la scansione
+                    self.view_3d_button.setEnabled(True)
+
+                    # Salva la nuvola corrente per uso futuro
+                    self._current_pointcloud = pointcloud
+                return
+            except Exception as e:
+                logger.error(f"Errore nell'aggiornamento della visualizzazione 3D: {e}")
+
         # Log dettagliato per ogni frame ricevuto
         pattern_index = frame_info.get("pattern_index", -1)
         pattern_name = frame_info.get("pattern_name", "unknown")

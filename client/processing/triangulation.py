@@ -748,12 +748,13 @@ class ScanProcessor:
             logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
-    def process_scan(self, use_threading: bool = True) -> bool:
+    def process_scan(self, use_threading: bool = True, incremental: bool = False) -> bool:
         """
         Process the scan data to generate a 3D point cloud.
 
         Args:
             use_threading: Whether to run processing in a separate thread
+            incremental: Whether this is an incremental processing for real-time visualization
 
         Returns:
             True if processing started successfully, False otherwise
@@ -769,6 +770,9 @@ class ScanProcessor:
         # Reset processing state
         self._processing_complete.clear()
         self._processing_cancelled.clear()
+
+        # Save the incremental flag
+        self._incremental_mode = incremental
 
         if use_threading:
             # Start processing in a separate thread
@@ -827,7 +831,13 @@ class ScanProcessor:
         This is similar to gray code but with progressive refinement and real-time updates.
         """
         try:
-            logger.info("Processing progressive pattern scan with incremental updates")
+            # Flag per distinguere tra modalità completa e incrementale
+            incremental_mode = getattr(self, '_incremental_mode', False)
+
+            if incremental_mode:
+                logger.info("Processing progressive pattern scan in incremental mode")
+            else:
+                logger.info("Processing progressive pattern scan with full resolution")
 
             # Check if we have at least white/black and some pattern images
             if len(self.left_images) < 4:
@@ -843,6 +853,14 @@ class ScanProcessor:
             white_r = cv2.imread(self.right_images[0], cv2.IMREAD_GRAYSCALE)
             black_l = cv2.imread(self.left_images[1], cv2.IMREAD_GRAYSCALE)
             black_r = cv2.imread(self.right_images[1], cv2.IMREAD_GRAYSCALE)
+
+            # Check image sizes
+            if (white_l is None or white_r is None or
+                    black_l is None or black_r is None):
+                logger.error("Failed to load white/black reference images")
+                return False
+
+            logger.info(f"Reference image sizes: white_l={white_l.shape}, white_r={white_r.shape}")
 
             # Rectify reference images
             white_l_rect = cv2.remap(white_l, self.map_x_l, self.map_y_l, cv2.INTER_LINEAR)
@@ -864,8 +882,20 @@ class ScanProcessor:
             disparity_map = np.zeros((height, width), dtype=np.float32)
             confidence_map = np.zeros((height, width), dtype=np.float32)
 
-            # Process pattern images in pairs (horizontal and vertical)
-            pattern_pairs = (len(self.left_images) - 2) // 2  # Number of horizontal/vertical pairs
+            # Calcola il numero di pattern effettivamente disponibili (esclusi white/black)
+            pattern_images = len(self.left_images) - 2
+
+            # In modalità incrementale, potremmo elaborare un numero inferiore di pattern
+            if incremental_mode:
+                # Usiamo tutti i pattern disponibili, ma ottimizziamo per la velocità
+                pattern_pairs = pattern_images // 2  # Consideriamo coppie orizz/vert
+                if pattern_pairs > 8 and incremental_mode:
+                    # In modalità incrementale, limita per maggiore velocità
+                    pattern_pairs = min(8, pattern_pairs)
+            else:
+                pattern_pairs = pattern_images // 2  # Tutte le coppie orizz/vert
+
+            logger.info(f"Processing {pattern_pairs} pattern pairs out of {pattern_images} available patterns")
 
             # Store incremental pointclouds
             incremental_pointclouds = []
@@ -884,29 +914,39 @@ class ScanProcessor:
 
                 # Load and rectify horizontal pattern
                 h_idx = 2 + i
-                h_pattern_l = cv2.imread(self.left_images[h_idx], cv2.IMREAD_GRAYSCALE)
-                h_pattern_r = cv2.imread(self.right_images[h_idx], cv2.IMREAD_GRAYSCALE)
-                h_pattern_l_rect = cv2.remap(h_pattern_l, self.map_x_l, self.map_y_l, cv2.INTER_LINEAR)
-                h_pattern_r_rect = cv2.remap(h_pattern_r, self.map_x_r, self.map_y_r, cv2.INTER_LINEAR)
+                if h_idx < len(self.left_images):
+                    h_pattern_l = cv2.imread(self.left_images[h_idx], cv2.IMREAD_GRAYSCALE)
+                    h_pattern_r = cv2.imread(self.right_images[h_idx], cv2.IMREAD_GRAYSCALE)
+
+                    if h_pattern_l is None or h_pattern_r is None:
+                        logger.warning(f"Failed to load pattern images at index {h_idx}")
+                        continue
+
+                    h_pattern_l_rect = cv2.remap(h_pattern_l, self.map_x_l, self.map_y_l, cv2.INTER_LINEAR)
+                    h_pattern_r_rect = cv2.remap(h_pattern_r, self.map_x_r, self.map_y_r, cv2.INTER_LINEAR)
+
+                    # Process horizontal pattern
+                    self._update_disparity_from_pattern(
+                        h_pattern_l_rect, h_pattern_r_rect,
+                        shadow_mask_l, shadow_mask_r,
+                        disparity_map, confidence_map,
+                        pattern_weight=2 ** i
+                    )
 
                 # Load and rectify vertical pattern if available
                 v_idx = 2 + pattern_pairs + i
                 if v_idx < len(self.left_images):
                     v_pattern_l = cv2.imread(self.left_images[v_idx], cv2.IMREAD_GRAYSCALE)
                     v_pattern_r = cv2.imread(self.right_images[v_idx], cv2.IMREAD_GRAYSCALE)
+
+                    if v_pattern_l is None or v_pattern_r is None:
+                        logger.warning(f"Failed to load pattern images at index {v_idx}")
+                        continue
+
                     v_pattern_l_rect = cv2.remap(v_pattern_l, self.map_x_l, self.map_y_l, cv2.INTER_LINEAR)
                     v_pattern_r_rect = cv2.remap(v_pattern_r, self.map_x_r, self.map_y_r, cv2.INTER_LINEAR)
 
-                # Process horizontal pattern
-                self._update_disparity_from_pattern(
-                    h_pattern_l_rect, h_pattern_r_rect,
-                    shadow_mask_l, shadow_mask_r,
-                    disparity_map, confidence_map,
-                    pattern_weight=2 ** i
-                )
-
-                # Process vertical pattern if available
-                if v_idx < len(self.left_images):
+                    # Process vertical pattern
                     self._update_disparity_from_pattern(
                         v_pattern_l_rect, v_pattern_r_rect,
                         shadow_mask_l, shadow_mask_r,
@@ -915,12 +955,19 @@ class ScanProcessor:
                     )
 
                 # Generate incremental pointcloud every few patterns or at the end
-                if (i > 0 and (i % 3 == 0 or i == pattern_pairs - 1)) and last_reprojection_index != i:
+                # In modalità incrementale, generiamo più frequentemente
+                update_interval = 2 if incremental_mode else 3
+                if ((i > 0 and (i % update_interval == 0 or i == pattern_pairs - 1)) and
+                        last_reprojection_index != i):
                     # Calculate intermediate disparity map
-                    current_disparity = disparity_map / np.maximum(confidence_map, 1e-5)
+                    valid_indices = confidence_map > 0
+                    current_disparity = np.zeros_like(disparity_map)
+                    current_disparity[valid_indices] = disparity_map[valid_indices] / confidence_map[valid_indices]
 
                     # Apply median filter to remove noise
-                    current_disparity = cv2.medianBlur(current_disparity.astype(np.float32), 5)
+                    # In modalità incrementale, usiamo un kernel più piccolo per velocità
+                    kernel_size = 3 if incremental_mode else 5
+                    current_disparity = cv2.medianBlur(current_disparity.astype(np.float32), kernel_size)
 
                     # Reproject to 3D (temporary pointcloud)
                     temp_pointcloud = self._reproject_to_3d_incremental(current_disparity, shadow_mask_l)
@@ -940,32 +987,50 @@ class ScanProcessor:
                     last_reprojection_index = i
 
             # Calculate final disparity map
-            disparity_map = disparity_map / np.maximum(confidence_map, 1e-5)
+            valid_indices = confidence_map > 0
+            disparity_map_final = np.zeros_like(disparity_map)
+            disparity_map_final[valid_indices] = disparity_map[valid_indices] / confidence_map[valid_indices]
 
             # Apply median filter to remove noise
-            disparity_map = cv2.medianBlur(disparity_map.astype(np.float32), 5)
+            kernel_size = 3 if incremental_mode else 5
+            disparity_map_final = cv2.medianBlur(disparity_map_final.astype(np.float32), kernel_size)
 
-            # Save disparity map for visualization
-            disparity_colored = cv2.applyColorMap(
-                cv2.convertScaleAbs(disparity_map,
-                                    alpha=255 / np.max(disparity_map) if np.max(disparity_map) > 0 else 0),
-                cv2.COLORMAP_JET
-            )
-            cv2.imwrite(str(self.scan_dir / "disparity_map.png"), disparity_colored)
+            # Salva mappe di disparità solo in modalità non incrementale
+            if not incremental_mode:
+                # Save disparity map for visualization
+                disparity_colored = cv2.applyColorMap(
+                    cv2.convertScaleAbs(disparity_map_final,
+                                        alpha=255 / np.max(disparity_map_final) if np.max(
+                                            disparity_map_final) > 0 else 0),
+                    cv2.COLORMAP_JET
+                )
+                cv2.imwrite(str(self.scan_dir / "disparity_map.png"), disparity_colored)
 
             # Final reproject to 3D
-            self._reproject_to_3d(disparity_map, shadow_mask_l)
+            if incremental_mode:
+                # In modo incrementale, usiamo la versione rapida
+                final_pointcloud = self._reproject_to_3d_incremental(disparity_map_final, shadow_mask_l)
+                self.pointcloud = final_pointcloud
 
-            return True
+                # Chiamiamo la callback di completamento
+                if self._completion_callback and final_pointcloud is not None:
+                    self._completion_callback(True, "Incremental processing complete", final_pointcloud)
+
+                return True
+            else:
+                # In modalità completa, usiamo la versione standard con tutti i filtri
+                return self._reproject_to_3d(disparity_map_final, shadow_mask_l)
 
         except Exception as e:
             logger.error(f"Error in progressive pattern processing: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
     def _reproject_to_3d_incremental(self, disparity_map, mask):
         """
         Reproject disparity map to 3D points for incremental updates.
-        Similar to _reproject_to_3d but optimized for intermediate results.
+        Optimized for speed in real-time visualization.
 
         Args:
             disparity_map: Current disparity map
@@ -1000,7 +1065,7 @@ class ScanProcessor:
             # Extract valid points
             valid_points = points_3d[mask]
 
-            # Optional: Limit points to reasonable range (e.g., 1m cube around origin)
+            # Limit points to reasonable range
             max_range = 500  # mm
             in_range_mask = (
                     (np.abs(valid_points[:, 0]) < max_range) &
@@ -1015,73 +1080,18 @@ class ScanProcessor:
                 # Random sampling for performance in incremental updates
                 sample_indices = np.random.choice(len(valid_points), 50000, replace=False)
                 valid_points = valid_points[sample_indices]
-
-            logger.info(f"Generated incremental point cloud with {len(valid_points)} points")
-            return valid_points
-
-        except Exception as e:
-            logger.error(f"Error in incremental 3D reprojection: {e}")
-            return None
-
-    def _reproject_to_3d_incremental(self, disparity_map, mask):
-        """
-        Reproject disparity map to 3D points for incremental updates.
-        Similar to _reproject_to_3d but optimized for intermediate results.
-
-        Args:
-            disparity_map: Current disparity map
-            mask: Mask for valid pixels
-
-        Returns:
-            Numpy array of 3D points
-        """
-        try:
-            # Ensure we have valid disparity and calibration
-            if disparity_map is None or self.Q is None:
-                logger.error("Missing disparity map or calibration for reprojection")
+            elif len(valid_points) < 10:
+                # Troppo pochi punti, potrebbe esserci un problema
+                logger.warning("Too few valid points in reprojection, likely an error")
                 return None
 
-            # Create point cloud from disparity map
-            logger.info("Reprojecting to 3D points (incremental)")
-
-            # Apply mask to disparity map
-            masked_disparity = disparity_map.copy()
-            masked_disparity[mask == 0] = 0
-
-            # Reproject to 3D
-            points_3d = cv2.reprojectImageTo3D(masked_disparity, self.Q)
-
-            # Filter invalid points
-            mask = (
-                    ~np.isnan(points_3d).any(axis=2) &
-                    ~np.isinf(points_3d).any(axis=2) &
-                    (mask > 0)
-            )
-
-            # Extract valid points
-            valid_points = points_3d[mask]
-
-            # Optional: Limit points to reasonable range (e.g., 1m cube around origin)
-            max_range = 500  # mm
-            in_range_mask = (
-                    (np.abs(valid_points[:, 0]) < max_range) &
-                    (np.abs(valid_points[:, 1]) < max_range) &
-                    (np.abs(valid_points[:, 2]) < max_range)
-            )
-
-            valid_points = valid_points[in_range_mask]
-
-            # If we have too many points, randomly sample for performance
-            if len(valid_points) > 50000:
-                # Random sampling for performance in incremental updates
-                sample_indices = np.random.choice(len(valid_points), 50000, replace=False)
-                valid_points = valid_points[sample_indices]
-
             logger.info(f"Generated incremental point cloud with {len(valid_points)} points")
             return valid_points
 
         except Exception as e:
             logger.error(f"Error in incremental 3D reprojection: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
 
     def _process_gray_code(self) -> bool:
