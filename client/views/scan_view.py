@@ -1287,7 +1287,7 @@ class ScanView(QWidget):
         # Genera un ID unico per la scansione
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.current_scan_id = f"{scan_name}_{timestamp}"
-        
+
         # Avvia il processore di frame
         self.scan_frame_processor.start_scan(
             scan_id=self.current_scan_id,
@@ -1950,7 +1950,7 @@ class ScanView(QWidget):
     def _update_preview_image(self, scan_dir=None):
         """
         Aggiorna l'anteprima delle immagini durante la scansione in modo più efficiente.
-        Migliora la visualizzazione in tempo reale delle immagini catturate.
+        Migliora la visualizzazione in tempo reale delle immagini catturate e della nuvola di punti.
 
         Args:
             scan_dir: Directory della scansione (opzionale, usa la corrente se None)
@@ -1959,7 +1959,39 @@ class ScanView(QWidget):
             scan_dir = os.path.join(str(self.output_dir), self.current_scan_id)
 
         if not scan_dir or not os.path.isdir(scan_dir):
-            # Prova a trovare immagini direttamente sullo scanner
+            # Prova a ottenere la preview direttamente dal processore di frame
+            if hasattr(self, 'scan_frame_processor') and self.scan_frame_processor:
+                pattern_frames = getattr(self.scan_frame_processor, 'pattern_frames', {})
+                if pattern_frames:
+                    # Trova l'ultimo pattern ricevuto
+                    pattern_indices = sorted(pattern_frames.keys())
+                    if pattern_indices:
+                        latest_idx = pattern_indices[-1]
+                        frames = pattern_frames[latest_idx]
+
+                        # Controlla se abbiamo entrambi i frame
+                        if 0 in frames and 1 in frames:
+                            left_frame = frames[0]
+                            right_frame = frames[1]
+
+                            # Visualizza i frame
+                            self._display_preview_frames(left_frame, right_frame)
+                            return
+
+            # Prova a ottenere la nuvola di punti in tempo reale
+            if hasattr(self, 'scan_frame_processor') and self.scan_frame_processor:
+                if hasattr(self.scan_frame_processor,
+                           '_realtime_pointcloud') and self.scan_frame_processor._realtime_pointcloud is not None:
+                    # Assicurati che il mutex sia disponibile
+                    if hasattr(self.scan_frame_processor, '_pointcloud_lock'):
+                        with self.scan_frame_processor._pointcloud_lock:
+                            pointcloud = self.scan_frame_processor._realtime_pointcloud
+
+                            # Aggiorna la visualizzazione della nuvola di punti
+                            self._display_realtime_pointcloud(pointcloud)
+                            return
+
+            # Se non abbiamo dati in memoria, prova a richiederli dallo scanner
             try:
                 if self.selected_scanner and self.scanner_controller:
                     # Invia un comando per ottenere l'anteprima dell'ultima immagine
@@ -2011,78 +2043,182 @@ class ScanView(QWidget):
 
             # Carica e visualizza le immagini
             if OPENCV_AVAILABLE:
-                # Crea o aggiorna il widget per l'anteprima delle immagini
-                if not hasattr(self, 'preview_widget') or not self.preview_widget:
-                    # Crea un nuovo widget
-                    self.preview_widget = QWidget()
-                    preview_layout = QHBoxLayout(self.preview_widget)
-
-                    self.left_preview = QLabel("Camera sinistra")
-                    self.left_preview.setAlignment(Qt.AlignCenter)
-                    self.left_preview.setMinimumSize(320, 240)
-
-                    self.right_preview = QLabel("Camera destra")
-                    self.right_preview.setAlignment(Qt.AlignCenter)
-                    self.right_preview.setMinimumSize(320, 240)
-
-                    preview_layout.addWidget(self.left_preview)
-                    preview_layout.addWidget(self.right_preview)
-
-                    # Aggiungi il widget all'interfaccia
-                    self.results_content_layout.insertWidget(0, self.preview_widget)
-
-                # Carica e mostra l'immagine sinistra con elaborazione efficiente
                 left_img = cv2.imread(left_image)
-                if left_img is not None:
-                    try:
-                        # Ridimensiona per la visualizzazione
-                        scale = min(320 / left_img.shape[1], 240 / left_img.shape[0])
-                        width = int(left_img.shape[1] * scale)
-                        height = int(left_img.shape[0] * scale)
-                        left_img_resized = cv2.resize(left_img, (width, height), interpolation=cv2.INTER_AREA)
-
-                        # Converti in formato Qt
-                        left_img_rgb = cv2.cvtColor(left_img_resized, cv2.COLOR_BGR2RGB)
-                        h, w, c = left_img_rgb.shape
-                        left_qimg = QImage(left_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
-                        left_pixmap = QPixmap.fromImage(left_qimg)
-
-                        # Mostra l'immagine
-                        self.left_preview.setPixmap(left_pixmap)
-                        self.left_preview.setText("")
-                    except Exception as e:
-                        logger.debug(f"Errore elaborazione immagine sinistra: {e}")
-
-                # Carica e mostra l'immagine destra
                 right_img = cv2.imread(right_image)
-                if right_img is not None:
-                    try:
-                        # Ridimensiona per la visualizzazione
-                        scale = min(320 / right_img.shape[1], 240 / right_img.shape[0])
-                        width = int(right_img.shape[1] * scale)
-                        height = int(right_img.shape[0] * scale)
-                        right_img_resized = cv2.resize(right_img, (width, height), interpolation=cv2.INTER_AREA)
 
-                        # Converti in formato Qt
-                        right_img_rgb = cv2.cvtColor(right_img_resized, cv2.COLOR_BGR2RGB)
-                        h, w, c = right_img_rgb.shape
-                        right_qimg = QImage(right_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
-                        right_pixmap = QPixmap.fromImage(right_qimg)
-
-                        # Mostra l'immagine
-                        self.right_preview.setPixmap(right_pixmap)
-                        self.right_preview.setText("")
-                    except Exception as e:
-                        logger.debug(f"Errore elaborazione immagine destra: {e}")
-
-                # Mostra il widget di anteprima
-                self.preview_widget.setVisible(True)
-
-                # Aggiorna la schermata
-                QApplication.processEvents()
+                if left_img is not None and right_img is not None:
+                    self._display_preview_frames(left_img, right_img)
 
         except Exception as e:
             logger.error(f"Errore nell'aggiornamento delle anteprime: {e}")
+
+    def _display_preview_frames(self, left_img, right_img):
+        """
+        Visualizza i frame di anteprima nell'interfaccia utente in modo efficiente.
+
+        Args:
+            left_img: Frame della camera sinistra
+            right_img: Frame della camera destra
+        """
+        try:
+            # Crea o aggiorna il widget per l'anteprima
+            if not hasattr(self, 'preview_widget') or not self.preview_widget:
+                # Crea un nuovo widget
+                self.preview_widget = QWidget()
+                preview_layout = QHBoxLayout(self.preview_widget)
+
+                self.left_preview = QLabel("Camera sinistra")
+                self.left_preview.setAlignment(Qt.AlignCenter)
+                self.left_preview.setMinimumSize(320, 240)
+
+                self.right_preview = QLabel("Camera destra")
+                self.right_preview.setAlignment(Qt.AlignCenter)
+                self.right_preview.setMinimumSize(320, 240)
+
+                preview_layout.addWidget(self.left_preview)
+                preview_layout.addWidget(self.right_preview)
+
+                # Aggiungi il widget all'interfaccia
+                self.results_content_layout.insertWidget(0, self.preview_widget)
+
+            # OTTIMIZZAZIONE: Ridimensiona una sola volta se le dimensioni sono uguali
+            # Questo evita calcoli ripetuti di scaling quando non necessario
+            if left_img.shape[:2] == right_img.shape[:2]:
+                # Ridimensiona per la visualizzazione
+                scale = min(320 / left_img.shape[1], 240 / left_img.shape[0])
+                width = int(left_img.shape[1] * scale)
+                height = int(left_img.shape[0] * scale)
+
+                # Ridimensiona le immagini
+                left_img_resized = cv2.resize(left_img, (width, height), interpolation=cv2.INTER_AREA)
+                right_img_resized = cv2.resize(right_img, (width, height), interpolation=cv2.INTER_AREA)
+
+                # Converti in formato Qt
+                left_img_rgb = cv2.cvtColor(left_img_resized, cv2.COLOR_BGR2RGB)
+                right_img_rgb = cv2.cvtColor(right_img_resized, cv2.COLOR_BGR2RGB)
+
+                # Crea QImage e QPixmap
+                h, w, c = left_img_rgb.shape
+                left_qimg = QImage(left_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
+                left_pixmap = QPixmap.fromImage(left_qimg)
+
+                h, w, c = right_img_rgb.shape
+                right_qimg = QImage(right_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
+                right_pixmap = QPixmap.fromImage(right_qimg)
+            else:
+                # Ridimensiona separatamente
+                # Camera sinistra
+                scale_left = min(320 / left_img.shape[1], 240 / left_img.shape[0])
+                width_left = int(left_img.shape[1] * scale_left)
+                height_left = int(left_img.shape[0] * scale_left)
+                left_img_resized = cv2.resize(left_img, (width_left, height_left), interpolation=cv2.INTER_AREA)
+                left_img_rgb = cv2.cvtColor(left_img_resized, cv2.COLOR_BGR2RGB)
+                h, w, c = left_img_rgb.shape
+                left_qimg = QImage(left_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
+                left_pixmap = QPixmap.fromImage(left_qimg)
+
+                # Camera destra
+                scale_right = min(320 / right_img.shape[1], 240 / right_img.shape[0])
+                width_right = int(right_img.shape[1] * scale_right)
+                height_right = int(right_img.shape[0] * scale_right)
+                right_img_resized = cv2.resize(right_img, (width_right, height_right), interpolation=cv2.INTER_AREA)
+                right_img_rgb = cv2.cvtColor(right_img_resized, cv2.COLOR_BGR2RGB)
+                h, w, c = right_img_rgb.shape
+                right_qimg = QImage(right_img_rgb.data, w, h, w * c, QImage.Format_RGB888)
+                right_pixmap = QPixmap.fromImage(right_qimg)
+
+            # Mostra le immagini
+            self.left_preview.setPixmap(left_pixmap)
+            self.left_preview.setText("")
+
+            self.right_preview.setPixmap(right_pixmap)
+            self.right_preview.setText("")
+
+            # Mostra il widget di anteprima
+            self.preview_widget.setVisible(True)
+
+            # Aggiorna la schermata
+            QApplication.processEvents()
+
+        except Exception as e:
+            logger.error(f"Errore nella visualizzazione dei frame di anteprima: {e}")
+
+    def _display_realtime_pointcloud(self, pointcloud):
+        """
+        Visualizza la nuvola di punti in tempo reale.
+
+        Args:
+            pointcloud: Nuvola di punti come array numpy
+        """
+        if not OPEN3D_AVAILABLE or pointcloud is None or len(pointcloud) == 0:
+            return
+
+        try:
+            # Crea o aggiorna il widget per la visualizzazione 3D
+            if not hasattr(self, 'pointcloud_preview') or not self.pointcloud_preview:
+                # Crea un nuovo widget
+                self.pointcloud_preview = QLabel("Nuvola di punti in tempo reale")
+                self.pointcloud_preview.setAlignment(Qt.AlignCenter)
+                self.pointcloud_preview.setMinimumSize(640, 480)
+
+                # Aggiungi il widget all'interfaccia sotto le anteprime
+                if hasattr(self, 'preview_widget') and self.preview_widget:
+                    idx = self.results_content_layout.indexOf(self.preview_widget)
+                    self.results_content_layout.insertWidget(idx + 1, self.pointcloud_preview)
+                else:
+                    self.results_content_layout.insertWidget(0, self.pointcloud_preview)
+
+            # Genera un'immagine della nuvola di punti
+            import tempfile
+
+            # Crea una directory temporanea se non esiste
+            if not hasattr(self, '_temp_dir') or not os.path.isdir(self._temp_dir):
+                self._temp_dir = tempfile.mkdtemp(prefix="unlook_preview_")
+
+            # Percorso per lo screenshot
+            screenshot_path = os.path.join(self._temp_dir, "pointcloud_preview.png")
+
+            # Crea un visualizzatore Open3D
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(pointcloud)
+
+            # Opzionale: applica un filtro per rimuovere outlier
+            if len(pointcloud) > 100:
+                try:
+                    pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+                except Exception as e:
+                    logger.debug(f"Errore nell'applicazione del filtro outlier: {e}")
+
+            # Aggiungi un sistema di coordinate per riferimento
+            coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=20)
+
+            # Crea una finestra di visualizzazione nascosta
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(visible=False, width=640, height=480)
+            vis.add_geometry(pcd)
+            vis.add_geometry(coord_frame)
+
+            # Ottimizza la vista
+            vis.get_render_option().point_size = 2.0
+            vis.get_render_option().background_color = np.array([0.9, 0.9, 0.9])
+            vis.get_view_control().set_zoom(0.8)
+            vis.poll_events()
+            vis.update_renderer()
+
+            # Cattura lo screenshot
+            vis.capture_screen_image(screenshot_path)
+            vis.destroy_window()
+
+            # Mostra lo screenshot
+            pixmap = QPixmap(screenshot_path)
+            self.pointcloud_preview.setPixmap(pixmap)
+            self.pointcloud_preview.setText("")
+
+            # Aggiorna l'interfaccia
+            QApplication.processEvents()
+
+        except Exception as e:
+            logger.error(f"Errore nella visualizzazione della nuvola di punti in tempo reale: {e}")
 
     def _process_preview_images(self, preview_response):
         """

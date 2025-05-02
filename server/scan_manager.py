@@ -11,6 +11,7 @@ import logging
 import time
 import json
 import os
+import zmq
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
@@ -714,7 +715,7 @@ class ScanManager:
     def _capture_frame_callback(self, pattern_index: int) -> Tuple[np.ndarray, np.ndarray]:
         """
         Callback per l'acquisizione dei frame dalle camere e invio al client.
-        Questa versione utilizza direttamente il socket di streaming esistente.
+        Versione ottimizzata per ridurre la latenza e migliorare l'efficienza.
 
         Args:
             pattern_index: Indice del pattern corrente
@@ -775,17 +776,27 @@ class ScanManager:
             else:
                 pattern_name = f"horizontal_{pattern_index - 2 - self._scan_config['num_patterns']}"
 
-            # IMPORTANTE: Utilizza il socket di streaming normale dal server
+            # OTTIMIZZAZIONE: Usa il socket di streaming esistente ed evita salvataggio su disco prima dell'invio
             if hasattr(self.server, "stream_socket") and self.server.stream_socket:
                 try:
                     # Compressione JPEG degli frame per l'invio
-                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, 90]
+                    # OTTIMIZZAZIONE: Adatta qualità in base all'indice pattern
+                    # Frame di riferimento (white, black) con qualità alta, pattern con qualità media
+                    quality = 95 if pattern_index <= 1 else 85
+                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, quality]
+
                     _, left_encoded = cv2.imencode('.jpg', left_frame, encode_params)
                     _, right_encoded = cv2.imencode('.jpg', right_frame, encode_params)
 
-                    # Crea header con metadati che identificano questi come frame di scansione
+                    # Crea header con metadati dettagliati
                     scan_id = getattr(self, 'current_scan_id', None)
                     timestamp = time.time()
+
+                    # OTTIMIZZAZIONE: Aggiungi metadati per controllo di flusso
+                    client_id = getattr(self.server, 'client_ip', None)
+                    total_patterns = self._scan_config[
+                                         'num_patterns'] * 2 + 2  # white, black, patterns orizzontali e verticali
+                    progress = min(100, (pattern_index / total_patterns) * 100)
 
                     # Invia frame sinistro
                     left_header = {
@@ -796,7 +807,10 @@ class ScanManager:
                         "is_scan_frame": True,  # Flag per identificare i frame di scansione
                         "scan_id": scan_id,
                         "pattern_index": pattern_index,
-                        "pattern_name": pattern_name
+                        "pattern_name": pattern_name,
+                        "client_id": client_id,
+                        "total_patterns": total_patterns,
+                        "progress": progress
                     }
 
                     # Verifica che il socket sia disponibile prima dell'invio
@@ -819,7 +833,10 @@ class ScanManager:
                             "is_scan_frame": True,
                             "scan_id": scan_id,
                             "pattern_index": pattern_index,
-                            "pattern_name": pattern_name
+                            "pattern_name": pattern_name,
+                            "client_id": client_id,
+                            "total_patterns": total_patterns,
+                            "progress": progress
                         }
 
                         self.server.stream_socket.send_json(right_header, zmq.SNDMORE)
@@ -836,27 +853,40 @@ class ScanManager:
             else:
                 logger.error("Socket di streaming non disponibile nel server")
 
-            # Salva i frame su disco come backup
+            # Salva i frame su disco come backup, in modo asincrono
             try:
+                import threading
+
+                def save_frames_async(left_frame, right_frame, scan_dir, pattern_index, pattern_name):
+                    try:
+                        # Assicurati che le directory esistano
+                        os.makedirs(scan_dir / "left", exist_ok=True)
+                        os.makedirs(scan_dir / "right", exist_ok=True)
+
+                        # Salva i frame
+                        left_path = scan_dir / "left" / f"{pattern_index:04d}_{pattern_name}.png"
+                        right_path = scan_dir / "right" / f"{pattern_index:04d}_{pattern_name}.png"
+
+                        cv2.imwrite(str(left_path), left_frame)
+                        cv2.imwrite(str(right_path), right_frame)
+
+                        logger.debug(f"Frame {pattern_index} salvato su disco in modo asincrono")
+                    except Exception as e:
+                        logger.error(f"Errore nel salvataggio asincrono dei frame: {e}")
+
                 scan_dir = getattr(self, '_scan_dir',
                                    self._scan_data_dir / getattr(self, 'current_scan_id', str(int(time.time()))))
 
-                # Assicurati che le directory esistano
-                left_dir = scan_dir / "left"
-                right_dir = scan_dir / "right"
-                left_dir.mkdir(exist_ok=True, parents=True)
-                right_dir.mkdir(exist_ok=True, parents=True)
+                # Avvia thread per il salvataggio asincrono
+                save_thread = threading.Thread(
+                    target=save_frames_async,
+                    args=(left_frame.copy(), right_frame.copy(), scan_dir, pattern_index, pattern_name)
+                )
+                save_thread.daemon = True
+                save_thread.start()
 
-                # Salva i frame
-                left_path = left_dir / f"{pattern_index:04d}_{pattern_name}.png"
-                right_path = right_dir / f"{pattern_index:04d}_{pattern_name}.png"
-
-                cv2.imwrite(str(left_path), left_frame)
-                cv2.imwrite(str(right_path), right_frame)
-
-                logger.info(f"Frame {pattern_index} salvato su disco: {left_path}, {right_path}")
             except Exception as e:
-                logger.error(f"Errore nel salvataggio dei frame su disco: {e}")
+                logger.error(f"Errore nell'avvio del thread di salvataggio: {e}")
 
             return (left_frame, right_frame)
 

@@ -744,11 +744,11 @@ class ScanProcessor:
 
     def _process_progressive(self) -> bool:
         """
-        Process progressive pattern scan.
-        This is similar to gray code but with progressive refinement.
+        Process progressive pattern scan with incremental pointcloud generation.
+        This is similar to gray code but with progressive refinement and real-time updates.
         """
         try:
-            logger.info("Processing progressive pattern scan")
+            logger.info("Processing progressive pattern scan with incremental updates")
 
             # Check if we have at least white/black and some pattern images
             if len(self.left_images) < 4:
@@ -788,6 +788,10 @@ class ScanProcessor:
             # Process pattern images in pairs (horizontal and vertical)
             pattern_pairs = (len(self.left_images) - 2) // 2  # Number of horizontal/vertical pairs
 
+            # Store incremental pointclouds
+            incremental_pointclouds = []
+            last_reprojection_index = -1
+
             for i in range(pattern_pairs):
                 # Report progress
                 progress = (i + 1) / pattern_pairs * 100
@@ -814,7 +818,7 @@ class ScanProcessor:
                     v_pattern_l_rect = cv2.remap(v_pattern_l, self.map_x_l, self.map_y_l, cv2.INTER_LINEAR)
                     v_pattern_r_rect = cv2.remap(v_pattern_r, self.map_x_r, self.map_y_r, cv2.INTER_LINEAR)
 
-                # Process horizontal pattern (simplified)
+                # Process horizontal pattern
                 self._update_disparity_from_pattern(
                     h_pattern_l_rect, h_pattern_r_rect,
                     shadow_mask_l, shadow_mask_r,
@@ -831,6 +835,31 @@ class ScanProcessor:
                         pattern_weight=2 ** i
                     )
 
+                # Generate incremental pointcloud every few patterns or at the end
+                if (i > 0 and (i % 3 == 0 or i == pattern_pairs - 1)) and last_reprojection_index != i:
+                    # Calculate intermediate disparity map
+                    current_disparity = disparity_map / np.maximum(confidence_map, 1e-5)
+
+                    # Apply median filter to remove noise
+                    current_disparity = cv2.medianBlur(current_disparity.astype(np.float32), 5)
+
+                    # Reproject to 3D (temporary pointcloud)
+                    temp_pointcloud = self._reproject_to_3d_incremental(current_disparity, shadow_mask_l)
+
+                    if temp_pointcloud is not None and len(temp_pointcloud) > 0:
+                        # Store incremental pointcloud
+                        incremental_pointclouds.append(temp_pointcloud)
+
+                        # Update the pointcloud property for external access
+                        self.pointcloud = temp_pointcloud
+
+                        # Call completion callback with incremental update
+                        if self._completion_callback:
+                            message = f"Incremental update ({i + 1}/{pattern_pairs} patterns processed)"
+                            self._completion_callback(True, message, temp_pointcloud)
+
+                    last_reprojection_index = i
+
             # Calculate final disparity map
             disparity_map = disparity_map / np.maximum(confidence_map, 1e-5)
 
@@ -845,7 +874,7 @@ class ScanProcessor:
             )
             cv2.imwrite(str(self.scan_dir / "disparity_map.png"), disparity_colored)
 
-            # Reproject to 3D
+            # Final reproject to 3D
             self._reproject_to_3d(disparity_map, shadow_mask_l)
 
             return True
@@ -853,6 +882,67 @@ class ScanProcessor:
         except Exception as e:
             logger.error(f"Error in progressive pattern processing: {e}")
             return False
+
+    def _reproject_to_3d_incremental(self, disparity_map, mask):
+        """
+        Reproject disparity map to 3D points for incremental updates.
+        Similar to _reproject_to_3d but optimized for intermediate results.
+
+        Args:
+            disparity_map: Current disparity map
+            mask: Mask for valid pixels
+
+        Returns:
+            Numpy array of 3D points
+        """
+        try:
+            # Ensure we have valid disparity and calibration
+            if disparity_map is None or self.Q is None:
+                logger.error("Missing disparity map or calibration for reprojection")
+                return None
+
+            # Create point cloud from disparity map
+            logger.info("Reprojecting to 3D points (incremental)")
+
+            # Apply mask to disparity map
+            masked_disparity = disparity_map.copy()
+            masked_disparity[mask == 0] = 0
+
+            # Reproject to 3D
+            points_3d = cv2.reprojectImageTo3D(masked_disparity, self.Q)
+
+            # Filter invalid points
+            mask = (
+                    ~np.isnan(points_3d).any(axis=2) &
+                    ~np.isinf(points_3d).any(axis=2) &
+                    (mask > 0)
+            )
+
+            # Extract valid points
+            valid_points = points_3d[mask]
+
+            # Optional: Limit points to reasonable range (e.g., 1m cube around origin)
+            max_range = 500  # mm
+            in_range_mask = (
+                    (np.abs(valid_points[:, 0]) < max_range) &
+                    (np.abs(valid_points[:, 1]) < max_range) &
+                    (np.abs(valid_points[:, 2]) < max_range)
+            )
+
+            valid_points = valid_points[in_range_mask]
+
+            # If we have too many points, randomly sample for performance
+            if len(valid_points) > 50000:
+                # Random sampling for performance in incremental updates
+                sample_indices = np.random.choice(len(valid_points), 50000, replace=False)
+                valid_points = valid_points[sample_indices]
+
+            logger.info(f"Generated incremental point cloud with {len(valid_points)} points")
+            return valid_points
+
+        except Exception as e:
+            logger.error(f"Error in incremental 3D reprojection: {e}")
+            return None
 
     def _process_gray_code(self) -> bool:
         """
