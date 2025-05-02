@@ -1,7 +1,7 @@
 # UnLook 3D Scanner
 
 <div align="center">
-  <img src="https://supernovaindustries.it/wp-content/uploads/2024/04/Supernova_v2-removebg-preview.png" alt="Supernova Industries Logo" width="300" />
+  <img src="http://supernovaindustries.it/wp-content/uploads/2024/08/logo_full-white-unlook-1.svg" alt="Supernova Industries Logo" width="300" />
   <h1>UnLook 3D Scanner</h1>
   
   <p><strong>Open Source Structured Light 3D Scanner</strong></p>
@@ -273,7 +273,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 <p align="center">
   <a href="https://supernovaindustries.it">
-    <img src="https://supernovaindustries.it/wp-content/uploads/2024/04/Supernova_v2-removebg-preview.png" alt="Supernova Industries Logo" width="200" />
+    <img src="http://supernovaindustries.it/wp-content/uploads/2024/08/supernova-industries-logo.svg" alt="Supernova Industries Logo" width="200" />
   </a>
 </p>
 
