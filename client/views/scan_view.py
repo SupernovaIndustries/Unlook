@@ -141,13 +141,15 @@ class RealtimeViewer3D(QWidget):
         super().__init__(parent)
         self.pointcloud = None
         self.last_update_time = 0
-        self._setup_ui()
 
-        # Nuovi attributi per gestione memoria e prestazioni
+        # Inizializza attributi PRIMA di setup_ui
         self._max_points_display = 30000  # Limite punti per visualizzazione
         self._auto_center = True  # Auto-centra la vista quando ci sono nuovi punti
         self._last_points_count = 0  # Per rilevare cambiamenti significativi
         self._update_interval = 0.2  # Intervallo minimo tra aggiornamenti (secondi)
+
+        # Ora imposta l'UI
+        self._setup_ui()
 
     def _setup_ui(self):
         """Configura l'interfaccia utente del visualizzatore."""
