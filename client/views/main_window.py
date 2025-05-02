@@ -24,8 +24,6 @@ from PySide6.QtGui import *
 from client.controllers.scanner_controller import ScannerController
 from client.models.scanner_model import Scanner, ScannerStatus
 from client.views.scanner_view import ScannerDiscoveryWidget
-from client.views.streaming_view import DualStreamView
-from client.views.scan_view import ScanView
 
 logger = logging.getLogger(__name__)
 
@@ -127,14 +125,7 @@ class MainWindow(QMainWindow):
             current_tab = self.central_tabs.currentIndex()
 
             # Aggiorna la scheda corrente in modo specifico
-            if current_tab == self.TabIndex.STREAMING.value and hasattr(self, 'streaming_widget'):
-                # Se siamo nella scheda streaming, verifica che lo streaming sia attivo se lo scanner è connesso
-                selected_scanner = self.scanner_controller.selected_scanner
-                if selected_scanner and selected_scanner.status == ScannerStatus.CONNECTED:
-                    if hasattr(self.streaming_widget, 'is_streaming') and not self.streaming_widget.is_streaming():
-                        logger.debug("Scheda streaming attiva con scanner connesso ma streaming inattivo")
-
-            elif current_tab == self.TabIndex.SCANNING.value and hasattr(self, 'scanning_widget'):
+            if current_tab == self.TabIndex.SCANNING.value and hasattr(self, 'scanning_widget'):
                 # Se siamo nella scheda scansione, aggiorna lo stato dello scanner
                 if hasattr(self.scanning_widget, 'refresh_scanner_state'):
                     self.scanning_widget.refresh_scanner_state()
@@ -655,6 +646,142 @@ class MainWindow(QMainWindow):
         self.scanning_widget.update_selected_scanner(scanner)
         self.camera_config_widget.update_selected_scanner(scanner)
 
+    def _setup_stream_receiver(self, scanner):
+        """
+        Configura il receiver di stream per uno scanner connesso.
+        Questo sostituisce la funzionalità che prima era in DualStreamView.
+        """
+        try:
+            from client.network.stream_receiver import StreamReceiver
+
+            # Informazioni di connessione
+            host = scanner.ip_address
+            port = scanner.port + 1  # La porta di streaming è quella di comando + 1
+
+            logger.info(f"Inizializzazione stream receiver da {host}:{port}")
+
+            # Crea il receiver se non esiste già
+            if not hasattr(self, 'stream_receiver') or self.stream_receiver is None:
+                self.stream_receiver = StreamReceiver(host, port)
+
+            # Invia comando per avviare lo streaming
+            command_success = self.scanner_controller.send_command(
+                scanner.device_id,
+                "START_STREAM",
+                {
+                    "dual_camera": True,
+                    "quality": 90,
+                    "target_fps": 30
+                }
+            )
+
+            if command_success:
+                # Attendi risposta
+                response = self.scanner_controller.wait_for_response(
+                    scanner.device_id,
+                    "START_STREAM",
+                    timeout=5.0
+                )
+
+                if response and response.get("status") == "ok":
+                    # Avvia il receiver
+                    self.stream_receiver.start()
+                    self._stream_initialized = True
+
+                    # Aggiorna il riferimento nel ScanView
+                    if hasattr(self, 'scanning_widget') and self.scanning_widget:
+                        self.scanning_widget._connect_to_stream()
+
+                    logger.info("Stream receiver inizializzato con successo")
+                    scanner.status = ScannerStatus.STREAMING
+                    return True
+
+            logger.error("Impossibile inizializzare stream receiver")
+            return False
+
+        except Exception as e:
+            logger.error(f"Errore nell'inizializzazione dello stream receiver: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return False
+
+    def _connect_to_stream(self):
+        """Collega il widget agli stream delle camere."""
+        if self._stream_connected:
+            logger.debug("Stream già connesso, nessuna azione necessaria")
+            return True
+
+        try:
+            # Cerca il main window
+            main_window = self.window()
+            logger.info(f"MainWindow trovata: {main_window is not None}")
+
+            # Verifica se stream_receiver è presente direttamente in MainWindow
+            if hasattr(main_window, 'stream_receiver') and main_window.stream_receiver is not None:
+                receiver = main_window.stream_receiver
+
+                # Tenta di accedere al segnale frame_received
+                if hasattr(receiver, 'frame_received'):
+                    # Disconnetti eventuali connessioni esistenti
+                    try:
+                        receiver.frame_received.disconnect(self._on_frame_received)
+                    except:
+                        pass
+
+                    # Collega il segnale
+                    receiver.frame_received.connect(self._on_frame_received)
+                    logger.info("Segnale frame_received collegato con successo")
+
+                    # Imposta il processore di scan frame
+                    if hasattr(receiver, 'set_frame_processor'):
+                        receiver.set_frame_processor(self.scan_processor)
+                        logger.info("Processore di frame impostato con successo")
+
+                    # Abilita routing diretto
+                    if hasattr(receiver, 'enable_direct_routing'):
+                        receiver.enable_direct_routing(True)
+                        logger.info("Routing diretto abilitato con successo")
+
+                    self._stream_connected = True
+                    return True
+                else:
+                    logger.error("Segnale frame_received non trovato nel receiver")
+            else:
+                logger.warning("Stream receiver non trovato in MainWindow")
+
+                # Tentativo alternativo di trovare il receiver dal controller
+                if hasattr(self, 'scanner_controller') and self.scanner_controller:
+                    if hasattr(self.scanner_controller, 'get_stream_receiver'):
+                        receiver = self.scanner_controller.get_stream_receiver()
+                        if receiver:
+                            logger.info("Receiver trovato direttamente dal controller")
+
+                            # Collega il segnale e configura come sopra...
+                            try:
+                                receiver.frame_received.disconnect(self._on_frame_received)
+                            except:
+                                pass
+
+                            receiver.frame_received.connect(self._on_frame_received)
+
+                            if hasattr(receiver, 'set_frame_processor'):
+                                receiver.set_frame_processor(self.scan_processor)
+
+                            if hasattr(receiver, 'enable_direct_routing'):
+                                receiver.enable_direct_routing(True)
+
+                            self._stream_connected = True
+                            return True
+
+                logger.error("Non è stato possibile trovare un stream receiver valido")
+                return False
+
+        except Exception as e:
+            logger.error(f"Errore nella connessione agli stream: {e}")
+            import traceback
+            logger.error(f"Traceback completo: {traceback.format_exc()}")
+
+        return False
     @Slot(Scanner)
     def _on_scanner_disconnected(self, scanner: Scanner):
         """

@@ -6,9 +6,7 @@
   <component name="ChangeListManager">
     <list default="true" id="31592bd9-183c-4f71-ad25-9064a5892649" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/controllers/scanner_controller.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/controllers/scanner_controller.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/client/views/main_window.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/views/main_window.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client/views/scan_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/client/views/scan_view.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -39,35 +37,37 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;ASKED_MARK_IGNORED_FILES_AS_EXCLUDED&quot;: &quot;true&quot;,
-    &quot;Python tests.Python tests in dlp_uart_windows.py.executor&quot;: &quot;Run&quot;,
-    &quot;Python.check_imporrt.executor&quot;: &quot;Run&quot;,
-    &quot;Python.connection_manager.executor&quot;: &quot;Run&quot;,
-    &quot;Python.diagnostic.executor&quot;: &quot;Run&quot;,
-    &quot;Python.dlp_uart_windows.executor&quot;: &quot;Run&quot;,
-    &quot;Python.fix_imports.executor&quot;: &quot;Run&quot;,
-    &quot;Python.fix_threads.executor&quot;: &quot;Run&quot;,
-    &quot;Python.line_test.executor&quot;: &quot;Run&quot;,
-    &quot;Python.main.executor&quot;: &quot;Run&quot;,
-    &quot;Python.main_window.executor&quot;: &quot;Run&quot;,
-    &quot;Python.receiver_launcher.executor&quot;: &quot;Run&quot;,
-    &quot;Python.start_unlook.executor&quot;: &quot;Run&quot;,
-    &quot;Python.stream_control.executor&quot;: &quot;Run&quot;,
-    &quot;Python.stream_receiver.executor&quot;: &quot;Run&quot;,
-    &quot;Python.streaming_view.executor&quot;: &quot;Run&quot;,
-    &quot;Python.test_import.executor&quot;: &quot;Run&quot;,
-    &quot;Python.test_struct.executor&quot;: &quot;Run&quot;,
-    &quot;Python.win_test_pattern.executor&quot;: &quot;Run&quot;,
-    &quot;Python.windows_debug.executor&quot;: &quot;Run&quot;,
-    &quot;RunOnceActivity.OpenProjectViewOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
-    &quot;last_opened_file_path&quot;: &quot;C:/Users/Alessandro/Desktop/Unlook&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ASKED_MARK_IGNORED_FILES_AS_EXCLUDED": "true",
+    "Python tests.Python tests in dlp_uart_windows.py.executor": "Run",
+    "Python.check_imporrt.executor": "Run",
+    "Python.connection_manager.executor": "Run",
+    "Python.diagnostic.executor": "Run",
+    "Python.dlp_uart_windows.executor": "Run",
+    "Python.fix_imports.executor": "Run",
+    "Python.fix_threads.executor": "Run",
+    "Python.line_test.executor": "Run",
+    "Python.main.executor": "Run",
+    "Python.main_window.executor": "Run",
+    "Python.receiver_launcher.executor": "Run",
+    "Python.remove_streaming_view.executor": "Run",
+    "Python.scan_view.executor": "Run",
+    "Python.start_unlook.executor": "Run",
+    "Python.stream_control.executor": "Run",
+    "Python.stream_receiver.executor": "Run",
+    "Python.streaming_view.executor": "Run",
+    "Python.test_import.executor": "Run",
+    "Python.test_struct.executor": "Run",
+    "Python.win_test_pattern.executor": "Run",
+    "Python.windows_debug.executor": "Run",
+    "RunOnceActivity.OpenProjectViewOnStart": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "git-widget-placeholder": "main",
+    "last_opened_file_path": "C:/Users/Alessandro/Desktop/Unlook"
   }
-}</component>
+}]]></component>
   <component name="RecentsManager">
     <key name="MoveFile.RECENT_KEYS">
       <recent name="G:\Supernova\Prototipi\UnLook\Software\Unlook\server\projector\dlp342x" />

@@ -943,37 +943,33 @@ class ScanView(QWidget):
         """Verifica lo stato effettivo dello streaming."""
         try:
             main_window = self.window()
-            if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
-                streaming_widget = main_window.streaming_widget
 
-                # Metodo 1: controllo attributo _streaming_active
-                if hasattr(streaming_widget, '_streaming_active'):
-                    logger.info(f"Stato streaming (_streaming_active): {streaming_widget._streaming_active}")
-                    if streaming_widget._streaming_active:
+            # Controlla direttamente se stream_receiver è presente e attivo
+            if hasattr(main_window, 'stream_receiver') and main_window.stream_receiver:
+                logger.info("Stream receiver trovato in MainWindow")
+                receiver = main_window.stream_receiver
+
+                # Verifica se il receiver è attivo
+                if hasattr(receiver, 'is_running') and receiver.is_running():
+                    logger.info("Stream receiver is running")
+                    return True
+
+                # Controlla se ci sono connessioni attive
+                if hasattr(receiver, '_connections') and len(receiver._connections) > 0:
+                    logger.info(f"Stream receiver ha {len(receiver._connections)} connessioni attive")
+                    return True
+
+            # Se arriviamo qui, verifica se è disponibile tramite scanner_controller
+            if hasattr(self, 'scanner_controller') and self.scanner_controller:
+                if hasattr(self.scanner_controller, 'get_stream_receiver'):
+                    receiver = self.scanner_controller.get_stream_receiver()
+                    if receiver and (hasattr(receiver, 'is_running') and receiver.is_running()):
+                        logger.info("Stream receiver trovato tramite controller e attivo")
                         return True
 
-                # Metodo 2: controllo attributo stream_receiver
-                if hasattr(streaming_widget, 'stream_receiver') and streaming_widget.stream_receiver:
-                    logger.info("Stream receiver presente")
-                    receiver = streaming_widget.stream_receiver
+            logger.warning("Non è stato possibile confermare che lo streaming è attivo")
+            return False
 
-                    # Verifica se il receiver ha metodi di stato
-                    if hasattr(receiver, 'is_running') and receiver.is_running():
-                        logger.info("Stream receiver is running")
-                        return True
-
-                    # Controlla se ci sono connessioni attive
-                    if hasattr(receiver, '_connections') and len(receiver._connections) > 0:
-                        logger.info(f"Stream receiver ha {len(receiver._connections)} connessioni attive")
-                        return True
-
-                # Se arriviamo qui, significa che non abbiamo potuto confermare che lo streaming è attivo
-                logger.warning("Non è stato possibile confermare che lo streaming è attivo")
-                return False
-
-            else:
-                logger.error("StreamingWidget non trovato in MainWindow")
-                return False
         except Exception as e:
             logger.error(f"Errore nella verifica dello stato dello streaming: {e}")
             return False
