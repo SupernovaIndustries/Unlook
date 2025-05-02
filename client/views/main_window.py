@@ -202,17 +202,39 @@ class MainWindow(QMainWindow):
         self.central_tabs = QTabWidget()
         self.setCentralWidget(self.central_tabs)
 
+        # Aggiorna la classe TabIndex per riflettere la nuova struttura delle schede
+        class TabIndex(Enum):
+            """Indici delle schede nella finestra principale."""
+            SCANNER = 0
+            CAMERA_CONFIG = 1
+            STREAMING = 2  # Manteniamo per retrocompatibilità
+            SCANNING = 3
+
+        # Sostituisce l'enum originale con quello aggiornato
+        self.TabIndex = TabIndex
+
         # Crea i widget delle schede
         self.scanner_widget = ScannerDiscoveryWidget(self.scanner_controller)
-        self.streaming_widget = DualStreamView(self.scanner_controller)  # Passa il controller qui
+
+        # Import la nuova classe CameraConfigView
+        from client.views.camera_config_view import CameraConfigView
+        self.camera_config_widget = CameraConfigView(self.scanner_controller)
+
+        # Manteniamo anche lo streaming per retrocompatibilità
+        # e per consentire la visualizzazione degli stream in una scheda separata
+        self.streaming_widget = DualStreamView(self.scanner_controller)
+
+        # Widget di scansione
         self.scanning_widget = ScanView(self.scanner_controller)
 
         # Aggiungi le schede
         self.central_tabs.addTab(self.scanner_widget, "Scanner")
+        self.central_tabs.addTab(self.camera_config_widget, "Configurazione Camere")
         self.central_tabs.addTab(self.streaming_widget, "Streaming")
-        self.central_tabs.addTab(self.scanning_widget, "Scansione 3D")  # Nuova scheda
+        self.central_tabs.addTab(self.scanning_widget, "Scansione 3D")
 
         # Disabilita le schede che richiedono una connessione attiva
+        self.central_tabs.setTabEnabled(self.TabIndex.CAMERA_CONFIG.value, False)
         self.central_tabs.setTabEnabled(self.TabIndex.STREAMING.value, False)
         self.central_tabs.setTabEnabled(self.TabIndex.SCANNING.value, False)
 
