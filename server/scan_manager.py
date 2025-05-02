@@ -764,7 +764,6 @@ class ScanManager:
                 _, left_encoded = cv2.imencode('.jpg', left_frame, encode_params)
                 _, right_encoded = cv2.imencode('.jpg', right_frame, encode_params)
 
-                # Informazioni sul frame
                 # Determina il nome del pattern in base all'indice
                 pattern_name = ""
                 if pattern_index == 0:
@@ -775,7 +774,8 @@ class ScanManager:
                     pattern_name = f"vertical_{pattern_index - 2}"
                 else:
                     pattern_name = f"horizontal_{pattern_index - 2 - self._scan_config['num_patterns']}"
-                
+
+                # Informazioni sul frame
                 frame_info = {
                     "pattern_index": pattern_index,
                     "pattern_name": pattern_name,
