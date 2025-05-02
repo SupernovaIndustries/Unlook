@@ -216,6 +216,20 @@ class StreamReceiver(QObject):
         logger.error(f"Errore nello StreamReceiver: {error_message}")
         self.error.emit(error_message)
 
+    def get_performance_stats(self) -> dict:
+        """
+        Restituisce statistiche sulle prestazioni del ricevitore.
+
+        Returns:
+            Dizionario con statistiche di performance
+        """
+        if self._receiver_thread:
+            return self._receiver_thread.get_performance_stats()
+        return {
+            "status": "inactive",
+            "error": "Ricevitore non attivo"
+        }
+
 
 class StreamReceiverThread(QThread):
     """
@@ -257,6 +271,14 @@ class StreamReceiverThread(QThread):
         self._fps_timer.timeout.connect(self._log_performance_stats)
         self._fps_timer.start(5000)  # Log ogni 5 secondi
 
+        # Variabili per controllo di flusso adattivo
+        self._processing_lag = 0  # Misura del ritardo di elaborazione
+        self._frame_drop_threshold = 100  # ms, soglia per il drop dei frame
+        self._max_queue_size = 2  # Limitiamo la coda a un massimo di 2 messaggi
+        self._frame_interval = 0  # Tempo medio tra frame consecutivi
+        self._last_frame_time = 0  # Timestamp dell'ultimo frame ricevuto
+        self._adaptive_mode = True  # Abilita/disabilita modalità adattiva
+
     def set_frame_processor(self, processor):
         """
         Imposta un processore di frame per routing diretto.
@@ -296,14 +318,6 @@ class StreamReceiverThread(QThread):
     def run(self):
         """Loop principale del thread con meccanismo di riconnessione automatica e controllo di flusso adattivo."""
         reconnect_delay = 1.0  # Delay iniziale in secondi
-
-        # Aggiungiamo variabili per il controllo di flusso adattivo
-        self._processing_lag = 0  # Misura del ritardo di elaborazione
-        self._frame_drop_threshold = 100  # ms, soglia per il drop dei frame
-        self._max_queue_size = 2  # Limitiamo la coda a un massimo di 2 messaggi
-        self._frame_interval = 0  # Tempo medio tra frame consecutivi
-        self._last_frame_time = 0  # Timestamp dell'ultimo frame ricevuto
-        self._adaptive_mode = True  # Abilita/disabilita modalità adattiva
 
         # Reset delle statistiche
         self._frames_processed = 0
@@ -419,6 +433,7 @@ class StreamReceiverThread(QThread):
 
                         # Decodifica header
                         try:
+                            import json
                             header = json.loads(header_data.decode('utf-8'))
                             camera_index = header.get("camera")
                             timestamp = header.get("timestamp")

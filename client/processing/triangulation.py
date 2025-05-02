@@ -1029,43 +1029,43 @@ class ScanProcessor:
 
     def _reproject_to_3d_incremental(self, disparity_map, mask):
         """
-        Reproject disparity map to 3D points for incremental updates.
-        Optimized for speed in real-time visualization.
+        Riproietta la mappa di disparità in punti 3D per aggiornamenti incrementali.
+        Ottimizzato per velocità in visualizzazioni real-time.
 
         Args:
-            disparity_map: Current disparity map
-            mask: Mask for valid pixels
+            disparity_map: Mappa di disparità corrente
+            mask: Maschera per i pixel validi
 
         Returns:
-            Numpy array of 3D points
+            Array NumPy di punti 3D
         """
         try:
-            # Ensure we have valid disparity and calibration
+            # Assicuriamoci di avere una mappa di disparità e una calibrazione valide
             if disparity_map is None or self.Q is None:
-                logger.error("Missing disparity map or calibration for reprojection")
+                logger.error("Mappa di disparità o calibrazione mancante per la riproiezione")
                 return None
 
-            # Create point cloud from disparity map
-            logger.info("Reprojecting to 3D points (incremental)")
+            # Crea nuvola di punti dalla mappa di disparità
+            logger.info("Riproiezione in punti 3D (incrementale)")
 
-            # Apply mask to disparity map
+            # Applica maschera alla mappa di disparità
             masked_disparity = disparity_map.copy()
             masked_disparity[mask == 0] = 0
 
-            # Reproject to 3D
+            # Riproietta in 3D
             points_3d = cv2.reprojectImageTo3D(masked_disparity, self.Q)
 
-            # Filter invalid points
+            # Filtra punti non validi
             mask = (
                     ~np.isnan(points_3d).any(axis=2) &
                     ~np.isinf(points_3d).any(axis=2) &
                     (mask > 0)
             )
 
-            # Extract valid points
+            # Estrai punti validi
             valid_points = points_3d[mask]
 
-            # Limit points to reasonable range
+            # Limita punti a un range ragionevole
             max_range = 500  # mm
             in_range_mask = (
                     (np.abs(valid_points[:, 0]) < max_range) &
@@ -1075,24 +1075,316 @@ class ScanProcessor:
 
             valid_points = valid_points[in_range_mask]
 
-            # If we have too many points, randomly sample for performance
+            # Se abbiamo troppi punti, campiona casualmente per prestazioni
             if len(valid_points) > 50000:
-                # Random sampling for performance in incremental updates
+                # Campionamento casuale per aggiornamenti incrementali
                 sample_indices = np.random.choice(len(valid_points), 50000, replace=False)
                 valid_points = valid_points[sample_indices]
             elif len(valid_points) < 10:
                 # Troppo pochi punti, potrebbe esserci un problema
-                logger.warning("Too few valid points in reprojection, likely an error")
+                logger.warning("Troppo pochi punti validi nella riproiezione")
                 return None
 
-            logger.info(f"Generated incremental point cloud with {len(valid_points)} points")
+            logger.info(f"Generata nuvola di punti incrementale con {len(valid_points)} punti")
             return valid_points
 
         except Exception as e:
-            logger.error(f"Error in incremental 3D reprojection: {e}")
+            logger.error(f"Errore nella riproiezione 3D incrementale: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             return None
+
+    def process_frame_pairs(self, frame_pairs, use_threading=True, incremental=True):
+        """
+        Processa coppie di frame direttamente dalla memoria.
+
+        Args:
+            frame_pairs: Lista di tuple (pattern_index, left_frame, right_frame)
+            use_threading: Se True, esegue l'elaborazione in un thread separato
+            incremental: Se True, utilizza l'elaborazione incrementale
+
+        Returns:
+            True se l'elaborazione è iniziata con successo, False altrimenti
+        """
+        if not frame_pairs or len(frame_pairs) < 2:
+            logger.error("Numero insufficiente di coppie di frame")
+            return False
+
+        if self.map_x_l is None or self.map_y_l is None:
+            # Carica o genera la calibrazione se necessario
+            if not self._load_calibration_data():
+                logger.error("Impossibile caricare o generare dati di calibrazione")
+                return False
+
+        # Reset dello stato di elaborazione
+        self._processing_complete.clear()
+        self._processing_cancelled.clear()
+
+        # Salva le coppie di frame per l'elaborazione
+        self._frame_pairs = frame_pairs
+        self._incremental_mode = incremental
+
+        if use_threading:
+            # Avvia l'elaborazione in un thread separato
+            self.processing_thread = threading.Thread(target=self._process_frame_pairs_thread)
+            self.processing_thread.daemon = True
+            self.processing_thread.start()
+            return True
+        else:
+            # Esegui l'elaborazione nel thread corrente
+            return self._process_frame_pairs_thread()
+
+    def _process_frame_pairs_thread(self):
+        """Thread di elaborazione per le coppie di frame."""
+        try:
+            logger.info("Avvio elaborazione coppie di frame")
+            start_time = time.time()
+
+            # Scegli il metodo di elaborazione in base al pattern
+            if self.pattern_type == PatternType.GRAY_CODE:
+                success = self._process_gray_code_inmem()
+            elif self.pattern_type == PatternType.BINARY_CODE:
+                success = self._process_binary_code_inmem()
+            else:
+                # Default a PROGRESSIVE per altri tipi
+                success = self._process_progressive_inmem()
+
+            # Calcola tempo totale di elaborazione
+            processing_time = time.time() - start_time
+            logger.info(f"Elaborazione completata in {processing_time:.1f} secondi")
+
+            # Segnala completamento
+            self._processing_complete.set()
+
+            # Chiama callback se fornita
+            if self._completion_callback:
+                if success:
+                    message = f"Elaborazione completata in {processing_time:.1f} secondi"
+                    self._completion_callback(True, message, self.pointcloud)
+                else:
+                    self._completion_callback(False, "Elaborazione fallita", None)
+
+            return success
+
+        except Exception as e:
+            logger.error(f"Errore nell'elaborazione delle coppie di frame: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+            # Chiama callback con errore
+            if self._completion_callback:
+                self._completion_callback(False, f"Errore nell'elaborazione: {e}", None)
+
+            return False
+
+    def _process_progressive_inmem(self):
+        """
+        Elabora frame pattern progressivi con aggiornamenti incrementali.
+        Lavora direttamente sui frame in memoria.
+        """
+        try:
+            # Flag per modalità incrementale
+            incremental_mode = self._incremental_mode
+
+            if incremental_mode:
+                logger.info("Elaborazione pattern progressivi in modalità incrementale")
+            else:
+                logger.info("Elaborazione pattern progressivi a piena risoluzione")
+
+            # Verifica che abbiamo almeno frame bianco/nero e alcuni pattern
+            if len(self._frame_pairs) < 4:
+                logger.error("Numero insufficiente di frame per l'elaborazione")
+                return False
+
+            # Estrai frame di riferimento (bianco/nero)
+            white_pair = next((p for p in self._frame_pairs if p[0] == 0), None)
+            black_pair = next((p for p in self._frame_pairs if p[0] == 1), None)
+
+            if not white_pair or not black_pair:
+                # Cerca i primi due frame come fallback
+                if len(self._frame_pairs) >= 2:
+                    white_pair = self._frame_pairs[0]
+                    black_pair = self._frame_pairs[1]
+                else:
+                    logger.error("Frame white/black non trovati")
+                    return False
+
+            white_l, white_r = white_pair[1], white_pair[2]
+            black_l, black_r = black_pair[1], black_pair[2]
+
+            # Verifica dimensioni delle immagini
+            if (white_l is None or white_r is None or
+                    black_l is None or black_r is None):
+                logger.error("Impossibile caricare i frame white/black di riferimento")
+                return False
+
+            logger.info(f"Dimensioni immagini di riferimento: white_l={white_l.shape}, white_r={white_r.shape}")
+
+            # Rettifica le immagini di riferimento
+            white_l_rect = cv2.remap(white_l, self.map_x_l, self.map_y_l, cv2.INTER_LINEAR)
+            white_r_rect = cv2.remap(white_r, self.map_x_r, self.map_y_r, cv2.INTER_LINEAR)
+            black_l_rect = cv2.remap(black_l, self.map_x_l, self.map_y_l, cv2.INTER_LINEAR)
+            black_r_rect = cv2.remap(black_r, self.map_x_r, self.map_y_r, cv2.INTER_LINEAR)
+
+            # Calcola maschere d'ombra (aree con sufficiente contrasto tra bianco e nero)
+            shadow_mask_l = np.zeros_like(black_l_rect)
+            shadow_mask_r = np.zeros_like(black_r_rect)
+            black_threshold = 40  # Soglia per le aree in ombra
+            shadow_mask_l[white_l_rect > black_l_rect + black_threshold] = 1
+            shadow_mask_r[white_r_rect > black_r_rect + black_threshold] = 1
+
+            # Ottieni dimensioni dell'immagine
+            height, width = shadow_mask_l.shape[:2]
+
+            # Inizializza mappe di disparità
+            disparity_map = np.zeros((height, width), dtype=np.float32)
+            confidence_map = np.zeros((height, width), dtype=np.float32)
+
+            # Filtra coppie di pattern per escludere white/black
+            pattern_pairs = [p for p in self._frame_pairs if p[0] > 1]
+            pattern_pairs.sort(key=lambda x: x[0])  # Ordina per indice pattern
+
+            # In modalità incrementale, potremmo elaborare un numero inferiore di pattern
+            if incremental_mode:
+                # Dividi pattern in coppie (orizzontale/verticale)
+                pattern_pairs_count = len(pattern_pairs) // 2
+                if pattern_pairs_count > 8 and incremental_mode:
+                    # Limita per maggiore velocità in modalità incrementale
+                    pattern_pairs_count = min(8, pattern_pairs_count)
+            else:
+                pattern_pairs_count = len(pattern_pairs) // 2
+
+            logger.info(
+                f"Elaborazione di {pattern_pairs_count} coppie di pattern su {len(pattern_pairs)} pattern disponibili")
+
+            # Salva nuvole di punti incrementali
+            incremental_pointclouds = []
+            last_reprojection_index = -1
+
+            for i in range(pattern_pairs_count):
+                # Aggiorna progresso
+                progress = (i + 1) / pattern_pairs_count * 100
+                if self._progress_callback:
+                    self._progress_callback(progress, f"Elaborazione pattern: {i + 1}/{pattern_pairs_count}")
+
+                # Verifica cancellazione
+                if self._processing_cancelled.is_set():
+                    logger.info("Elaborazione annullata")
+                    return False
+
+                # Indici dei pattern orizzontali e verticali
+                h_idx = i * 2
+                v_idx = i * 2 + 1
+
+                # Elabora pattern orizzontale
+                if h_idx < len(pattern_pairs):
+                    h_pattern_idx, h_left, h_right = pattern_pairs[h_idx]
+
+                    # Rettifica pattern orizzontale
+                    h_left_rect = cv2.remap(h_left, self.map_x_l, self.map_y_l, cv2.INTER_LINEAR)
+                    h_right_rect = cv2.remap(h_right, self.map_x_r, self.map_y_r, cv2.INTER_LINEAR)
+
+                    # Aggiorna mappa di disparità dal pattern
+                    self._update_disparity_from_pattern(
+                        h_left_rect, h_right_rect,
+                        shadow_mask_l, shadow_mask_r,
+                        disparity_map, confidence_map,
+                        pattern_weight=2 ** i
+                    )
+
+                # Elabora pattern verticale
+                if v_idx < len(pattern_pairs):
+                    v_pattern_idx, v_left, v_right = pattern_pairs[v_idx]
+
+                    # Rettifica pattern verticale
+                    v_left_rect = cv2.remap(v_left, self.map_x_l, self.map_y_l, cv2.INTER_LINEAR)
+                    v_right_rect = cv2.remap(v_right, self.map_x_r, self.map_y_r, cv2.INTER_LINEAR)
+
+                    # Aggiorna mappa di disparità dal pattern
+                    self._update_disparity_from_pattern(
+                        v_left_rect, v_right_rect,
+                        shadow_mask_l, shadow_mask_r,
+                        disparity_map, confidence_map,
+                        pattern_weight=2 ** i
+                    )
+
+                # Genera nuvola di punti incrementale a intervalli regolari
+                update_interval = 2 if incremental_mode else 3
+                if ((i > 0 and (i % update_interval == 0 or i == pattern_pairs_count - 1)) and
+                        last_reprojection_index != i):
+
+                    # Calcola mappa di disparità intermedia
+                    valid_indices = confidence_map > 0
+                    current_disparity = np.zeros_like(disparity_map)
+                    current_disparity[valid_indices] = disparity_map[valid_indices] / confidence_map[valid_indices]
+
+                    # Applica filtro mediano per ridurre il rumore
+                    kernel_size = 3 if incremental_mode else 5
+                    current_disparity = cv2.medianBlur(current_disparity.astype(np.float32), kernel_size)
+
+                    # Riproietta in 3D (nuvola di punti temporanea)
+                    temp_pointcloud = self._reproject_to_3d_incremental(current_disparity, shadow_mask_l)
+
+                    if temp_pointcloud is not None and len(temp_pointcloud) > 0:
+                        # Salva la nuvola incrementale
+                        incremental_pointclouds.append(temp_pointcloud)
+
+                        # Aggiorna la proprietà pointcloud per accesso esterno
+                        self.pointcloud = temp_pointcloud
+
+                        # Chiama callback con aggiornamento incrementale
+                        if self._completion_callback:
+                            message = f"Aggiornamento incrementale ({i + 1}/{pattern_pairs_count} pattern elaborati)"
+                            self._completion_callback(True, message, temp_pointcloud)
+
+                    last_reprojection_index = i
+
+            # Calcola mappa di disparità finale
+            valid_indices = confidence_map > 0
+            disparity_map_final = np.zeros_like(disparity_map)
+            disparity_map_final[valid_indices] = disparity_map[valid_indices] / confidence_map[valid_indices]
+
+            # Applica filtro mediano per ridurre il rumore
+            kernel_size = 3 if incremental_mode else 5
+            disparity_map_final = cv2.medianBlur(disparity_map_final.astype(np.float32), kernel_size)
+
+            # Salva mappa di disparità solo in modalità non incrementale
+            if not incremental_mode and self.output_dir:
+                # Salva mappa di disparità per visualizzazione
+                disparity_colored = cv2.applyColorMap(
+                    cv2.convertScaleAbs(disparity_map_final,
+                                        alpha=255 / np.max(disparity_map_final) if np.max(
+                                            disparity_map_final) > 0 else 0),
+                    cv2.COLORMAP_JET
+                )
+
+                # Crea directory se necessario
+                if self.scan_dir is None:
+                    self.scan_dir = Path(self.output_dir) / f"scan_{int(time.time())}"
+                    self.scan_dir.mkdir(parents=True, exist_ok=True)
+
+                cv2.imwrite(str(self.scan_dir / "disparity_map.png"), disparity_colored)
+
+            # Riproiezione finale in 3D
+            if incremental_mode:
+                # In modalità incrementale, usa versione veloce
+                final_pointcloud = self._reproject_to_3d_incremental(disparity_map_final, shadow_mask_l)
+                self.pointcloud = final_pointcloud
+
+                # Chiama callback di completamento
+                if self._completion_callback and final_pointcloud is not None:
+                    self._completion_callback(True, "Elaborazione incrementale completata", final_pointcloud)
+
+                return True
+            else:
+                # In modalità completa, usa versione standard con tutti i filtri
+                return self._reproject_to_3d(disparity_map_final, shadow_mask_l)
+
+        except Exception as e:
+            logger.error(f"Errore nell'elaborazione pattern progressivi: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return False
 
     def _process_gray_code(self) -> bool:
         """

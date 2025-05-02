@@ -3544,17 +3544,20 @@ class ScanView(QWidget):
                         stream_receiver.scan_frame_received.connect(self._handle_scan_frame)
                         logger.info("Segnale scan_frame_received collegato con successo")
 
-                        # Test di connessione inviando un segnale di prova
-                        try:
-                            import numpy as np
-                            # Creiamo un frame di test
-                            test_frame = np.zeros((10, 10, 3), dtype=np.uint8)
-                            test_info = {"is_scan_frame": True, "pattern_index": -1, "pattern_name": "test"}
-                            logger.info("Invio frame di test per verificare connessione segnale...")
-                            # Non emettere realmente il segnale che causerebbe errori
-                            # stream_receiver.scan_frame_received.emit(0, test_frame, test_info)
-                        except Exception as e:
-                            logger.error(f"Errore nel test di connessione del segnale: {e}")
+                        # Configura il routing diretto per prestazioni ottimali
+                        if hasattr(stream_receiver, 'set_frame_processor'):
+                            # Imposta il processore di frame per il routing diretto
+                            stream_receiver.set_frame_processor(self.scan_frame_processor)
+
+                            # Abilita il routing diretto per prestazioni ottimali
+                            stream_receiver.enable_direct_routing(True)
+                            logger.info("Routing diretto configurato per prestazioni ottimali")
+                        else:
+                            logger.warning("Stream receiver non supporta il routing diretto")
+
+                        # Log di configurazione completata
+                        logger.info("Integrazione StreamReceiver ↔ ScanFrameProcessor completata")
+
                     else:
                         logger.warning("StreamReceiver non trovato nello streaming_widget")
                 else:
@@ -3627,7 +3630,8 @@ class ScanView(QWidget):
         if not scan_id and self.current_scan_id:
             scan_id = self.current_scan_id
             logger.info(f"Nessun scan_id nel frame, usando quello corrente: {scan_id}")
-        elif not scan_id:
+        elif not scan_id and not self.current_scan_id:
+            # Entrambi nulli, crea un nuovo ID
             timestamp = int(time.time())
             scan_id = f"Scan_{timestamp}"
             self.current_scan_id = scan_id
@@ -3664,7 +3668,7 @@ class ScanView(QWidget):
                     self._update_preview_image()
 
                 # Aggiorna lo stato nell'interfaccia
-                if self._progress_callback:
+                if hasattr(self, '_progress_callback') and self._progress_callback:
                     progress = self.scan_frame_processor.get_scan_progress()
                     self._progress_callback(progress)
             else:
@@ -3674,6 +3678,7 @@ class ScanView(QWidget):
             logger.error(f"Errore generale nell'elaborazione del frame: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
+
     def _setup_frame_receiver(self):
         """
         Configura un ricevitore dedicato per i frame di scansione.
