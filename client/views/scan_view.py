@@ -3512,15 +3512,33 @@ class ScanView(QWidget):
 
             return False
 
-    # In client/views/scan_view.py, metodo _register_frame_handler()
 
     def _register_frame_handler(self):
         """
         Registra un gestore per ricevere i frame della scansione in tempo reale.
-        Usa il ScanFrameProcessor per elaborare i frame ricevuti.
+        Versione migliorata con gestione più robusta e inizializzazione corretta.
         """
         if self.scanner_controller and hasattr(self.scanner_controller, '_connection_manager'):
             try:
+                # Importa esplicitamente le classi necessarie
+                from client.processing.scan_frame_processor import ScanFrameProcessor, RealTimeTriangulator
+
+                # Assicurati che il ScanFrameProcessor sia correttamente inizializzato
+                if not hasattr(self, 'scan_frame_processor') or self.scan_frame_processor is None:
+                    self.scan_frame_processor = ScanFrameProcessor(output_dir=self.output_dir)
+                    logger.info("ScanFrameProcessor creato con successo")
+
+                    # Inizializza esplicitamente il triangolatore se necessario
+                    if hasattr(self.scan_frame_processor,
+                               '_triangulator') and self.scan_frame_processor._triangulator is None:
+                        self.scan_frame_processor._triangulator = RealTimeTriangulator(output_dir=self.output_dir)
+                        logger.info("RealTimeTriangulator inizializzato esplicitamente")
+
+                    # Imposta callback
+                    if hasattr(self, '_progress_callback') and self._progress_callback:
+                        self.scan_frame_processor.set_callbacks(self._progress_callback, self._frame_callback)
+                        logger.info("Callback impostati su ScanFrameProcessor")
+
                 # Cerca nel main window uno streaming_widget
                 main_window = self.window()
                 if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
@@ -3533,33 +3551,28 @@ class ScanView(QWidget):
                         logger.info(f"StreamReceiver trovato, collegamento segnale scan_frame_received...")
 
                         # IMPORTANTE: Assicuriamoci di disconnettere eventuali connessioni precedenti
-                        # Correzione: Utilizziamo try/except per bloccare solo eccezioni specifiche di disconnessione
                         try:
                             stream_receiver.scan_frame_received.disconnect(self._handle_scan_frame)
                         except (TypeError, RuntimeError):
-                            # È normale se non c'erano connessioni precedenti o se il segnale era collegato a un metodo diverso
-                            logger.debug(
-                                "Nessuna connessione precedente da disconnettere o errore nella disconnessione")
+                            logger.debug("Nessuna connessione precedente da disconnettere")
                             pass
 
-                        # Ricollega direttamente alla funzione di gestione (non usando lambda che può causare problemi)
+                        # Ricollega direttamente alla funzione di gestione
                         stream_receiver.scan_frame_received.connect(self._handle_scan_frame)
                         logger.info("Segnale scan_frame_received collegato con successo")
 
-                        # Configura il routing diretto per prestazioni ottimali
+                        # Configura il routing diretto
                         if hasattr(stream_receiver, 'set_frame_processor'):
-                            # Imposta il processore di frame per il routing diretto
+                            # Imposta il processore di frame
                             stream_receiver.set_frame_processor(self.scan_frame_processor)
-
-                            # Abilita il routing diretto per prestazioni ottimali
+                            # Abilita il routing diretto
                             stream_receiver.enable_direct_routing(True)
-                            logger.info("Routing diretto configurato per prestazioni ottimali")
+                            logger.info("Routing diretto configurato con successo")
                         else:
                             logger.warning("Stream receiver non supporta il routing diretto")
 
-                        # Log di configurazione completata
-                        logger.info("Integrazione StreamReceiver ↔ ScanFrameProcessor completata")
-
+                        # Verifica lo stato e i componenti chiave
+                        self._verify_scan_components()
                     else:
                         logger.warning("StreamReceiver non trovato nello streaming_widget")
                 else:
@@ -3572,10 +3585,38 @@ class ScanView(QWidget):
         else:
             logger.error("Scanner controller o connection manager non disponibile")
 
+    def _verify_scan_components(self):
+        """Verifica che tutti i componenti critici per la scansione siano inizializzati correttamente."""
+        try:
+            # Verifica ScanFrameProcessor
+            if not hasattr(self, 'scan_frame_processor') or self.scan_frame_processor is None:
+                logger.error("ERRORE CRITICO: ScanFrameProcessor non inizializzato")
+                return False
+
+            # Verifica il triangolatore interno
+            if not hasattr(self.scan_frame_processor, '_triangulator'):
+                logger.error("ERRORE CRITICO: '_triangulator' non esiste in ScanFrameProcessor")
+                return False
+
+            if self.scan_frame_processor._triangulator is None:
+                logger.error("ERRORE CRITICO: Triangolatore interno nullo")
+                return False
+
+            # Verifica frame buffer
+            if not hasattr(self.scan_frame_processor, '_frame_buffer'):
+                logger.error("ERRORE CRITICO: '_frame_buffer' non esiste in ScanFrameProcessor")
+                return False
+
+            logger.info("Verifica componenti completata con successo!")
+            return True
+        except Exception as e:
+            logger.error(f"Errore nella verifica dei componenti: {e}")
+            return False
+
     def _handle_scan_frame(self, camera_index, frame, frame_info):
         """
         Gestore centralizzato per i frame di scansione.
-        Versione riprogettata per l'elaborazione diretta in memoria senza salvataggio intermedio.
+        Versione ottimizzata per velocità e robustezza.
 
         Args:
             camera_index: Indice della camera (0=sinistra, 1=destra)
@@ -3589,38 +3630,29 @@ class ScanView(QWidget):
                 pointcloud = frame_info.get("pointcloud")
                 if pointcloud is not None and len(pointcloud) > 0:
                     self.realtime_viewer.update_pointcloud(pointcloud)
-                    logger.info(f"Aggiornata visualizzazione con nuvola di {len(pointcloud)} punti")
-
-                    # Abilita pulsanti di interazione durante la scansione
+                    # Abilita pulsanti durante la scansione
                     self.view_3d_button.setEnabled(True)
-
                     # Salva la nuvola corrente per uso futuro
                     self._current_pointcloud = pointcloud
                 return
             except Exception as e:
                 logger.error(f"Errore nell'aggiornamento della visualizzazione 3D: {e}")
 
-        # Log dettagliato per ogni frame ricevuto
+        # Estrai informazioni minimali necessarie
         pattern_index = frame_info.get("pattern_index", -1)
-        pattern_name = frame_info.get("pattern_name", "unknown")
         scan_id = frame_info.get("scan_id", self.current_scan_id)
-
-        logger.info(f"FRAME RICEVUTO: Camera {camera_index} - Pattern {pattern_index} ({pattern_name})")
+        is_scan_frame = frame_info.get("is_scan_frame", False)
 
         # Verifica che sia un frame di scansione
-        if not frame_info.get("is_scan_frame", False):
-            logger.warning(f"Frame non marcato come frame di scansione: {frame_info}")
+        if not is_scan_frame:
             return
 
         # Verifica se c'è una scansione attiva - se non c'è, inizializziamo lo stato
-        if not self.is_scanning:
-            logger.warning(
-                f"Ricevuto frame {pattern_index} ma nessuna scansione è attiva. Inizializzazione automatica.")
-            # Inizializzazione automatica dello stato di scansione se necessario
+        if not self.is_scanning and pattern_index >= 0:
+            # Inizializzazione automatica se necessario
             if self.current_scan_id is None:
                 timestamp = int(time.time())
                 self.current_scan_id = f"AutoScan_{timestamp}"
-                logger.warning(f"Creato scan_id automatico: {self.current_scan_id}")
                 # Attiva lo stato di scansione
                 self.is_scanning = True
                 # Aggiorna l'interfaccia
@@ -3629,57 +3661,50 @@ class ScanView(QWidget):
                 self.stop_scan_button.setEnabled(True)
 
         # Verifica l'ID della scansione
-        if not scan_id and self.current_scan_id:
-            scan_id = self.current_scan_id
-            logger.info(f"Nessun scan_id nel frame, usando quello corrente: {scan_id}")
-        elif not scan_id and not self.current_scan_id:
-            # Entrambi nulli, crea un nuovo ID
-            timestamp = int(time.time())
-            scan_id = f"Scan_{timestamp}"
-            self.current_scan_id = scan_id
-            logger.warning(f"Nessun scan_id disponibile, creato nuovo ID: {scan_id}")
+        if not scan_id:
+            scan_id = self.current_scan_id or f"Scan_{int(time.time())}"
 
-        # Verifica il frame ricevuto
+        # Verifica il frame
         if frame is None or frame.size == 0:
             logger.error(f"Frame {pattern_index} nullo o vuoto")
             return
 
-        logger.info(f"Frame valido: shape={frame.shape}, dtype={frame.dtype}, min={frame.min()}, max={frame.max()}")
-
-        # ELABORAZIONE DIRETTA IN MEMORIA: Passiamo il frame al processore in-memory
-        # senza salvare su disco come step intermedio
+        # ELABORAZIONE DIRETTA: usa il processore ottimizzato
         try:
-            # Verifica che il processore sia disponibile
+            # Verifica che il processore sia inizializzato
             if not hasattr(self, 'scan_frame_processor') or self.scan_frame_processor is None:
                 logger.error("ScanFrameProcessor non disponibile!")
                 self.scan_frame_processor = ScanFrameProcessor(output_dir=self.output_dir)
-                logger.info("Creato nuovo ScanFrameProcessor")
+                logger.info("Creato nuovo ScanFrameProcessor di emergenza")
 
-            # Verifica che il processore abbia lo scan_id corretto
+                # Verifica che abbia il triangolatore
+                if not hasattr(self.scan_frame_processor,
+                               '_triangulator') or self.scan_frame_processor._triangulator is None:
+                    self.scan_frame_processor._triangulator = RealTimeTriangulator(output_dir=self.output_dir)
+                    logger.info("Creato nuovo triangolatore di emergenza")
+
+            # Assicurati che la scansione sia attiva
             if not self.scan_frame_processor.is_scanning:
                 self.scan_frame_processor.start_scan(scan_id=scan_id)
                 logger.info(f"Avviato scan_id nel processor: {scan_id}")
 
-            # Elabora il frame direttamente in memoria
-            success = self.scan_frame_processor.process_frame(camera_index, frame, frame_info)
+            # Elabora il frame senza bloccare il thread UI
+            # Usando QueuedConnection per evitare blocchi
+            QMetaObject.invokeMethod(
+                self.scan_frame_processor,
+                "process_frame",
+                Qt.QueuedConnection,
+                Q_ARG(int, camera_index),
+                Q_ARG(np.ndarray, frame.copy()),  # Copia il frame per sicurezza
+                Q_ARG(dict, frame_info.copy())
+            )
 
-            if success:
-                logger.info(f"ScanFrameProcessor: elaborazione frame {pattern_index} riuscita")
-                # Aggiorna l'anteprima dell'interfaccia
-                if camera_index == 1:  # Solo dopo il frame della camera destra
-                    self._update_preview_image()
-
-                # Aggiorna lo stato nell'interfaccia
-                if hasattr(self, '_progress_callback') and self._progress_callback:
-                    progress = self.scan_frame_processor.get_scan_progress()
-                    self._progress_callback(progress)
-            else:
-                logger.error(f"ScanFrameProcessor: errore nell'elaborazione del frame {pattern_index}")
+            # Aggiorna anche l'anteprima nell'UI
+            if camera_index == 1:  # Solo dopo camera destra
+                self._update_preview_image()
 
         except Exception as e:
             logger.error(f"Errore generale nell'elaborazione del frame: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def _setup_frame_receiver(self):
         """
