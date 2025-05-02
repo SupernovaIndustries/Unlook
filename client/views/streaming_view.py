@@ -1160,7 +1160,7 @@ class DualStreamView(QWidget):
             self.stream_receiver.frame_received.connect(self._on_frame_received)
             self.stream_receiver.connected.connect(self._on_stream_connected)
             self.stream_receiver.disconnected.connect(self._on_stream_disconnected)
-            self.stream_receiver.error.connect(self._on_stream_error)
+            self.stream_receiver.error.connect(self._on_stream_error)  # Ora con firma corretta
 
             # Invia il comando di avvio dello streaming
             command_success = self.scanner_controller.send_command(
@@ -1588,17 +1588,17 @@ class DualStreamView(QWidget):
         if camera_index < len(self.stream_views):
             self.stream_views[camera_index].info_label.setText(f"Camera {camera_name} | Disconnessa")
 
-    @Slot(int, str)
-    def _on_stream_error(self, camera_index: int, error: str):
+    @Slot(str)
+    def _on_stream_error(self, error: str):
         """Gestisce gli errori dello stream."""
-        logger.error(f"Errore nello stream della camera {camera_index}: {error}")
+        logger.error(f"Errore nello stream: {error}")
 
-        # Aggiorna lo stato visivo della camera
-        camera_name = "Sinistra" if camera_index == 0 else "Destra"
-        if camera_index < len(self.stream_views):
-            self.stream_views[camera_index].info_label.setText(f"Camera {camera_name} | ERRORE")
-            self.stream_views[camera_index].lag_label.setText(f"Errore: {error[:20]}...")
-            self.stream_views[camera_index].lag_label.setStyleSheet("color: red; font-weight: bold;")
+        # Aggiorna lo stato visivo di entrambe le camere dato che non sappiamo quale ha generato l'errore
+        for camera_index, view in enumerate(self.stream_views):
+            camera_name = "Sinistra" if camera_index == 0 else "Destra"
+            view.info_label.setText(f"Camera {camera_name} | ERRORE")
+            view.lag_label.setText(f"Errore: {error[:20]}...")
+            view.lag_label.setStyleSheet("color: red; font-weight: bold;")
 
     def capture_frame(self) -> bool:
         """

@@ -214,6 +214,7 @@ class StreamReceiver(QObject):
     def _on_error(self, error_message: str):
         """Gestisce un errore."""
         logger.error(f"Errore nello StreamReceiver: {error_message}")
+        # Assicurati che il segnale error venga emesso con l'argomento error_message
         self.error.emit(error_message)
 
     def get_performance_stats(self) -> dict:
@@ -262,6 +263,7 @@ class StreamReceiverThread(QThread):
         self._reconnect_attempts = 0
         self._max_reconnect_attempts = 5
         self._mutex = QMutex()
+        self._max_queue_size = 10  # Valore predefinito per il buffer di ricezione ZeroMQ
 
         # Proprietà per il routing diretto
         self._frame_processor = None
@@ -273,17 +275,12 @@ class StreamReceiverThread(QThread):
         self._frames_processed = 0
         self._start_time = time.time()
 
-        # OTTIMIZZAZIONE LATENZA: Ridurre dimensione coda e parametri ZMQ
-        # Riduci la dimensione massima della coda per evitare l'accumulo frame
-        self._max_queue_size = 1  # Era 2, ridotto a 1 per minima latenza
-        # Riduzione intervallo di misurazione della latenza
-        self._frame_interval = 0
+        # CORREZIONE: Inizializzazione variabili controllo di flusso
+        self._processing_lag = 0.0  # Inizializzato a zero
+        self._frame_interval = 0.0
         self._last_frame_time = 0
-        # Controllo flusso più aggressivo per ridurre latenza
         self._adaptive_mode = True
-        # Soglia ridotta per scartare frame quando c'è ritardo
-        self._frame_drop_threshold = 50  # Era 100, ridotto a 50ms
-        # Flag per attivare modalità bassa latenza
+        self._frame_drop_threshold = 50  # ms
         self._low_latency_mode = True
 
     def _processing_loop(self):

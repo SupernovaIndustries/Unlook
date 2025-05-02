@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from client.models.scanner_model import Scanner, ScannerStatus
+from client.processing.scan_frame_processor import ScanFrameProcessor, RealTimeTriangulator
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
@@ -23,8 +24,12 @@ from PySide6.QtWidgets import (
     QButtonGroup, QLineEdit, QProgressBar, QToolButton, QDialog, QScrollArea,
     QTextEdit, QApplication, QStyle, QStyleOption, QStyleFactory, QProgressDialog
 )
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, QSize, QSettings, QThread, QObject
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QSize, QSettings, QThread, QObject, QMetaObject, QGenericArgument
 from PySide6.QtGui import QIcon, QFont, QColor, QPixmap, QImage
+
+
+def Q_ARG(type_name, value):
+    return QGenericArgument(type_name, value)
 
 
 # Definizione della classe ScanFrameProcessor come fallback globale
@@ -119,10 +124,12 @@ except ImportError:
 
 try:
     from PyQt5.QtWebEngineWidgets import QWebEngineView
+
     WEBENGINE_AVAILABLE = True
 except ImportError:
     try:
         from PySide6.QtWebEngineWidgets import QWebEngineView
+
         WEBENGINE_AVAILABLE = True
     except ImportError:
         WEBENGINE_AVAILABLE = False
@@ -847,6 +854,7 @@ class RealtimeViewer3D(QWidget):
                 "Errore",
                 f"Si è verificato un errore durante l'esportazione:\n{str(e)}"
             )
+
 
 class TestCapabilityWorker(QObject):
     """Worker per eseguire il test delle capacità di scansione in un thread separato."""
@@ -2642,6 +2650,7 @@ class ScanView(QWidget):
             logger.debug("Keepalive scansione inviato")
         except Exception as e:
             logger.debug(f"Errore nell'invio del keepalive scansione: {e}")
+
     def _handle_status_timeout(self):
         """Gestisce il timeout nella risposta allo stato della scansione."""
         logger.warning("Timeout nella richiesta dello stato della scansione")
@@ -2667,6 +2676,7 @@ class ScanView(QWidget):
             else:
                 # Reset del contatore di errori
                 self._polling_errors = 0
+
     def _stop_scan(self):
         """Interrompe la scansione in corso."""
         if not self.is_scanning or not self.selected_scanner:
@@ -3512,7 +3522,6 @@ class ScanView(QWidget):
 
             return False
 
-
     def _register_frame_handler(self):
         """
         Registra un gestore per ricevere i frame della scansione in tempo reale.
@@ -3694,9 +3703,9 @@ class ScanView(QWidget):
                 self.scan_frame_processor,
                 "process_frame",
                 Qt.QueuedConnection,
-                Q_ARG(int, camera_index),
-                Q_ARG(np.ndarray, frame.copy()),  # Copia il frame per sicurezza
-                Q_ARG(dict, frame_info.copy())
+                QGenericArgument("int", camera_index),
+                QGenericArgument("PyObject", frame.copy()),
+                QGenericArgument("PyObject", frame_info.copy())
             )
 
             # Aggiorna anche l'anteprima nell'UI
