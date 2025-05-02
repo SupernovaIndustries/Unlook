@@ -3628,12 +3628,7 @@ class ScanView(QWidget):
     def _handle_scan_frame(self, camera_index, frame, frame_info):
         """
         Gestore centralizzato per i frame di scansione.
-        Versione ottimizzata per velocità e robustezza.
-
-        Args:
-            camera_index: Indice della camera (0=sinistra, 1=destra)
-            frame: Frame come array NumPy
-            frame_info: Informazioni sul frame (pattern_index, pattern_name, ecc.)
+        Versione ottimizzata per velocità e robustezza con migliore gestione dell'inizializzazione.
         """
         # Gestione speciale per aggiornamenti della nuvola di punti
         if frame_info.get("type") == "pointcloud_update" and hasattr(self, 'realtime_viewer'):
@@ -3649,6 +3644,7 @@ class ScanView(QWidget):
                 return
             except Exception as e:
                 logger.error(f"Errore nell'aggiornamento della visualizzazione 3D: {e}")
+                return  # Ritorna per evitare ulteriori elaborazioni
 
         # Estrai informazioni minimali necessarie
         pattern_index = frame_info.get("pattern_index", -1)
@@ -3659,64 +3655,105 @@ class ScanView(QWidget):
         if not is_scan_frame:
             return
 
-        # Verifica se c'è una scansione attiva - se non c'è, inizializziamo lo stato
+        # Prima verifica critica: il processore di frame è disponibile e inizializzato?
+        if not hasattr(self, 'scan_frame_processor') or self.scan_frame_processor is None:
+            logger.error("ScanFrameProcessor non disponibile, impossibile elaborare il frame")
+            return
+
+        # Verifica se c'è una scansione attiva - se non c'è, inizializza in modo sicuro
         if not self.is_scanning and pattern_index >= 0:
-            # Inizializzazione automatica se necessario
+            # Logga l'evento prima di inizializzare
+            logger.info(f"Inizializzazione automatica della scansione per frame con pattern_index={pattern_index}")
+
+            # Inizializzazione automatica in modo sicuro
             if self.current_scan_id is None:
                 timestamp = int(time.time())
                 self.current_scan_id = f"AutoScan_{timestamp}"
-                # Attiva lo stato di scansione
-                self.is_scanning = True
-                # Aggiorna l'interfaccia
-                self.status_label.setText(f"Scansione automatica avviata: {self.current_scan_id}")
-                self.progress_bar.setValue(0)
-                self.stop_scan_button.setEnabled(True)
+                # Inizializza il processore PRIMA di attivare lo stato di scansione
+                if not self.scan_frame_processor.is_scanning:
+                    try:
+                        # Prima avvia la scansione nel processore
+                        success = self.scan_frame_processor.start_scan(scan_id=self.current_scan_id)
+                        if not success:
+                            logger.error("Impossibile avviare la scansione nel processore, frame ignorato")
+                            return
+                        # Solo se l'inizializzazione del processore è riuscita, imposta lo stato locale
+                        self.is_scanning = True
+                        # Aggiorna l'interfaccia
+                        self.status_label.setText(f"Scansione automatica avviata: {self.current_scan_id}")
+                        self.progress_bar.setValue(0)
+                        self.stop_scan_button.setEnabled(True)
+                        logger.info(f"Scansione automatica avviata con successo: {self.current_scan_id}")
+                    except Exception as e:
+                        logger.error(f"Errore nell'inizializzazione automatica della scansione: {e}")
+                        return
+                else:
+                    # Il processore è già in stato di scansione, sincronizza lo stato locale
+                    self.is_scanning = True
+                    logger.info("Stato di scansione sincronizzato con il processore")
+            else:
+                # Il current_scan_id è già impostato, verifica solo che il processore sia attivo
+                if not self.scan_frame_processor.is_scanning:
+                    try:
+                        success = self.scan_frame_processor.start_scan(scan_id=self.current_scan_id)
+                        if not success:
+                            logger.error(
+                                "Impossibile avviare la scansione nel processore con ID esistente, frame ignorato")
+                            return
+                        self.is_scanning = True
+                    except Exception as e:
+                        logger.error(f"Errore nell'avvio della scansione con ID esistente: {e}")
+                        return
+                else:
+                    self.is_scanning = True
 
-        # Verifica l'ID della scansione
-        if not scan_id:
-            scan_id = self.current_scan_id or f"Scan_{int(time.time())}"
+        # Se non siamo in stato di scansione dopo i tentativi di inizializzazione, ignora il frame
+        if not self.is_scanning:
+            logger.warning(f"Frame ignorato: nessuna scansione attiva per pattern_index={pattern_index}")
+            return
 
         # Verifica il frame
         if frame is None or frame.size == 0:
             logger.error(f"Frame {pattern_index} nullo o vuoto")
             return
 
+        # Verifica l'ID della scansione
+        if not scan_id:
+            scan_id = self.current_scan_id or f"Scan_{int(time.time())}"
+
         # ELABORAZIONE DIRETTA: usa il processore ottimizzato
         try:
-            # Verifica che il processore sia inizializzato
-            if not hasattr(self, 'scan_frame_processor') or self.scan_frame_processor is None:
-                logger.error("ScanFrameProcessor non disponibile!")
-                self.scan_frame_processor = ScanFrameProcessor(output_dir=self.output_dir)
-                logger.info("Creato nuovo ScanFrameProcessor di emergenza")
-
-                # Verifica che abbia il triangolatore
-                if not hasattr(self.scan_frame_processor,
-                               '_triangulator') or self.scan_frame_processor._triangulator is None:
-                    self.scan_frame_processor._triangulator = RealTimeTriangulator(output_dir=self.output_dir)
-                    logger.info("Creato nuovo triangolatore di emergenza")
-
-            # Assicurati che la scansione sia attiva
+            # Verifica finale
             if not self.scan_frame_processor.is_scanning:
-                self.scan_frame_processor.start_scan(scan_id=scan_id)
-                logger.info(f"Avviato scan_id nel processor: {scan_id}")
+                logger.error("Stato inconsistente: variabile locale is_scanning=True ma processore non attivo")
+                # Tenta di riavviare la scansione nel processore
+                try:
+                    success = self.scan_frame_processor.start_scan(scan_id=scan_id)
+                    if not success:
+                        logger.error("Impossibile riavviare la scansione nel processore, frame ignorato")
+                        return
+                except Exception as e:
+                    logger.error(f"Errore nel riavvio della scansione: {e}")
+                    return
 
-            # Elabora il frame senza bloccare il thread UI
-            # Usando QueuedConnection per evitare blocchi
-            QMetaObject.invokeMethod(
-                self.scan_frame_processor,
-                "process_frame",
-                Qt.QueuedConnection,
-                QGenericArgument("int", camera_index),
-                QGenericArgument("PyObject", frame.copy()),
-                QGenericArgument("PyObject", frame_info.copy())
-            )
+            # Elabora il frame in modo sicuro
+            try:
+                # Approccio più sicuro: chiamata diretta invece di usare invokeMethod
+                self.scan_frame_processor.process_frame(camera_index, frame.copy(), frame_info.copy())
 
-            # Aggiorna anche l'anteprima nell'UI
-            if camera_index == 1:  # Solo dopo camera destra
-                self._update_preview_image()
+                # Aggiorna anche l'anteprima nell'UI
+                if camera_index == 1:  # Solo dopo camera destra
+                    self._update_preview_image()
+            except Exception as e:
+                logger.error(f"Errore nell'elaborazione diretta del frame: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                # Non propagare l'eccezione per evitare crash
 
         except Exception as e:
             logger.error(f"Errore generale nell'elaborazione del frame: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def _setup_frame_receiver(self):
         """
