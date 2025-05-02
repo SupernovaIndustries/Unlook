@@ -113,7 +113,7 @@ class ScanFrameProcessor:
     def process_frame(self, camera_index, frame, frame_info):
         """
         Elabora un frame di scansione in tempo reale.
-        Versione ottimizzata per migliori prestazioni e robustezza.
+        Versione completamente riscritta per maggiore affidabilità.
 
         Args:
             camera_index: Indice della camera (0=sinistra, 1=destra)
@@ -124,121 +124,141 @@ class ScanFrameProcessor:
             True se il frame è stato elaborato correttamente, False altrimenti
         """
         if not self.is_scanning:
+            logger.warning("ScanFrameProcessor: chiamata a process_frame ma is_scanning=False")
             return False
 
         try:
-            pattern_index = frame_info.get("pattern_index", 0)
+            # Estrai informazioni dal frame
+            pattern_index = frame_info.get("pattern_index", -1)
             pattern_name = frame_info.get("pattern_name", "unknown")
+            scan_id = frame_info.get("scan_id", self.current_scan_id)
 
-            # OTTIMIZZAZIONE: Verifica rapida per frame duplicati
-            if pattern_index in self.pattern_frames.get(camera_index, {}):
-                logger.debug(f"Frame {pattern_index} già ricevuto per camera {camera_index}, ignorato")
-                return True
+            # Verifica e imposta scan_id
+            if not self.current_scan_id and scan_id:
+                self.current_scan_id = scan_id
+            elif not scan_id and self.current_scan_id:
+                scan_id = self.current_scan_id
+            elif not scan_id and not self.current_scan_id:
+                # Entrambi nulli, crea un nuovo ID
+                timestamp = int(time.time())
+                scan_id = f"Scan_{timestamp}"
+                self.current_scan_id = scan_id
+                logger.warning(f"ScanFrameProcessor: creato nuovo scan_id: {scan_id}")
 
-            # Aggiorna il contatore
+            # Log di base
+            logger.info(
+                f"ScanFrameProcessor: elaborazione frame {pattern_index} ({pattern_name}) della camera {camera_index}")
+
+            # Verifica frame duplicati
+            if pattern_index in self.pattern_frames:
+                if camera_index in self.pattern_frames[pattern_index]:
+                    logger.debug(f"Frame {pattern_index} già elaborato per camera {camera_index}, ignorato")
+                    return True
+
+            # Verifica integrità del frame
+            if frame is None or frame.size == 0:
+                logger.error(f"Frame {pattern_index} nullo o vuoto")
+                return False
+
+            # Aggiorna contatori e strutture
             self.frame_counters[camera_index] = self.frame_counters.get(camera_index, 0) + 1
 
-            # Memorizza le informazioni sul pattern
+            # Memorizza informazioni sul pattern
             if pattern_index not in self.pattern_info:
                 self.pattern_info[pattern_index] = {
                     "name": pattern_name,
                     "timestamp": time.time()
                 }
 
-            # OTTIMIZZAZIONE: Inizializza la struttura dati per il pattern e la camera se non esiste
+            # Inizializza struttura dati
             if pattern_index not in self.pattern_frames:
                 self.pattern_frames[pattern_index] = {}
 
-            # OTTIMIZZAZIONE: Memorizza in RAM invece di salvare subito su disco
+            # Memorizza frame in RAM
             self.pattern_frames[pattern_index][camera_index] = frame.copy()
 
-            # Gestisci frame di riferimento bianchi/neri
+            # Gestisci frame di riferimento
             if pattern_name == "white":
                 self.white_frames[camera_index] = frame.copy()
+                logger.info(f"Memorizzato frame di riferimento WHITE per camera {camera_index}")
             elif pattern_name == "black":
                 self.black_frames[camera_index] = frame.copy()
+                logger.info(f"Memorizzato frame di riferimento BLACK per camera {camera_index}")
 
-            # OTTIMIZZAZIONE: Salva su disco in modo asincrono solo periodicamente
-            # o per frame critici (white, black)
-            if pattern_name in ["white", "black"] or pattern_index % 5 == 0 or not hasattr(self,
-                                                                                           '_last_saved_pattern_index') or pattern_index >= self._last_saved_pattern_index + 5:
-                import threading
+            # Prepara percorso di salvataggio ASSOLUTO
+            scan_dir = Path(self.output_dir) / self.current_scan_id
+            scan_dir.mkdir(parents=True, exist_ok=True)
 
-                def save_frame_async(camera_index, frame, pattern_index, pattern_name, scan_dir):
-                    try:
-                        camera_dir = scan_dir / ("left" if camera_index == 0 else "right")
-                        camera_dir.mkdir(parents=True, exist_ok=True)
+            # In questa versione, salviamo SEMPRE i frame, non solo periodicamente
+            # Salvataggio SINCRONO per garantire che i file siano scritti
+            try:
+                # Prepara percorso
+                camera_dir = scan_dir / ("left" if camera_index == 0 else "right")
+                camera_dir.mkdir(parents=True, exist_ok=True)
 
-                        output_path = camera_dir / f"{pattern_index:04d}_{pattern_name}.png"
+                # Componi percorso file
+                output_path = camera_dir / f"{pattern_index:04d}_{pattern_name}.png"
 
-                        # IMPORTANTE: Aggiunto debug
-                        try:
-                            saved = cv2.imwrite(str(output_path), frame)
-                            if not saved:
-                                logger.error(f"cv2.imwrite ha fallito per {output_path}")
-                            logger.debug(
-                                f"Frame {pattern_index} salvato su disco: {output_path} (esistente: {os.path.exists(str(output_path))})")
-                        except Exception as write_err:
-                            logger.error(f"Errore in cv2.imwrite: {write_err}")
+                # Salva con OpenCV
+                success = cv2.imwrite(str(output_path), frame)
 
-                            # Salvataggio alternativo
-                            try:
-                                import imageio
-                                imageio.imwrite(str(output_path), frame)
-                                logger.debug(f"Frame {pattern_index} salvato con imageio")
-                            except Exception as ie:
-                                logger.error(f"Anche imageio ha fallito: {ie}")
+                if not success:
+                    logger.error(f"ScanFrameProcessor: cv2.imwrite ha fallito per {output_path}")
+                    raise RuntimeError("cv2.imwrite ha restituito False")
 
-                                # Fallback ultimo tentativo
-                                try:
-                                    from PIL import Image
-                                    Image.fromarray(frame).save(str(output_path))
-                                    logger.debug(f"Frame {pattern_index} salvato con PIL")
-                                except Exception as pe:
-                                    logger.error(f"Tutti i metodi di salvataggio hanno fallito: {pe}")
+                # Verifica esistenza file
+                if not os.path.exists(str(output_path)):
+                    logger.error(f"ScanFrameProcessor: file {output_path} non esiste dopo cv2.imwrite!")
+                    raise FileNotFoundError(f"File {output_path} non trovato dopo il salvataggio")
 
-                        # Verifica che il file esista realmente
-                        if os.path.exists(str(output_path)):
-                            logger.info(
-                                f"Verificato: file {output_path} esiste (size: {os.path.getsize(str(output_path))})")
-                        else:
-                            logger.error(f"File {output_path} non esiste dopo il salvataggio")
+                file_size = os.path.getsize(str(output_path))
+                logger.info(f"ScanFrameProcessor: frame {pattern_index} salvato: {output_path} ({file_size} bytes)")
 
-                    except Exception as e:
-                        logger.error(f"Errore nel salvataggio asincrono del frame: {e}")
-                        import traceback
-                        logger.error(f"Traceback: {traceback.format_exc()}")
-
-                scan_dir = getattr(self, '_scan_dir',
-                                   self.output_dir / getattr(self, 'current_scan_id', str(int(time.time()))))
-
-                # Avvia thread per il salvataggio asincrono
-                save_thread = threading.Thread(
-                    target=save_frame_async,
-                    args=(camera_index, frame.copy(), pattern_index, pattern_name, scan_dir)
-                )
-                save_thread.daemon = True
-                save_thread.start()
-
+                # Salvataggio riuscito, aggiorna stato
                 self._last_saved_pattern_index = pattern_index
 
-            # Notifica callback se impostata
+            except Exception as e:
+                logger.error(f"ScanFrameProcessor: errore nel salvataggio primario: {e}")
+
+                # Fallback 1: PIL
+                try:
+                    from PIL import Image
+                    img = Image.fromarray(frame)
+                    img.save(str(output_path))
+                    logger.info(f"ScanFrameProcessor: salvataggio con PIL riuscito: {output_path}")
+                except Exception as e2:
+                    logger.error(f"ScanFrameProcessor: anche PIL ha fallito: {e2}")
+
+                    # Fallback 2: NumPy binario
+                    try:
+                        npy_path = str(output_path).replace('.png', '.npy')
+                        np.save(npy_path, frame)
+                        logger.info(f"ScanFrameProcessor: salvataggio numpy riuscito: {npy_path}")
+                    except Exception as e3:
+                        logger.error(f"ScanFrameProcessor: tutti i metodi di salvataggio hanno fallito: {e3}")
+                        # Non solleviamo l'eccezione per non interrompere il flusso
+
+            # Notifica callback
             if self._frame_callback:
-                self._frame_callback(camera_index, pattern_index, frame)
+                try:
+                    self._frame_callback(camera_index, pattern_index, frame)
+                except Exception as e:
+                    logger.error(f"Errore nella frame_callback: {e}")
 
-            # Aggiorna progresso se callback impostata
+            # Aggiorna progress
             if self._progress_callback:
-                progress = self.get_scan_progress()
-                self._progress_callback(progress)
+                try:
+                    progress = self.get_scan_progress()
+                    self._progress_callback(progress)
+                except Exception as e:
+                    logger.error(f"Errore nella progress_callback: {e}")
 
-            # Log più dettagliato per debug
-            logger.info(f"Frame {pattern_index} ({pattern_name}) della camera {camera_index} elaborato " +
-                        f"(totale frame camera {camera_index}: {self.frame_counters[camera_index]})")
-
+            # Log di completamento
+            logger.info(f"ScanFrameProcessor: frame {pattern_index} elaborato completamente")
             return True
 
         except Exception as e:
-            logger.error(f"Errore nell'elaborazione del frame di scansione: {e}")
+            logger.error(f"ScanFrameProcessor: errore generale nell'elaborazione: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             return False

@@ -523,71 +523,150 @@ class ScanProcessor:
     def _find_scan_images(self):
         """
         Trova e ordina tutte le immagini di scansione nella directory con maggiore robustezza.
-        Versione migliorata per gestire meglio la verifica delle directory e dei file.
+        Versione completamente riscritta per gestire più casi e formati.
         """
-        # Reset image lists
+        # Reset delle liste
         self.left_images = []
         self.right_images = []
 
         # Verifica che la directory esista
-        if not self.scan_dir or not self.scan_dir.exists():
+        if not self.scan_dir or not os.path.isdir(self.scan_dir):
             logger.error(f"Directory di scansione non trovata: {self.scan_dir}")
             return False
 
-        # Find all image files
-        left_dir = self.scan_dir / "left"
-        right_dir = self.scan_dir / "right"
+        # Log completo del contenuto della directory per debug
+        logger.info(f"Contenuto directory root: {os.listdir(self.scan_dir)}")
 
-        # Assicura che le directory esistano
-        left_dir.mkdir(parents=True, exist_ok=True)
-        right_dir.mkdir(parents=True, exist_ok=True)
+        # Cerca le sottodirectory left e right
+        left_dir = os.path.join(self.scan_dir, "left")
+        right_dir = os.path.join(self.scan_dir, "right")
 
-        logger.info(f"Cerco immagini in: {left_dir} e {right_dir}")
+        # Verifica esistenza sottodirectory
+        if not os.path.isdir(left_dir):
+            logger.error(f"Directory 'left' non trovata: {left_dir}")
+            # Cerca direttamente nella directory padre
+            logger.info("Tentativo di ricerca direttamente nella directory scan...")
+            self._find_images_in_root()
+            return len(self.left_images) > 0 and len(self.right_images) > 0
 
-        # Verifica per più estensioni di file (.png, .jpg)
-        extensions = ['*.png', '*.jpg', '*.jpeg', '*.raw']
+        if not os.path.isdir(right_dir):
+            logger.error(f"Directory 'right' non trovata: {right_dir}")
+            # Cerca direttamente nella directory padre
+            logger.info("Tentativo di ricerca direttamente nella directory scan...")
+            self._find_images_in_root()
+            return len(self.left_images) > 0 and len(self.right_images) > 0
 
+        # Log del contenuto delle sottodirectory
+        logger.info(f"Contenuto directory left: {os.listdir(left_dir)}")
+        logger.info(f"Contenuto directory right: {os.listdir(right_dir)}")
+
+        # Estensioni da cercare
+        extensions = ['*.png', '*.jpg', '*.jpeg', '*.npy']
+
+        # Cerca file in ciascuna sottodirectory
         left_images = []
         right_images = []
 
         for ext in extensions:
-            left_images.extend(glob.glob(str(left_dir / ext)))
-            right_images.extend(glob.glob(str(right_dir / ext)))
+            left_images.extend(glob.glob(os.path.join(left_dir, ext)))
+            right_images.extend(glob.glob(os.path.join(right_dir, ext)))
 
-        # Se troviamo immagini, le sortiamo e aggiorniamo le liste
+        # Ordina per nome
+        left_images.sort()
+        right_images.sort()
+
+        # Verifica che ci siano immagini
+        if not left_images:
+            logger.error(f"Nessuna immagine trovata in: {left_dir}")
+            return False
+
+        if not right_images:
+            logger.error(f"Nessuna immagine trovata in: {right_dir}")
+            return False
+
+        # Salva le liste
+        self.left_images = left_images
+        self.right_images = right_images
+
+        # Se il numero di immagini è diverso, tronca alla lista più corta
+        if len(self.left_images) != len(self.right_images):
+            logger.warning(f"Numero immagini diverso: left={len(self.left_images)}, right={len(self.right_images)}")
+            min_len = min(len(self.left_images), len(self.right_images))
+            self.left_images = self.left_images[:min_len]
+            self.right_images = self.right_images[:min_len]
+
+        # Log di riepilogo
+        self.num_patterns = len(self.left_images)
+        logger.info(f"Trovate {self.num_patterns} coppie di immagini")
+
+        # Log dettagliato delle prime immagini
+        if self.num_patterns > 0:
+            logger.info(f"Prima immagine left: {self.left_images[0]}")
+            logger.info(f"Prima immagine right: {self.right_images[0]}")
+
+        # Determina il tipo di pattern dai nomi dei file
+        self._detect_pattern_type()
+
+        return self.num_patterns > 0
+
+    def _find_images_in_root(self):
+        """
+        Cerca immagini direttamente nella directory principale della scansione.
+        Utile come fallback quando le sottodirectory non sono trovate.
+        """
+        logger.info(f"Cerco immagini nella root: {self.scan_dir}")
+
+        # Estensioni da cercare
+        extensions = ['*.png', '*.jpg', '*.jpeg', '*.npy']
+
+        # Liste per ogni camera
+        left_images = []
+        right_images = []
+
+        # Cerca immagini con prefissi o suffissi che indicano left/right
+        for ext in extensions:
+            # Cerca file con pattern specifici nei nomi
+            left_patterns = [
+                os.path.join(self.scan_dir, f"left_*{ext.replace('*', '')}"),
+                os.path.join(self.scan_dir, f"*_left{ext.replace('*', '')}"),
+                os.path.join(self.scan_dir, f"camera0*{ext.replace('*', '')}"),
+                os.path.join(self.scan_dir, f"cam0*{ext.replace('*', '')}")
+            ]
+
+            right_patterns = [
+                os.path.join(self.scan_dir, f"right_*{ext.replace('*', '')}"),
+                os.path.join(self.scan_dir, f"*_right{ext.replace('*', '')}"),
+                os.path.join(self.scan_dir, f"camera1*{ext.replace('*', '')}"),
+                os.path.join(self.scan_dir, f"cam1*{ext.replace('*', '')}")
+            ]
+
+            # Cerca per ogni pattern
+            for pattern in left_patterns:
+                left_images.extend(glob.glob(pattern))
+
+            for pattern in right_patterns:
+                right_images.extend(glob.glob(pattern))
+
+        # Se abbiamo trovato immagini, ordiniamole e salviamole
         if left_images and right_images:
-            # Assicurati che le liste siano ordinate
             left_images.sort()
             right_images.sort()
 
-            # Registriamo i percorsi
             self.left_images = left_images
             self.right_images = right_images
 
-            # Ensure same number of images
-            if len(self.left_images) != len(self.right_images):
-                logger.warning(
-                    f"Numero diseguale di immagini: {len(self.left_images)} sinistra, {len(self.right_images)} destra")
-                # Truncate to the shorter list
-                min_len = min(len(self.left_images), len(self.right_images))
-                self.left_images = self.left_images[:min_len]
-                self.right_images = self.right_images[:min_len]
+            # Tronca se necessario
+            min_len = min(len(self.left_images), len(self.right_images))
+            self.left_images = self.left_images[:min_len]
+            self.right_images = self.right_images[:min_len]
 
-            self.num_patterns = len(self.left_images)
-            logger.info(f"Trovate {self.num_patterns} coppie di immagini")
+            self.num_patterns = min_len
 
-            # Determine pattern type from filenames or config
-            self._detect_pattern_type()
-
+            logger.info(f"Trovate {self.num_patterns} coppie nella directory root")
             return True
-        else:
-            # Log dettagliato se non troviamo immagini
-            logger.warning(f"Nessuna immagine trovata in {left_dir} o {right_dir}")
-            logger.info(
-                f"Contenuto directory sinistra: {os.listdir(left_dir) if left_dir.exists() else 'directory non esiste'}")
-            logger.info(
-                f"Contenuto directory destra: {os.listdir(right_dir) if right_dir.exists() else 'directory non esiste'}")
-            return False
+
+        logger.error("Nessuna immagine trovata con pattern left/right nella directory root")
+        return False
 
     def _detect_pattern_type(self):
         """Detect pattern type from image filenames or scan config."""

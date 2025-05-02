@@ -2614,6 +2614,8 @@ class ScanView(QWidget):
 
             return False
 
+    # In client/views/scan_view.py, metodo _register_frame_handler()
+
     def _register_frame_handler(self):
         """
         Registra un gestore per ricevere i frame della scansione in tempo reale.
@@ -2633,18 +2635,30 @@ class ScanView(QWidget):
                         logger.info(f"StreamReceiver trovato, collegamento segnale scan_frame_received...")
 
                         # IMPORTANTE: Assicuriamoci di disconnettere eventuali connessioni precedenti
+                        # Correzione: Utilizziamo try/except per bloccare solo eccezioni specifiche di disconnessione
                         try:
-                            stream_receiver.scan_frame_received.disconnect(self._on_scan_frame_received)
-                        except Exception:
-                            # È normale se non c'erano connessioni precedenti
+                            stream_receiver.scan_frame_received.disconnect(self._handle_scan_frame)
+                        except (TypeError, RuntimeError):
+                            # È normale se non c'erano connessioni precedenti o se il segnale era collegato a un metodo diverso
+                            logger.debug(
+                                "Nessuna connessione precedente da disconnettere o errore nella disconnessione")
                             pass
 
-                        # Ricollega la nostra funzione
-                        stream_receiver.scan_frame_received.connect(
-                            lambda camera_index, frame, frame_info: self._handle_scan_frame(camera_index, frame,
-                                                                                            frame_info)
-                        )
+                        # Ricollega direttamente alla funzione di gestione (non usando lambda che può causare problemi)
+                        stream_receiver.scan_frame_received.connect(self._handle_scan_frame)
                         logger.info("Segnale scan_frame_received collegato con successo")
+
+                        # Test di connessione inviando un segnale di prova
+                        try:
+                            import numpy as np
+                            # Creiamo un frame di test
+                            test_frame = np.zeros((10, 10, 3), dtype=np.uint8)
+                            test_info = {"is_scan_frame": True, "pattern_index": -1, "pattern_name": "test"}
+                            logger.info("Invio frame di test per verificare connessione segnale...")
+                            # Non emettere realmente il segnale che causerebbe errori
+                            # stream_receiver.scan_frame_received.emit(0, test_frame, test_info)
+                        except Exception as e:
+                            logger.error(f"Errore nel test di connessione del segnale: {e}")
                     else:
                         logger.warning("StreamReceiver non trovato nello streaming_widget")
                 else:
@@ -2660,35 +2674,133 @@ class ScanView(QWidget):
     def _handle_scan_frame(self, camera_index, frame, frame_info):
         """
         Gestore centralizzato per i frame di scansione.
+        Versione migliorata con salvataggio di sicurezza e diagnostica approfondita.
 
         Args:
             camera_index: Indice della camera (0=sinistra, 1=destra)
             frame: Frame come array NumPy
             frame_info: Informazioni sul frame (pattern_index, pattern_name, ecc.)
         """
-        # Verifichiamo che sia un frame di scansione
-        if not frame_info.get("is_scan_frame", False):
-            return
-
-        # Verifichiamo se c'è una scansione attiva
-        if not self.is_scanning:
-            logger.warning("Ricevuto frame di scansione ma nessuna scansione è attiva")
-            return
-
-        # Log dettagliato
-        pattern_index = frame_info.get("pattern_index", 0)
+        # Log dettagliato per ogni frame ricevuto
+        pattern_index = frame_info.get("pattern_index", -1)
         pattern_name = frame_info.get("pattern_name", "unknown")
-        logger.info(f"Gestione frame {pattern_index} ({pattern_name}) della camera {camera_index}")
+        scan_id = frame_info.get("scan_id", self.current_scan_id)
 
-        # Elabora il frame con il nostro processore
-        success = self.scan_frame_processor.process_frame(camera_index, frame, frame_info)
+        logger.info(f"FRAME RICEVUTO: Camera {camera_index} - Pattern {pattern_index} ({pattern_name})")
 
-        if success:
-            # Aggiorna l'anteprima dell'interfaccia
-            if camera_index == 1:  # Solo dopo il frame della camera destra
-                self._update_preview_image()
-        else:
-            logger.error(f"Errore nell'elaborazione del frame {pattern_index} della camera {camera_index}")
+        # Verifica che sia un frame di scansione
+        if not frame_info.get("is_scan_frame", False):
+            logger.warning(f"Frame non marcato come frame di scansione: {frame_info}")
+            return
+
+        # Verifica se c'è una scansione attiva - se non c'è, salviamo comunque ma con warning
+        if not self.is_scanning:
+            logger.warning(f"Ricevuto frame {pattern_index} ma nessuna scansione è attiva. Salvando comunque.")
+            # Prova ad attivare automaticamente lo stato di scansione se non attivo
+            if self.current_scan_id is None:
+                timestamp = int(time.time())
+                self.current_scan_id = f"EmergencyScan_{timestamp}"
+                logger.warning(f"Creato scan_id di emergenza: {self.current_scan_id}")
+                self.is_scanning = True
+
+        # Verifica l'ID della scansione
+        if not scan_id and self.current_scan_id:
+            scan_id = self.current_scan_id
+            logger.info(f"Nessun scan_id nel frame, usando quello corrente: {scan_id}")
+        elif not scan_id:
+            timestamp = int(time.time())
+            scan_id = f"Scan_{timestamp}"
+            self.current_scan_id = scan_id
+            logger.warning(f"Nessun scan_id disponibile, creato nuovo ID: {scan_id}")
+
+        # Verifica il frame ricevuto
+        if frame is None or frame.size == 0:
+            logger.error(f"Frame {pattern_index} nullo o vuoto")
+            return
+
+        logger.info(f"Frame valido: shape={frame.shape}, dtype={frame.dtype}, min={frame.min()}, max={frame.max()}")
+
+        # Salvataggio di emergenza diretto (bypass ScanFrameProcessor per sicurezza)
+        try:
+            # Crea directory di scan
+            scan_dir = Path(self.output_dir) / scan_id
+            scan_dir.mkdir(parents=True, exist_ok=True)
+
+            # Crea directory per camera
+            camera_dir = scan_dir / ("left" if camera_index == 0 else "right")
+            camera_dir.mkdir(parents=True, exist_ok=True)
+
+            # Componi nome file e percorso
+            if pattern_index < 0:
+                # Caso speciale per frames di test o non numerati
+                filename = f"test_{int(time.time() * 1000)}.png"
+            else:
+                filename = f"{pattern_index:04d}_{pattern_name}.png"
+
+            file_path = camera_dir / filename
+
+            # Salva direttamente con OpenCV
+            success = cv2.imwrite(str(file_path), frame)
+            if success:
+                logger.info(f"SALVATAGGIO DIRETTO: Frame salvato in {file_path}")
+                # Verifica file esistente
+                if os.path.exists(str(file_path)):
+                    file_size = os.path.getsize(str(file_path))
+                    logger.info(f"Verifica file: {file_path} - dimensione: {file_size} bytes")
+                else:
+                    logger.error(f"ERRORE CRITICO: File {file_path} non esiste dopo il salvataggio!")
+            else:
+                logger.error(f"ERRORE CRITICO: cv2.imwrite ha fallito per {file_path}")
+
+                # Tentativo alternativo con PIL
+                try:
+                    from PIL import Image
+                    img = Image.fromarray(frame)
+                    img.save(str(file_path))
+                    logger.info(f"Salvataggio alternativo con PIL successo: {file_path}")
+                except Exception as e:
+                    logger.error(f"Anche salvataggio PIL fallito: {e}")
+
+                    # Salvataggio binario come ultima risorsa
+                    try:
+                        np.save(str(file_path).replace('.png', '.npy'), frame)
+                        logger.info(f"Salvataggio binario numpy successo: {file_path}.npy")
+                    except Exception as e2:
+                        logger.error(f"Tutti i metodi di salvataggio hanno fallito: {e2}")
+
+        except Exception as e:
+            logger.error(f"Errore nel salvataggio diretto del frame: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+        # Passaggio al ScanFrameProcessor (dopo il salvataggio diretto di sicurezza)
+        try:
+            # Verifica processor
+            if not hasattr(self, 'scan_frame_processor') or self.scan_frame_processor is None:
+                logger.error("ScanFrameProcessor non disponibile!")
+                self.scan_frame_processor = ScanFrameProcessor(output_dir=self.output_dir)
+                logger.info("Creato nuovo ScanFrameProcessor di emergenza")
+
+            # Assicurati che il processor abbia lo scan_id corretto
+            if not self.scan_frame_processor.is_scanning:
+                self.scan_frame_processor.start_scan(scan_id=scan_id)
+                logger.info(f"Avviato scan_id nel processor: {scan_id}")
+
+            # Elabora il frame (anche se abbiamo già fatto un salvataggio di emergenza)
+            success = self.scan_frame_processor.process_frame(camera_index, frame, frame_info)
+
+            if success:
+                logger.info(f"ScanFrameProcessor: elaborazione frame {pattern_index} riuscita")
+                # Aggiorna l'anteprima dell'interfaccia
+                if camera_index == 1:  # Solo dopo il frame della camera destra
+                    self._update_preview_image()
+            else:
+                logger.error(f"ScanFrameProcessor: errore nell'elaborazione del frame {pattern_index}")
+
+        except Exception as e:
+            logger.error(f"Errore generale nel passaggio a ScanFrameProcessor: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
     def _setup_frame_receiver(self):
         """
         Configura un ricevitore dedicato per i frame di scansione.

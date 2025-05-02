@@ -14,6 +14,7 @@ import threading
 import cv2
 import numpy as np
 from typing import Dict, Any, Optional, Callable, Tuple, List, Set
+from pathlib import Path
 
 import zmq
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QMutex, QMutexLocker, QThread
@@ -341,6 +342,21 @@ class StreamReceiverThread(QThread):
                         except json.JSONDecodeError:
                             logger.warning("Header JSON non valido")
                             continue
+
+                        if header.get("is_scan_frame", False):
+                            logger.info(
+                                f"Ricevuto frame di scansione: camera={camera_index}, pattern={header.get('pattern_index', 'unknown')}")
+                            # Salva una copia raw del frame per debug
+                            try:
+                                debug_dir = Path.home() / "UnLook" / "debug"
+                                debug_dir.mkdir(parents=True, exist_ok=True)
+                                timestamp = int(time.time() * 1000)
+                                debug_file = debug_dir / f"scan_frame_raw_{timestamp}_{camera_index}.bin"
+                                with open(debug_file, 'wb') as f:
+                                    f.write(frame_data)
+                                logger.debug(f"Frame raw salvato per debug: {debug_file}")
+                            except Exception as e:
+                                logger.debug(f"Impossibile salvare frame raw per debug: {e}")
 
                         # Verifica dati minimi necessari
                         if None in (camera_index, timestamp, format_str):

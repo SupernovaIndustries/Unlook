@@ -127,6 +127,49 @@ def fix_stream_receiver_filename(project_root):
     return True
 
 
+def verify_scan_directories():
+    """
+    Verifica che le directory di scansione siano accessibili e scrivibili.
+    """
+    import os
+    from pathlib import Path
+
+    # Controlla directory home utente
+    home_dir = Path.home()
+    if not os.access(str(home_dir), os.W_OK):
+        logger.error(f"La directory home {home_dir} non è scrivibile!")
+    else:
+        logger.info(f"Directory home {home_dir} OK (scrivibile)")
+
+    # Verifica directory scansioni predefinita
+    scan_dir = home_dir / "UnLook" / "scans"
+
+    # Crea la directory se non esiste
+    try:
+        scan_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Directory scansioni {scan_dir} creata/verificata")
+
+        # Verifica diritti di scrittura
+        if not os.access(str(scan_dir), os.W_OK):
+            logger.error(f"La directory scansioni {scan_dir} non è scrivibile!")
+        else:
+            logger.info(f"Directory scansioni {scan_dir} OK (scrivibile)")
+
+        # Test di scrittura
+        test_file = scan_dir / "test_write.tmp"
+        try:
+            with open(test_file, 'w') as f:
+                f.write("Test di scrittura")
+            logger.info(f"Test di scrittura riuscito: {test_file}")
+
+            # Pulisci
+            os.remove(test_file)
+        except Exception as e:
+            logger.error(f"Test di scrittura fallito: {e}")
+
+    except Exception as e:
+        logger.error(f"Errore nella creazione directory scansioni: {e}")
+
 def create_missing_init_files(project_root):
     """
     Crea file __init__.py mancanti nelle directory del progetto.
@@ -153,6 +196,8 @@ def create_missing_init_files(project_root):
                     logger.error(f"Errore nella creazione di {init_file}: {e}")
 
 
+
+
 def main():
     """
     Funzione principale che avvia l'applicazione.
@@ -176,6 +221,9 @@ def main():
         if user_input.lower() != 's':
             logger.info("Avvio annullato dall'utente.")
             sys.exit(1)
+
+    # Verifica le directory di scansione
+    verify_scan_directories()
 
     # Crea file __init__.py mancanti
     create_missing_init_files(project_root)
