@@ -545,7 +545,7 @@ class ScanManager:
                                  right_frame_data: bytes) -> bool:
         """
         Notifica il client di nuovi frame acquisiti durante la scansione.
-        Versione migliorata con gestione robusta degli errori e canale di comunicazione dedicato.
+        Versione semplificata con socket dedicato per garantire maggiore affidabilità.
 
         Args:
             frame_info: Informazioni sul frame (indice, nome pattern, timestamp)
@@ -557,7 +557,6 @@ class ScanManager:
         """
         try:
             import zmq
-
             pattern_index = frame_info.get('pattern_index', 'sconosciuto')
             logger.info(f"Tentativo invio frame {pattern_index} al client")
 
@@ -566,7 +565,7 @@ class ScanManager:
                 logger.warning("Nessun riferimento al server disponibile")
                 return False
 
-            # Codifica i dati in base64 per la trasmissione JSON
+            # Codifica i dati in base64 per la trasmissione
             import base64
             left_b64 = base64.b64encode(left_frame_data).decode('utf-8')
             right_b64 = base64.b64encode(right_frame_data).decode('utf-8')
@@ -581,75 +580,30 @@ class ScanManager:
                 "timestamp": time.time()
             }
 
-            # STRATEGIA 1: Utilizzo dello stream_socket (PUB) per invio non bloccante
-            # Questo socket non richiede una richiesta precedente come il REP
-            success = False
-            if hasattr(self.server, 'stream_socket'):
-                try:
-                    # Invia un messaggio multipart con topic "SCAN_FRAME"
-                    # (così i client possono filtrare solo questo tipo di messaggi)
-                    self.server.stream_socket.send_string("SCAN_FRAME", zmq.SNDMORE)
-                    self.server.stream_socket.send_json(message)
-                    logger.info(f"Frame {pattern_index} inviato tramite stream_socket")
-                    success = True
-                except Exception as e:
-                    logger.warning(f"Errore nell'invio tramite stream_socket: {e}")
+            # Usa un socket dedicato PUSH per l'invio dei frame
+            # Questo approccio è più affidabile rispetto ai metodi precedenti
+            try:
+                # Inizializza il socket se non esiste
+                if not hasattr(self, '_frame_socket'):
+                    context = zmq.Context.instance()
+                    self._frame_socket = context.socket(zmq.PUSH)
+                    # Imposta timeout più lunghi per evitare blocchi
+                    self._frame_socket.setsockopt(zmq.SNDTIMEO, 2000)  # 2 secondi
+                    # Imposta linger a 0 per evitare blocchi alla chiusura
+                    self._frame_socket.setsockopt(zmq.LINGER, 0)
+                    # Porta dedicata per frame scan: porta comandi + 2
+                    frame_port = self.server.config["server"]["command_port"] + 2
+                    self._frame_socket.bind(f"tcp://*:{frame_port}")
+                    logger.info(f"Socket dedicato per frame creato sulla porta {frame_port}")
 
-            # STRATEGIA 2: Utilizzo del connection_manager se disponibile
-            if not success and hasattr(self.server, 'client_ip') and self.server.client_ip:
-                client_ip = self.server.client_ip
+                # Invia il messaggio
+                self._frame_socket.send_json(message)
+                logger.info(f"Frame {pattern_index} inviato tramite socket dedicato")
+                return True
 
-                # Se c'è un ConnectionManager disponibile
-                if hasattr(self.server, '_connection_manager') and self.server._connection_manager:
-                    # Trova il device_id associato all'IP client se possibile
-                    device_id = None
-
-                    # Cerca nelle connessioni recenti
-                    if hasattr(self.server, '_client_connections'):
-                        for d_id, info in self.server._client_connections.items():
-                            if info.get('ip_address') == client_ip:
-                                device_id = d_id
-                                break
-
-                    if device_id:
-                        try:
-                            # Invia il messaggio tramite il connection manager
-                            cm_success = self.server._connection_manager.send_message(
-                                device_id, "SCAN_FRAME", message)
-                            if cm_success:
-                                logger.info(f"Frame {pattern_index} inviato al client {device_id}")
-                                success = True
-                        except Exception as e:
-                            logger.warning(f"Errore nell'invio tramite connection_manager: {e}")
-
-            # STRATEGIA 3: Come ultima risorsa, creiamo un socket dedicato per il client
-            if not success and hasattr(self.server, 'client_ip') and self.server.client_ip:
-                try:
-                    import zmq
-                    # Creiamo un socket PUSH dedicato solo per l'invio dei frame (pattern push/pull)
-                    if not hasattr(self, '_frame_socket'):
-                        context = zmq.Context.instance()
-                        self._frame_socket = context.socket(zmq.PUSH)
-                        # Porta dedicata per frame scan: porta comandi + 2
-                        frame_port = self.server.config["server"]["command_port"] + 2
-                        self._frame_socket.bind(f"tcp://*:{frame_port}")
-                        logger.info(f"Socket dedicato per frame creato sulla porta {frame_port}")
-
-                    # Imposta un timeout per evitare blocchi
-                    self._frame_socket.setsockopt(zmq.SNDTIMEO, 500)
-                    self._frame_socket.send_json(message)
-                    logger.info(f"Frame {pattern_index} inviato tramite socket dedicato")
-                    success = True
-                except Exception as e:
-                    logger.warning(f"Errore nell'invio tramite socket dedicato: {e}")
-
-            # Notifica l'esito dell'operazione
-            if success:
-                logger.info(f"Frame {pattern_index} inviato con successo al client")
-            else:
-                logger.warning(f"Impossibile inviare il frame {pattern_index} al client")
-
-            return success
+            except Exception as e:
+                logger.error(f"Errore nell'invio tramite socket dedicato: {e}")
+                return False
 
         except Exception as e:
             logger.error(f"Errore nella notifica dei frame al client: {e}")
@@ -751,7 +705,8 @@ class ScanManager:
 
     def _capture_frame_callback(self, pattern_index: int) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Callback per l'acquisizione dei frame dalle camere.
+        Callback per l'acquisizione dei frame dalle camere e invio al client.
+        Versione migliorata con maggiore robustezza.
 
         Args:
             pattern_index: Indice del pattern corrente
@@ -760,26 +715,40 @@ class ScanManager:
             Tupla (frame_left, frame_right) con i frame acquisiti
         """
         try:
-            logger.debug(f"Acquisizione frame per pattern {pattern_index}")
+            logger.info(f"Acquisizione frame per pattern {pattern_index}")
+
+            # Prima verifica che le camere siano disponibili
+            if not self.server.cameras or len(self.server.cameras) < 2:
+                logger.error("Camere non disponibili o insufficienti")
+                return (None, None)
 
             # Cattura i frame dalle camere del server
             left_frame = None
             right_frame = None
 
-            for cam_info in self.server.cameras:
+            # Ritenta l'acquisizione fino a 3 volte in caso di fallimento
+            for attempt in range(3):
                 try:
-                    if cam_info["name"] == "left":
-                        # Cattura il frame dalla camera sinistra
-                        left_frame = cam_info["camera"].capture_array()
-                    elif cam_info["name"] == "right":
-                        # Cattura il frame dalla camera destra
-                        right_frame = cam_info["camera"].capture_array()
-                except Exception as e:
-                    logger.error(f"Errore nell'acquisizione del frame dalla camera {cam_info['name']}: {e}")
+                    for cam_info in self.server.cameras:
+                        if cam_info["name"] == "left":
+                            # Cattura il frame dalla camera sinistra
+                            left_frame = cam_info["camera"].capture_array()
+                        elif cam_info["name"] == "right":
+                            # Cattura il frame dalla camera destra
+                            right_frame = cam_info["camera"].capture_array()
 
-            # Verifica che entrambi i frame siano stati acquisiti
+                    # Se entrambi i frame sono stati acquisiti, esci dal ciclo
+                    if left_frame is not None and right_frame is not None:
+                        break
+
+                except Exception as e:
+                    logger.error(f"Errore nell'acquisizione del frame (tentativo {attempt + 1}/3): {e}")
+                    time.sleep(0.1)  # Breve pausa prima di riprovare
+
+            # Verifica finale
             if left_frame is None or right_frame is None:
-                raise Exception("Impossibile acquisire i frame dalle camere")
+                logger.error("Impossibile acquisire i frame dalle camere dopo più tentativi")
+                return (None, None)
 
             # Converti il formato se necessario
             if len(left_frame.shape) == 3 and cam_info.get("mode") == "grayscale":
@@ -787,6 +756,29 @@ class ScanManager:
 
             if len(right_frame.shape) == 3 and cam_info.get("mode") == "grayscale":
                 right_frame = cv2.cvtColor(right_frame, cv2.COLOR_RGB2GRAY)
+
+            # Tenta di inviare i frame al client in formato JPEG
+            try:
+                # Compressione JPEG degli frame
+                encode_params = [cv2.IMWRITE_JPEG_QUALITY, 90]
+                _, left_encoded = cv2.imencode('.jpg', left_frame, encode_params)
+                _, right_encoded = cv2.imencode('.jpg', right_frame, encode_params)
+
+                # Informazioni sul frame
+                frame_info = {
+                    "pattern_index": pattern_index,
+                    "pattern_name": self._scan_controller.get_pattern_name(pattern_index),
+                    "timestamp": time.time()
+                }
+
+                # Invio dei frame al client
+                self.notify_client_new_frames(
+                    frame_info,
+                    left_encoded.tobytes(),
+                    right_encoded.tobytes()
+                )
+            except Exception as e:
+                logger.error(f"Errore nell'invio dei frame al client: {e}")
 
             return (left_frame, right_frame)
 
