@@ -1588,6 +1588,7 @@ class ScanView(QWidget):
                 "Errore diagnostica",
                 f"Si è verificato un errore durante la diagnostica:\n{str(e)}"
             )
+
     def _synchronized_scan_loop_robust(self):
         """
         Loop principale per la scansione sincronizzata con gestione errori robusta.

@@ -931,14 +931,13 @@ class ScanManager:
                 }
 
             # Verifica che il controller sia disponibile
-            if not self._scan_controller.is_projector_initialized():
-                # Prova a inizializzare
-                if not self._scan_controller.initialize_projector():
-                    return {
-                        'status': 'error',
-                        'message': f'Inizializzazione proiettore fallita: {self._scan_controller.error_message}',
-                        'pattern_index': pattern_index
-                    }
+            # MODIFICATO: rimuovere controllo is_projector_initialized() e tentare direttamente l'inizializzazione
+            if not self._scan_controller.initialize_projector():
+                return {
+                    'status': 'error',
+                    'message': f'Inizializzazione proiettore fallita: {self._scan_controller.error_message}',
+                    'pattern_index': pattern_index
+                }
 
             # Timer per misurare prestazioni per diagnostica
             projection_start = time.time()
