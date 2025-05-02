@@ -15,7 +15,7 @@ import numpy as np
 import cv2
 from enum import Enum
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple, Callable, Any
+from typing import List, Dict, Optional, Tuple, Callable, Any, Union
 
 # Importa il controller del proiettore
 try:
@@ -32,10 +32,10 @@ logger = logging.getLogger(__name__)
 
 class ScanPatternType(Enum):
     """Tipi di pattern per la scansione a luce strutturata."""
-    GRAY_CODE = 1  # Sequenza Gray Code classica
-    BINARY_CODE = 2  # Sequenza binaria standard
-    PHASE_SHIFT = 3  # Pattern a spostamento di fase (sinusoidali)
-    PROGRESSIVE = 4  # Linee progressive che si assottigliano
+    PROGRESSIVE = 1  # Sequenza di linee progressive che si assottigliano
+    GRAY_CODE = 2  # Sequenza Gray Code classica
+    BINARY_CODE = 3  # Sequenza binaria standard
+    PHASE_SHIFT = 4  # Pattern a spostamento di fase (sinusoidali)
 
 
 class ScanningState(Enum):
@@ -46,6 +46,16 @@ class ScanningState(Enum):
     PROCESSING = 3  # Elaborazione dei dati
     COMPLETED = 4  # Scansione completata
     ERROR = 5  # Errore durante la scansione
+
+
+class ProjectorState:
+    """Classe per tenere traccia dello stato del proiettore."""
+
+    def __init__(self):
+        self.initialized = False
+        self.current_pattern = None
+        self.current_pattern_type = None
+        self.last_projection_time = 0
 
 
 class StructuredLightController:
@@ -74,6 +84,7 @@ class StructuredLightController:
         self.i2c_bus = i2c_bus
         self.i2c_address = i2c_address
         self._projector = None
+        self._projector_state = ProjectorState()
 
         # Directory per i frame acquisiti
         if capture_dir is None:
@@ -116,6 +127,9 @@ class StructuredLightController:
         self.current_pattern_index = -1
         self.frame_pairs = []  # Lista di tuple (frame_left, frame_right)
 
+        # Riferimento al server per callback di notifica
+        self._server = None
+
         logger.info("Controller luce strutturata inizializzato")
 
     def initialize_projector(self) -> bool:
@@ -126,6 +140,11 @@ class StructuredLightController:
             True se l'inizializzazione è riuscita, False altrimenti
         """
         try:
+            # Se il proiettore è già inizializzato, ritorna subito True
+            if self._projector_state.initialized and self._projector:
+                logger.debug("Proiettore già inizializzato")
+                return True
+
             # Inizializza il controller del proiettore
             self._projector = DLPC342XController(
                 bus=self.i2c_bus,
@@ -146,32 +165,62 @@ class StructuredLightController:
             except Exception as border_err:
                 logger.warning(f"Impossibile disabilitare il bordo: {border_err}")
 
+            # Aggiorna lo stato
+            self._projector_state.initialized = True
+            self._projector_state.current_pattern = "black"
+            self._projector_state.current_pattern_type = "solid"
+            self._projector_state.last_projection_time = time.time()
+
             logger.info("Proiettore DLP inizializzato correttamente e impostato a nero")
             return True
 
         except Exception as e:
             self.error_message = f"Errore nell'inizializzazione del proiettore: {str(e)}"
             logger.error(self.error_message)
+            self._projector_state.initialized = False
+            self._projector = None
             return False
+
+    def is_projector_initialized(self) -> bool:
+        """
+        Verifica se il proiettore è inizializzato e pronto all'uso.
+
+        Returns:
+            True se il proiettore è inizializzato, False altrimenti
+        """
+        return self._projector_state.initialized and self._projector is not None
 
     def close(self):
         """Chiude la connessione con il proiettore e rilascia le risorse."""
-        if self._projector:
-            try:
-                # Imposta un pattern nero
-                self._projector.generate_solid_field(Color.Black)
-                # Disabilita il bordo
+        try:
+            # Interrompi una eventuale scansione in corso
+            if self.state == ScanningState.SCANNING:
+                self.cancel_scan()
+
+            # Chiudi il proiettore
+            if self._projector:
                 try:
-                    self._projector.set_display_border(BorderEnable.Disable)
-                except:
-                    pass
-                # Torna alla modalità video
-                self._projector.set_operating_mode(OperatingMode.ExternalVideoPort)
-                # Chiudi la connessione
-                self._projector.close()
-                logger.info("Proiettore DLP chiuso correttamente e impostato a nero")
-            except Exception as e:
-                logger.error(f"Errore nella chiusura del proiettore: {e}")
+                    # Imposta un pattern nero
+                    self._projector.generate_solid_field(Color.Black)
+                    # Disabilita il bordo
+                    try:
+                        self._projector.set_display_border(BorderEnable.Disable)
+                    except:
+                        pass
+                    # Torna alla modalità video
+                    self._projector.set_operating_mode(OperatingMode.ExternalVideoPort)
+                    # Chiudi la connessione
+                    self._projector.close()
+                    logger.info("Proiettore DLP chiuso correttamente e impostato a nero")
+                except Exception as e:
+                    logger.error(f"Errore nella chiusura del proiettore: {e}")
+
+            # Reset dello stato
+            self._projector = None
+            self._projector_state.initialized = False
+
+        except Exception as e:
+            logger.error(f"Errore nella chiusura delle risorse: {e}")
 
     def set_frame_capture_callback(self, callback: Callable):
         """
@@ -221,7 +270,7 @@ class StructuredLightController:
         }
 
         # Verifica che il proiettore sia disponibile
-        if not self._projector:
+        if not self.is_projector_initialized():
             success = self.initialize_projector()
             if not success:
                 return False
@@ -290,6 +339,99 @@ class StructuredLightController:
             'errors': self.scan_stats['errors'],
             'error_message': self.error_message
         }
+
+    def project_pattern(self,
+                        pattern_index: int,
+                        is_white: bool = None,
+                        is_horizontal: bool = False,
+                        is_inverted: bool = False) -> bool:
+        """
+        Proietta un singolo pattern basato sull'indice.
+
+        Args:
+            pattern_index: Indice del pattern (0=white, 1=black, 2+=pattern strutturati)
+            is_white: Se specificato, forza il pattern a essere bianco (True) o nero (False)
+            is_horizontal: Se True, genera linee orizzontali anziché verticali
+            is_inverted: Se True, inverte i colori del pattern (solo per pattern strutturati)
+
+        Returns:
+            True se la proiezione è riuscita, False altrimenti
+        """
+        try:
+            # Verifica che il proiettore sia inizializzato
+            if not self.is_projector_initialized():
+                success = self.initialize_projector()
+                if not success:
+                    return False
+
+            # Pattern bianco o nero (indici speciali)
+            if pattern_index == 0 or is_white is True:
+                self._projector.generate_solid_field(Color.White)
+                self._projector_state.current_pattern = "white"
+                self._projector_state.current_pattern_type = "solid"
+
+            elif pattern_index == 1 or is_white is False:
+                self._projector.generate_solid_field(Color.Black)
+                self._projector_state.current_pattern = "black"
+                self._projector_state.current_pattern_type = "solid"
+
+            else:
+                # Per pattern strutturati, calcola larghezza in base all'indice
+                quality = self.quality
+                effective_idx = max(0, pattern_index - 2)
+                width = max(1, int(128 / (2 ** (effective_idx * quality / 3))))
+
+                # Colori per il pattern
+                foreground = Color.Black if is_inverted else Color.White
+                background = Color.White if is_inverted else Color.Black
+
+                # Genera il pattern appropriato
+                if is_horizontal:
+                    self._projector.generate_horizontal_lines(
+                        background_color=background,
+                        foreground_color=foreground,
+                        foreground_line_width=width,
+                        background_line_width=width
+                    )
+                    self._projector_state.current_pattern = f"horizontal_{effective_idx}"
+                    self._projector_state.current_pattern_type = "horizontal"
+                else:
+                    self._projector.generate_vertical_lines(
+                        background_color=background,
+                        foreground_color=foreground,
+                        foreground_line_width=width,
+                        background_line_width=width
+                    )
+                    self._projector_state.current_pattern = f"vertical_{effective_idx}"
+                    self._projector_state.current_pattern_type = "vertical"
+
+            # Aggiorna timestamp proiezione
+            self._projector_state.last_projection_time = time.time()
+
+            return True
+
+        except Exception as e:
+            self.error_message = f"Errore nella proiezione del pattern: {str(e)}"
+            logger.error(self.error_message)
+            return False
+
+    def get_recommended_stabilization_time(self, pattern_index: int) -> float:
+        """
+        Restituisce il tempo di stabilizzazione raccomandato per il pattern specificato.
+
+        Args:
+            pattern_index: Indice del pattern
+
+        Returns:
+            Tempo di stabilizzazione in secondi
+        """
+        # Pattern diversi richiedono tempi diversi per stabilizzarsi
+        if pattern_index <= 1:  # White/Black (maggiore contrasto, richiede più tempo)
+            return 0.08  # 80ms
+        elif pattern_index < 6:  # Primi pattern (frequenze più basse)
+            return 0.06  # 60ms
+        else:  # Pattern ad alta frequenza (cambiano meno l'illuminazione globale)
+            return 0.04  # 40ms
 
     def _scanning_thread(self,
                          pattern_type: ScanPatternType,
@@ -381,7 +523,7 @@ class StructuredLightController:
 
             # Pattern bianco di riferimento
             logger.info("Proiezione pattern bianco di riferimento...")
-            self._projector.generate_solid_field(Color.White)
+            self.project_pattern(0, is_white=True)
             time.sleep(0.2)  # Breve pausa per stabilizzazione del proiettore
 
             # Cattura il pattern bianco
@@ -393,7 +535,7 @@ class StructuredLightController:
 
             # Pattern nero di riferimento
             logger.info("Proiezione pattern nero di riferimento...")
-            self._projector.generate_solid_field(Color.Black)
+            self.project_pattern(1, is_white=False)
             time.sleep(0.2)  # Breve pausa per stabilizzazione del proiettore
 
             # Cattura il pattern nero
@@ -410,24 +552,17 @@ class StructuredLightController:
                 if self._cancel_scan:
                     return False
 
-                # Calcola la larghezza delle linee per questo step
-                # Inizia con linee larghe e dimezza ad ogni passo
-                width = max(1, int(128 / (2 ** (i * quality / 3))))
+                pattern_index = i + 2  # Indice del pattern (dopo white/black)
+                logger.info(f"Proiezione linee verticali, passo {i + 1}/{num_patterns}")
 
-                logger.info(f"Proiezione linee verticali, passo {i + 1}/{num_patterns}, larghezza={width}")
-
-                self._projector.generate_vertical_lines(
-                    background_color=Color.Black,
-                    foreground_color=Color.White,
-                    foreground_line_width=width,
-                    background_line_width=width
-                )
+                # Proietta il pattern
+                self.project_pattern(pattern_index, is_horizontal=False)
 
                 # Breve pausa per stabilizzazione del proiettore
                 time.sleep(0.2)
 
                 # Cattura il frame
-                self.current_pattern_index = 2 + i
+                self.current_pattern_index = pattern_index
                 if not self._capture_and_save_frame(self.current_pattern_index, f"vertical_{i}"):
                     return False
 
@@ -444,23 +579,17 @@ class StructuredLightController:
                 if self._cancel_scan:
                     return False
 
-                # Calcola la larghezza delle linee per questo step
-                width = max(1, int(128 / (2 ** (i * quality / 3))))
+                pattern_index = i + 2 + num_patterns  # Indice dopo white/black e verticali
+                logger.info(f"Proiezione linee orizzontali, passo {i + 1}/{num_patterns}")
 
-                logger.info(f"Proiezione linee orizzontali, passo {i + 1}/{num_patterns}, larghezza={width}")
-
-                self._projector.generate_horizontal_lines(
-                    background_color=Color.Black,
-                    foreground_color=Color.White,
-                    foreground_line_width=width,
-                    background_line_width=width
-                )
+                # Proietta il pattern
+                self.project_pattern(pattern_index, is_horizontal=True)
 
                 # Breve pausa per stabilizzazione del proiettore
                 time.sleep(0.2)
 
                 # Cattura il frame
-                self.current_pattern_index = 2 + num_patterns + i
+                self.current_pattern_index = pattern_index
                 if not self._capture_and_save_frame(self.current_pattern_index, f"horizontal_{i}"):
                     return False
 
@@ -499,7 +628,7 @@ class StructuredLightController:
 
             # Pattern bianco e nero di riferimento
             logger.info("Proiezione pattern bianco di riferimento...")
-            self._projector.generate_solid_field(Color.White)
+            self.project_pattern(0, is_white=True)
             time.sleep(0.2)
             self.current_pattern_index = 0
             if not self._capture_and_save_frame(0, "white"):
@@ -507,7 +636,7 @@ class StructuredLightController:
             time.sleep(pattern_pause - 0.2)
 
             logger.info("Proiezione pattern nero di riferimento...")
-            self._projector.generate_solid_field(Color.Black)
+            self.project_pattern(1, is_white=False)
             time.sleep(0.2)
             self.current_pattern_index = 1
             if not self._capture_and_save_frame(1, "black"):
@@ -521,34 +650,23 @@ class StructuredLightController:
                 if self._cancel_scan:
                     return False
 
-                # Calcola la larghezza delle linee in base al bit corrente
-                width = max(1, int(512 / (2 ** i)))
-
-                logger.info(f"Proiezione Gray code verticale, bit {i + 1}/{num_patterns}, larghezza={width}")
-
-                self._projector.generate_vertical_lines(
-                    background_color=Color.Black,
-                    foreground_color=Color.White,
-                    foreground_line_width=width,
-                    background_line_width=width
-                )
+                # Pattern normale
+                pattern_index = i + 2
+                logger.info(f"Proiezione Gray code verticale, bit {i + 1}/{num_patterns}")
+                self.project_pattern(pattern_index, is_horizontal=False, is_inverted=False)
 
                 time.sleep(0.2)
-                self.current_pattern_index = 2 + i
+                self.current_pattern_index = pattern_index
                 if not self._capture_and_save_frame(self.current_pattern_index, f"gray_v_{i}"):
                     return False
                 time.sleep(pattern_pause - 0.2)
 
-                # Inverti lo schema (per robustezza del codice Gray)
-                self._projector.generate_vertical_lines(
-                    background_color=Color.White,
-                    foreground_color=Color.Black,
-                    foreground_line_width=width,
-                    background_line_width=width
-                )
+                # Pattern invertito
+                pattern_index = i + 2 + num_patterns
+                self.project_pattern(pattern_index, is_horizontal=False, is_inverted=True)
 
                 time.sleep(0.2)
-                self.current_pattern_index = 2 + i + num_patterns
+                self.current_pattern_index = pattern_index
                 if not self._capture_and_save_frame(self.current_pattern_index, f"gray_v_inv_{i}"):
                     return False
                 time.sleep(pattern_pause - 0.2)
@@ -563,34 +681,23 @@ class StructuredLightController:
                 if self._cancel_scan:
                     return False
 
-                # Calcola la larghezza delle linee in base al bit corrente
-                width = max(1, int(512 / (2 ** i)))
-
-                logger.info(f"Proiezione Gray code orizzontale, bit {i + 1}/{num_patterns}, larghezza={width}")
-
-                self._projector.generate_horizontal_lines(
-                    background_color=Color.Black,
-                    foreground_color=Color.White,
-                    foreground_line_width=width,
-                    background_line_width=width
-                )
+                # Pattern normale
+                pattern_index = i + 2 + 2 * num_patterns
+                logger.info(f"Proiezione Gray code orizzontale, bit {i + 1}/{num_patterns}")
+                self.project_pattern(pattern_index, is_horizontal=True, is_inverted=False)
 
                 time.sleep(0.2)
-                self.current_pattern_index = 2 + 2 * num_patterns + i
+                self.current_pattern_index = pattern_index
                 if not self._capture_and_save_frame(self.current_pattern_index, f"gray_h_{i}"):
                     return False
                 time.sleep(pattern_pause - 0.2)
 
-                # Inverti lo schema (per robustezza del codice Gray)
-                self._projector.generate_horizontal_lines(
-                    background_color=Color.White,
-                    foreground_color=Color.Black,
-                    foreground_line_width=width,
-                    background_line_width=width
-                )
+                # Pattern invertito
+                pattern_index = i + 2 + 3 * num_patterns
+                self.project_pattern(pattern_index, is_horizontal=True, is_inverted=True)
 
                 time.sleep(0.2)
-                self.current_pattern_index = 2 + 2 * num_patterns + i + num_patterns
+                self.current_pattern_index = pattern_index
                 if not self._capture_and_save_frame(self.current_pattern_index, f"gray_h_inv_{i}"):
                     return False
                 time.sleep(pattern_pause - 0.2)
@@ -618,7 +725,6 @@ class StructuredLightController:
         Returns:
             True se la sequenza è stata completata, False altrimenti
         """
-        # Implementazione molto simile al Gray code, ma senza sequenze invertite
         try:
             # Adatta i parametri in base alla qualità
             pattern_pause = max(0.1, exposure_time * (1 + (quality - 3) * 0.2))
@@ -629,7 +735,7 @@ class StructuredLightController:
 
             # Pattern bianco e nero di riferimento
             logger.info("Proiezione pattern bianco di riferimento...")
-            self._projector.generate_solid_field(Color.White)
+            self.project_pattern(0, is_white=True)
             time.sleep(0.2)
             self.current_pattern_index = 0
             if not self._capture_and_save_frame(0, "white"):
@@ -637,7 +743,7 @@ class StructuredLightController:
             time.sleep(pattern_pause - 0.2)
 
             logger.info("Proiezione pattern nero di riferimento...")
-            self._projector.generate_solid_field(Color.Black)
+            self.project_pattern(1, is_white=False)
             time.sleep(0.2)
             self.current_pattern_index = 1
             if not self._capture_and_save_frame(1, "black"):
@@ -651,20 +757,12 @@ class StructuredLightController:
                 if self._cancel_scan:
                     return False
 
-                # Calcola la larghezza delle linee in base al bit corrente
-                width = max(1, int(512 / (2 ** i)))
-
-                logger.info(f"Proiezione binaria verticale, bit {i + 1}/{num_patterns}, larghezza={width}")
-
-                self._projector.generate_vertical_lines(
-                    background_color=Color.Black,
-                    foreground_color=Color.White,
-                    foreground_line_width=width,
-                    background_line_width=width
-                )
+                pattern_index = i + 2
+                logger.info(f"Proiezione binaria verticale, bit {i + 1}/{num_patterns}")
+                self.project_pattern(pattern_index, is_horizontal=False)
 
                 time.sleep(0.2)
-                self.current_pattern_index = 2 + i
+                self.current_pattern_index = pattern_index
                 if not self._capture_and_save_frame(self.current_pattern_index, f"binary_v_{i}"):
                     return False
                 time.sleep(pattern_pause - 0.2)
@@ -679,20 +777,12 @@ class StructuredLightController:
                 if self._cancel_scan:
                     return False
 
-                # Calcola la larghezza delle linee in base al bit corrente
-                width = max(1, int(512 / (2 ** i)))
-
-                logger.info(f"Proiezione binaria orizzontale, bit {i + 1}/{num_patterns}, larghezza={width}")
-
-                self._projector.generate_horizontal_lines(
-                    background_color=Color.Black,
-                    foreground_color=Color.White,
-                    foreground_line_width=width,
-                    background_line_width=width
-                )
+                pattern_index = i + 2 + num_patterns
+                logger.info(f"Proiezione binaria orizzontale, bit {i + 1}/{num_patterns}")
+                self.project_pattern(pattern_index, is_horizontal=True)
 
                 time.sleep(0.2)
-                self.current_pattern_index = 2 + num_patterns + i
+                self.current_pattern_index = pattern_index
                 if not self._capture_and_save_frame(self.current_pattern_index, f"binary_h_{i}"):
                     return False
                 time.sleep(pattern_pause - 0.2)
@@ -831,8 +921,6 @@ class StructuredLightController:
 
             except Exception as e:
                 logger.warning(f"Impossibile inviare i frame al client: {e}")
-                import traceback
-                logger.warning(f"Traceback: {traceback.format_exc()}")
                 # Non fallire se l'invio al client non riesce
 
             # Aggiorna le statistiche
@@ -848,16 +936,11 @@ class StructuredLightController:
             self.error_message = f"Errore nell'acquisizione dei frame per pattern {pattern_name}: {str(e)}"
             logger.error(self.error_message)
             self.scan_stats['errors'] += 1
-
-            import traceback
-            logger.debug(f"Traceback completo: {traceback.format_exc()}")
-
             return False
+
     def process_scan_data(self, output_file: str = None) -> bool:
         """
         Elabora i dati acquisiti durante la scansione per generare la nuvola di punti.
-        Nota: Questa è una funzione stub che dovrà essere implementata in base al codice
-        di triangolazione disponibile.
 
         Args:
             output_file: File di output per la nuvola di punti (.ply)
@@ -871,7 +954,6 @@ class StructuredLightController:
 
         # Qui dovrà essere implementata la logica per elaborare i dati e generare la nuvola di punti
         # Questa logica dovrà essere basata sul codice di triangolazione disponibile nella repository
-        # Structured-light-stereo
 
         logger.info("Elaborazione dei dati della scansione non ancora implementata")
         return False

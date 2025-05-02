@@ -61,6 +61,8 @@ class ScanManager:
             'progress': 0.0,
             'error': None
         }
+
+        # Configurazione predefinita
         self._scan_config = {
             'pattern_type': 'PROGRESSIVE',
             'num_patterns': 12,
@@ -69,23 +71,10 @@ class ScanManager:
         }
 
         # Directory per i dati di scansione
-        scan_dir_env = os.environ.get("UNLOOK_SCAN_DIR")
-        if scan_dir_env:
-            self._scan_data_dir = Path(scan_dir_env)
-        else:
-            # Fallback alla directory relativa al progetto
-            self._scan_data_dir = Path(__file__).parent / "scans"  # server/scans
+        self._scan_data_dir = self._setup_scan_directory()
 
-        self._scan_data_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Directory scansioni impostata a: {self._scan_data_dir}")
-
-        # Statistiche di scansione
-        self._scan_stats = {
-            'start_time': 0,
-            'end_time': 0,
-            'total_frames': 0,
-            'errors': 0
-        }
+        # ID scansione corrente
+        self.current_scan_id = None
 
         # Statistiche di scansione
         self._scan_stats = {
@@ -101,7 +90,28 @@ class ScanManager:
         except Exception as e:
             logger.error(f"Errore nell'inizializzazione del controller di scansione: {e}")
 
-    def _initialize_scan_controller(self):
+    def _setup_scan_directory(self) -> Path:
+        """
+        Configura la directory per i dati di scansione.
+
+        Returns:
+            Path alla directory per i dati di scansione
+        """
+        # Cerca la directory nei percorsi predefiniti
+        scan_dir_env = os.environ.get("UNLOOK_SCAN_DIR")
+        if scan_dir_env:
+            scan_dir = Path(scan_dir_env)
+        else:
+            # Fallback alla directory relativa al progetto
+            scan_dir = Path(__file__).parent / "scans"  # server/scans
+
+        # Crea la directory se non esiste
+        scan_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Directory scansioni impostata a: {scan_dir}")
+
+        return scan_dir
+
+    def _initialize_scan_controller(self) -> bool:
         """
         Inizializza il controller di luce strutturata.
 
@@ -109,7 +119,7 @@ class ScanManager:
             bool: True se inizializzazione riuscita, False altrimenti
         """
         try:
-            # Ottieni i parametri I2C dalla configurazione del server
+            # Ottieni i parametri I2C dalla configurazione o ambiente
             i2c_bus = int(os.environ.get("UNLOOK_I2C_BUS", 3))
 
             # Gestisci correttamente l'indirizzo I2C in formato stringa esadecimale
@@ -134,6 +144,7 @@ class ScanManager:
                 capture_dir=str(scan_dir)
             )
 
+            # Riferimento al server per callback
             self._scan_controller._server = self.server
 
             # Imposta la callback per l'acquisizione dei frame
@@ -178,6 +189,7 @@ class ScanManager:
         # Crea un nuovo ID di scansione basato sul timestamp
         scan_id = time.strftime("%Y%m%d_%H%M%S")
         scan_dir = self._scan_data_dir / scan_id
+        self.current_scan_id = scan_id
 
         try:
             # Verifica che il controller di scansione sia disponibile
@@ -193,7 +205,7 @@ class ScanManager:
                         'scan_id': None
                     }
 
-            # Inizializza il controller proiettore se necessario
+            # Inizializza il controller proiettore
             logger.info("Inizializzazione proiettore...")
             if not self._scan_controller.initialize_projector():
                 error_msg = f"Errore nell'inizializzazione del proiettore: {self._scan_controller.error_message}"
@@ -339,14 +351,7 @@ class ScanManager:
                 time.sleep(0.5)  # Controllo più frequente
 
             # Salva il file di configurazione della scansione
-            config_file = scan_dir / "scan_config.json"
-            with open(config_file, 'w') as f:
-                json.dump({
-                    'scan_id': scan_id,
-                    'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
-                    'config': self._scan_config,
-                    'status': self._scan_controller.get_scan_status()
-                }, f, indent=2)
+            self._save_scan_config(scan_id, scan_dir)
 
             # Verifica il risultato finale
             if self._scan_controller.state == ScanningState.COMPLETED:
@@ -366,15 +371,7 @@ class ScanManager:
                 }
 
                 # Salva il risultato nella directory di scansione
-                result_file = scan_dir / "scan_result.json"
-                with open(result_file, 'w') as f:
-                    json.dump({
-                        'scan_id': scan_id,
-                        'status': 'completed',
-                        'stats': self._scan_stats,
-                        'frames_captured': self._scan_controller.scan_stats.get('captured_frames', 0),
-                        'duration': self._scan_stats['end_time'] - self._scan_stats['start_time']
-                    }, f, indent=2)
+                self._save_scan_result(scan_id, scan_dir, "completed")
 
             elif self._cancel_scan:
                 logger.info(f"Scansione {scan_id} annullata dall'utente")
@@ -393,15 +390,7 @@ class ScanManager:
                 }
 
                 # Salva il risultato nella directory di scansione
-                result_file = scan_dir / "scan_result.json"
-                with open(result_file, 'w') as f:
-                    json.dump({
-                        'scan_id': scan_id,
-                        'status': 'cancelled',
-                        'stats': self._scan_stats,
-                        'frames_captured': self._scan_controller.scan_stats.get('captured_frames', 0),
-                        'duration': self._scan_stats['end_time'] - self._scan_stats['start_time']
-                    }, f, indent=2)
+                self._save_scan_result(scan_id, scan_dir, "cancelled")
 
             else:
                 logger.error(f"Scansione {scan_id} fallita: {self._scan_controller.error_message}")
@@ -421,16 +410,7 @@ class ScanManager:
                 }
 
                 # Salva il risultato nella directory di scansione
-                result_file = scan_dir / "scan_result.json"
-                with open(result_file, 'w') as f:
-                    json.dump({
-                        'scan_id': scan_id,
-                        'status': 'error',
-                        'error_message': self._scan_controller.error_message,
-                        'stats': self._scan_stats,
-                        'frames_captured': self._scan_controller.scan_stats.get('captured_frames', 0),
-                        'duration': self._scan_stats['end_time'] - self._scan_stats['start_time']
-                    }, f, indent=2)
+                self._save_scan_result(scan_id, scan_dir, "error")
 
         except Exception as e:
             logger.error(f"Errore nel thread di scansione: {e}")
@@ -450,20 +430,66 @@ class ScanManager:
 
             # Salva il risultato nella directory di scansione (se possibile)
             try:
-                result_file = scan_dir / "scan_result.json"
-                with open(result_file, 'w') as f:
-                    json.dump({
-                        'scan_id': scan_id,
-                        'status': 'error',
-                        'error_message': str(e),
-                        'stats': self._scan_stats
-                    }, f, indent=2)
+                self._save_scan_result(scan_id, scan_dir, "error", error_message=str(e))
             except:
                 pass
 
         finally:
             # Resetta lo stato di scansione
             self._is_scanning = False
+
+    def _save_scan_config(self, scan_id: str, scan_dir: Path):
+        """
+        Salva la configurazione della scansione in un file JSON.
+
+        Args:
+            scan_id: ID della scansione
+            scan_dir: Directory della scansione
+        """
+        try:
+            config_file = scan_dir / "scan_config.json"
+            with open(config_file, 'w') as f:
+                json.dump({
+                    'scan_id': scan_id,
+                    'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
+                    'config': self._scan_config,
+                    'status': self._scan_controller.get_scan_status()
+                }, f, indent=2)
+
+            logger.info(f"Configurazione scansione salvata in {config_file}")
+        except Exception as e:
+            logger.error(f"Errore nel salvataggio della configurazione: {e}")
+
+    def _save_scan_result(self, scan_id: str, scan_dir: Path, status: str, error_message: str = None):
+        """
+        Salva i risultati della scansione in un file JSON.
+
+        Args:
+            scan_id: ID della scansione
+            scan_dir: Directory della scansione
+            status: Stato finale della scansione (completed, cancelled, error)
+            error_message: Messaggio di errore (opzionale)
+        """
+        try:
+            result_file = scan_dir / "scan_result.json"
+
+            result_data = {
+                'scan_id': scan_id,
+                'status': status,
+                'stats': self._scan_stats,
+                'frames_captured': self._scan_controller.scan_stats.get('captured_frames', 0),
+                'duration': self._scan_stats['end_time'] - self._scan_stats['start_time']
+            }
+
+            if error_message:
+                result_data['error_message'] = error_message
+
+            with open(result_file, 'w') as f:
+                json.dump(result_data, f, indent=2)
+
+            logger.info(f"Risultato scansione salvato in {result_file}")
+        except Exception as e:
+            logger.error(f"Errore nel salvataggio del risultato: {e}")
 
     def stop_scan(self) -> Dict[str, Any]:
         """
@@ -542,6 +568,249 @@ class ScanManager:
         """
         return self._scan_config
 
+    def sync_pattern_projection(self, pattern_index: int) -> Dict[str, Any]:
+        """
+        Sincronizza la proiezione di un pattern specifico con gestione avanzata dei tempi di attesa.
+
+        Args:
+            pattern_index: Indice del pattern da proiettare
+
+        Returns:
+            Dizionario con risultato dell'operazione e timestamp di acquisizione
+        """
+        try:
+            if not self._scan_controller:
+                return {
+                    'status': 'error',
+                    'message': 'Controller di scansione non inizializzato',
+                    'pattern_index': pattern_index
+                }
+
+            # Verifica che il controller sia disponibile
+            if not self._scan_controller.is_projector_initialized():
+                success = self._scan_controller.initialize_projector()
+                if not success:
+                    return {
+                        'status': 'error',
+                        'message': f'Inizializzazione proiettore fallita: {self._scan_controller.error_message}',
+                        'pattern_index': pattern_index
+                    }
+
+            # Timer per misurare prestazioni per diagnostica
+            projection_start = time.time()
+
+            # Proietta il pattern richiesto
+            if not self._scan_controller.project_pattern(pattern_index):
+                return {
+                    'status': 'error',
+                    'message': f'Errore nella proiezione del pattern: {self._scan_controller.error_message}',
+                    'pattern_index': pattern_index
+                }
+
+            projection_time = time.time() - projection_start
+
+            # Determine pattern name for better logging
+            pattern_name = ""
+            if pattern_index == 0:
+                pattern_name = "white"
+            elif pattern_index == 1:
+                pattern_name = "black"
+            else:
+                # Determine if horizontal or vertical
+                num_patterns = self._scan_config.get('num_patterns', 12)
+                is_horizontal = pattern_index >= (2 + num_patterns)
+
+                if is_horizontal:
+                    effective_idx = pattern_index - 2 - num_patterns
+                    pattern_name = f"horizontal_{effective_idx}"
+                else:
+                    effective_idx = pattern_index - 2
+                    pattern_name = f"vertical_{effective_idx}"
+
+            # Ottieni tempo di stabilizzazione raccomandato e attendi
+            stabilization_time = self._scan_controller.get_recommended_stabilization_time(pattern_index)
+            time.sleep(stabilization_time)
+
+            # Timestamp dopo la stabilizzazione per la sincronizzazione
+            stabilized_timestamp = time.time()
+
+            # Verifica se ci sono camere disponibili prima di procedere
+            if not self.server.cameras or len(self.server.cameras) < 1:
+                return {
+                    'status': 'warning',
+                    'message': 'Camere non disponibili, pattern proiettato ma non acquisito',
+                    'pattern_index': pattern_index,
+                    'pattern_name': pattern_name,
+                    'projection_time_ms': int(projection_time * 1000),
+                    'stabilization_time_ms': int(stabilization_time * 1000),
+                    'timestamp': stabilized_timestamp
+                }
+
+            # Acquisizione eseguita in _capture_frame_callback, qui restituiamo solo lo stato
+            # e dettagli tecnici per diagnostica
+            return {
+                'status': 'success',
+                'message': f'Pattern {pattern_name} proiettato con successo',
+                'pattern_index': pattern_index,
+                'pattern_name': pattern_name,
+                'projection_time_ms': int(projection_time * 1000),
+                'stabilization_time_ms': int(stabilization_time * 1000),
+                'timestamp': stabilized_timestamp
+            }
+
+        except Exception as e:
+            logger.error(f"Errore nella sincronizzazione del pattern {pattern_index}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+            return {
+                'status': 'error',
+                'message': f'Errore nella proiezione del pattern: {str(e)}',
+                'pattern_index': pattern_index
+            }
+
+    def _update_scan_config(self, scan_config: Dict[str, Any]):
+        """
+        Aggiorna la configurazione della scansione.
+
+        Args:
+            scan_config: Nuova configurazione della scansione
+        """
+        if 'pattern_type' in scan_config:
+            self._scan_config['pattern_type'] = scan_config['pattern_type']
+
+        if 'num_patterns' in scan_config:
+            self._scan_config['num_patterns'] = max(4, min(24, int(scan_config['num_patterns'])))
+
+        if 'exposure_time' in scan_config:
+            self._scan_config['exposure_time'] = max(0.1, min(2.0, float(scan_config['exposure_time'])))
+
+        if 'quality' in scan_config:
+            self._scan_config['quality'] = max(1, min(5, int(scan_config['quality'])))
+
+        logger.info(f"Configurazione di scansione aggiornata: {self._scan_config}")
+
+    def _capture_frame_callback(self, pattern_index: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Callback per l'acquisizione dei frame dalle camere e invio al client.
+        Versione ottimizzata per ridurre la latenza e migliorare l'efficienza.
+
+        Args:
+            pattern_index: Indice del pattern corrente
+
+        Returns:
+            Tupla (frame_left, frame_right) con i frame acquisiti
+        """
+        try:
+            logger.info(f"Acquisizione frame per pattern {pattern_index}")
+
+            # Prima verifica che le camere siano disponibili
+            if not self.server.cameras or len(self.server.cameras) < 2:
+                logger.error("Camere non disponibili o insufficienti")
+                return (None, None)
+
+            # Cattura i frame dalle camere
+            left_frame = None
+            right_frame = None
+
+            # Cerca le camere per nome
+            for cam_info in self.server.cameras:
+                if cam_info["name"] == "left":
+                    left_frame = cam_info["camera"].capture_array()
+                elif cam_info["name"] == "right":
+                    right_frame = cam_info["camera"].capture_array()
+
+            # Verifica che entrambi i frame siano stati acquisiti
+            if left_frame is None or right_frame is None:
+                # Riprova fino a 3 volte in caso di fallimento
+                for attempt in range(2):  # +1 tentativo = 3 totali
+                    logger.warning(f"Tentativo aggiuntivo {attempt + 1}/2 per acquisire i frame")
+                    time.sleep(0.05)  # Piccola pausa
+
+                    # Riprova acquisizione per frame mancanti
+                    for cam_info in self.server.cameras:
+                        if cam_info["name"] == "left" and left_frame is None:
+                            left_frame = cam_info["camera"].capture_array()
+                        elif cam_info["name"] == "right" and right_frame is None:
+                            right_frame = cam_info["camera"].capture_array()
+
+                    # Esci se entrambi i frame sono stati acquisiti
+                    if left_frame is not None and right_frame is not None:
+                        break
+
+            # Verifica finale
+            if left_frame is None or right_frame is None:
+                logger.error("Impossibile acquisire i frame dalle camere dopo più tentativi")
+                return (None, None)
+
+            # Converti in scala di grigi se richiesto dalle impostazioni della camera
+            for cam_info in self.server.cameras:
+                if cam_info["name"] == "left" and len(left_frame.shape) == 3 and cam_info.get("mode") == "grayscale":
+                    left_frame = cv2.cvtColor(left_frame, cv2.COLOR_RGB2GRAY)
+                elif cam_info["name"] == "right" and len(right_frame.shape) == 3 and cam_info.get(
+                        "mode") == "grayscale":
+                    right_frame = cv2.cvtColor(right_frame, cv2.COLOR_RGB2GRAY)
+
+            # Determina il nome del pattern in base all'indice
+            pattern_name = ""
+            if pattern_index == 0:
+                pattern_name = "white"
+            elif pattern_index == 1:
+                pattern_name = "black"
+            elif pattern_index < 2 + self._scan_config['num_patterns']:
+                pattern_name = f"vertical_{pattern_index - 2}"
+            else:
+                pattern_name = f"horizontal_{pattern_index - 2 - self._scan_config['num_patterns']}"
+
+            # Notifica il client inviando i frame
+            self._notify_client_of_frames(pattern_index, pattern_name, left_frame, right_frame)
+
+            return (left_frame, right_frame)
+
+        except Exception as e:
+            logger.error(f"Errore nella callback di acquisizione frame: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return (None, None)
+
+    def _notify_client_of_frames(self, pattern_index: int, pattern_name: str,
+                                 left_frame: np.ndarray, right_frame: np.ndarray) -> bool:
+        """
+        Notifica il client dei frame acquisiti, comprimendoli e inviandoli.
+
+        Args:
+            pattern_index: Indice del pattern
+            pattern_name: Nome del pattern
+            left_frame: Frame sinistro
+            right_frame: Frame destro
+
+        Returns:
+            True se l'invio è riuscito, False altrimenti
+        """
+        try:
+            # Codifica i frame in formato JPEG per una trasmissione più efficiente
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 90]
+            _, left_encoded = cv2.imencode('.jpg', left_frame, encode_params)
+            _, right_encoded = cv2.imencode('.jpg', right_frame, encode_params)
+
+            # Informazioni sul frame per il client
+            frame_info = {
+                "pattern_index": pattern_index,
+                "pattern_name": pattern_name,
+                "timestamp": time.time(),
+                "scan_id": self.current_scan_id
+            }
+
+            return self.notify_client_new_frames(
+                frame_info,
+                left_encoded.tobytes(),
+                right_encoded.tobytes()
+            )
+
+        except Exception as e:
+            logger.error(f"Errore nella notifica dei frame al client: {e}")
+            return False
+
     def notify_client_new_frames(self, frame_info: Dict[str, Any], left_frame_data: bytes,
                                  right_frame_data: bytes) -> bool:
         """
@@ -558,7 +827,7 @@ class ScanManager:
         """
         try:
             pattern_index = frame_info.get('pattern_index', 'sconosciuto')
-            logger.info(f"Tentativo invio frame {pattern_index} al client")
+            logger.info(f"Invio frame {pattern_index} al client")
 
             # Verifica riferimento al server
             if not hasattr(self, 'server') or not self.server:
@@ -579,7 +848,7 @@ class ScanManager:
                     "timestamp": time.time(),
                     "format": "jpeg",
                     "is_scan_frame": True,  # Flag per identificare i frame di scansione
-                    "scan_id": frame_info.get('scan_id', getattr(self, 'current_scan_id', None)),
+                    "scan_id": frame_info.get('scan_id', self.current_scan_id),
                     "pattern_index": pattern_index,
                     "pattern_name": frame_info.get('pattern_name', '')
                 }
@@ -598,7 +867,7 @@ class ScanManager:
                     "timestamp": time.time(),
                     "format": "jpeg",
                     "is_scan_frame": True,  # Flag per identificare i frame di scansione
-                    "scan_id": frame_info.get('scan_id', getattr(self, 'current_scan_id', None)),
+                    "scan_id": frame_info.get('scan_id', self.current_scan_id),
                     "pattern_index": pattern_index,
                     "pattern_name": frame_info.get('pattern_name', '')
                 }
@@ -691,210 +960,6 @@ class ScanManager:
                 "details": {"error": str(e)}
             }
 
-    def _update_scan_config(self, scan_config: Dict[str, Any]):
-        """
-        Aggiorna la configurazione della scansione.
-
-        Args:
-            scan_config: Nuova configurazione della scansione
-        """
-        if 'pattern_type' in scan_config:
-            self._scan_config['pattern_type'] = scan_config['pattern_type']
-
-        if 'num_patterns' in scan_config:
-            self._scan_config['num_patterns'] = max(4, min(24, int(scan_config['num_patterns'])))
-
-        if 'exposure_time' in scan_config:
-            self._scan_config['exposure_time'] = max(0.1, min(2.0, float(scan_config['exposure_time'])))
-
-        if 'quality' in scan_config:
-            self._scan_config['quality'] = max(1, min(5, int(scan_config['quality'])))
-
-        logger.info(f"Configurazione di scansione aggiornata: {self._scan_config}")
-
-    def _capture_frame_callback(self, pattern_index: int) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Callback per l'acquisizione dei frame dalle camere e invio al client.
-        Versione ottimizzata per ridurre la latenza e migliorare l'efficienza.
-
-        Args:
-            pattern_index: Indice del pattern corrente
-
-        Returns:
-            Tupla (frame_left, frame_right) con i frame acquisiti
-        """
-        try:
-            logger.info(f"Acquisizione frame per pattern {pattern_index}")
-
-            # Prima verifica che le camere siano disponibili
-            if not self.server.cameras or len(self.server.cameras) < 2:
-                logger.error("Camere non disponibili o insufficienti")
-                return (None, None)
-
-            # Cattura i frame dalle camere del server
-            left_frame = None
-            right_frame = None
-
-            # OTTIMIZZAZIONE: Ritenta l'acquisizione fino a 3 volte in caso di fallimento
-            for attempt in range(3):
-                try:
-                    for cam_info in self.server.cameras:
-                        if cam_info["name"] == "left":
-                            left_frame = cam_info["camera"].capture_array()
-                        elif cam_info["name"] == "right":
-                            right_frame = cam_info["camera"].capture_array()
-
-                    # Se entrambi i frame sono stati acquisiti, esci dal ciclo
-                    if left_frame is not None and right_frame is not None:
-                        break
-
-                except Exception as e:
-                    logger.error(f"Errore nell'acquisizione del frame (tentativo {attempt + 1}/3): {e}")
-                    time.sleep(0.1)  # Breve pausa prima di riprovare
-
-            # Verifica finale
-            if left_frame is None or right_frame is None:
-                logger.error("Impossibile acquisire i frame dalle camere dopo più tentativi")
-                return (None, None)
-
-            # Converti il formato se necessario
-            for cam_info in self.server.cameras:
-                if cam_info["name"] == "left" and len(left_frame.shape) == 3 and cam_info.get("mode") == "grayscale":
-                    left_frame = cv2.cvtColor(left_frame, cv2.COLOR_RGB2GRAY)
-                elif cam_info["name"] == "right" and len(right_frame.shape) == 3 and cam_info.get(
-                        "mode") == "grayscale":
-                    right_frame = cv2.cvtColor(right_frame, cv2.COLOR_RGB2GRAY)
-
-            # Determina il nome del pattern in base all'indice
-            pattern_name = ""
-            if pattern_index == 0:
-                pattern_name = "white"
-            elif pattern_index == 1:
-                pattern_name = "black"
-            elif pattern_index < 2 + self._scan_config['num_patterns']:
-                pattern_name = f"vertical_{pattern_index - 2}"
-            else:
-                pattern_name = f"horizontal_{pattern_index - 2 - self._scan_config['num_patterns']}"
-
-            # OTTIMIZZAZIONE: Usa il socket di streaming esistente ed evita salvataggio su disco prima dell'invio
-            if hasattr(self.server, "stream_socket") and self.server.stream_socket:
-                try:
-                    # OTTIMIZZAZIONE: Adatta qualità in base all'indice pattern
-                    # Frame di riferimento (white, black) con qualità alta, pattern con qualità media
-                    quality = 95 if pattern_index <= 1 else 85
-                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, quality]
-
-                    _, left_encoded = cv2.imencode('.jpg', left_frame, encode_params)
-                    _, right_encoded = cv2.imencode('.jpg', right_frame, encode_params)
-
-                    # Crea header con metadati dettagliati
-                    scan_id = getattr(self, 'current_scan_id', None)
-                    timestamp = time.time()
-
-                    # OTTIMIZZAZIONE: Aggiungi metadati per controllo di flusso
-                    client_id = getattr(self.server, 'client_ip', None)
-                    total_patterns = self._scan_config[
-                                         'num_patterns'] * 2 + 2  # white, black, patterns orizzontali e verticali
-                    progress = min(100, (pattern_index / total_patterns) * 100)
-
-                    # OTTIMIZZAZIONE: Verifica con polling che il socket sia pronto prima dell'invio
-                    poller = zmq.Poller()
-                    poller.register(self.server.stream_socket, zmq.POLLOUT)
-
-                    if poller.poll(100):  # Timeout di 100ms
-                        # Socket pronto per l'invio del frame sinistro
-                        left_header = {
-                            "camera": 0,  # Camera sinistra
-                            "frame": pattern_index,
-                            "timestamp": timestamp,
-                            "format": "jpeg",
-                            "is_scan_frame": True,  # Flag per identificare i frame di scansione
-                            "scan_id": scan_id,
-                            "pattern_index": pattern_index,
-                            "pattern_name": pattern_name,
-                            "client_id": client_id,
-                            "total_patterns": total_patterns,
-                            "progress": progress
-                        }
-
-                        self.server.stream_socket.send_json(left_header, zmq.SNDMORE)
-                        self.server.stream_socket.send(left_encoded.tobytes(), copy=False)
-
-                        # Breve pausa per evitare congestione
-                        time.sleep(0.01)
-
-                        # Invia frame destro
-                        right_header = {
-                            "camera": 1,  # Camera destra
-                            "frame": pattern_index,
-                            "timestamp": timestamp,
-                            "format": "jpeg",
-                            "is_scan_frame": True,
-                            "scan_id": scan_id,
-                            "pattern_index": pattern_index,
-                            "pattern_name": pattern_name,
-                            "client_id": client_id,
-                            "total_patterns": total_patterns,
-                            "progress": progress
-                        }
-
-                        self.server.stream_socket.send_json(right_header, zmq.SNDMORE)
-                        self.server.stream_socket.send(right_encoded.tobytes(), copy=False)
-
-                        logger.info(f"Frame {pattern_index} ({pattern_name}) inviato tramite socket di streaming")
-                    else:
-                        logger.warning(f"Socket di streaming non pronto per l'invio del frame {pattern_index}")
-
-                except zmq.ZMQError as e:
-                    logger.error(f"Errore ZMQ nell'invio del frame: {e}")
-                except Exception as e:
-                    logger.error(f"Errore generale nell'invio del frame: {e}")
-            else:
-                logger.error("Socket di streaming non disponibile nel server")
-
-            # OTTIMIZZAZIONE: Salva i frame su disco come backup, in modo asincrono
-            try:
-                import threading
-
-                def save_frames_async(left_frame, right_frame, scan_dir, pattern_index, pattern_name):
-                    try:
-                        # Assicurati che le directory esistano
-                        os.makedirs(scan_dir / "left", exist_ok=True)
-                        os.makedirs(scan_dir / "right", exist_ok=True)
-
-                        # Salva i frame
-                        left_path = scan_dir / "left" / f"{pattern_index:04d}_{pattern_name}.png"
-                        right_path = scan_dir / "right" / f"{pattern_index:04d}_{pattern_name}.png"
-
-                        cv2.imwrite(str(left_path), left_frame)
-                        cv2.imwrite(str(right_path), right_frame)
-
-                        logger.debug(f"Frame {pattern_index} salvato su disco in modo asincrono")
-                    except Exception as e:
-                        logger.error(f"Errore nel salvataggio asincrono dei frame: {e}")
-
-                scan_dir = getattr(self, '_scan_dir',
-                                   self._scan_data_dir / getattr(self, 'current_scan_id', str(int(time.time()))))
-
-                # Avvia thread per il salvataggio asincrono
-                save_thread = threading.Thread(
-                    target=save_frames_async,
-                    args=(left_frame.copy(), right_frame.copy(), scan_dir, pattern_index, pattern_name)
-                )
-                save_thread.daemon = True
-                save_thread.start()
-
-            except Exception as e:
-                logger.error(f"Errore nell'avvio del thread di salvataggio: {e}")
-
-            return (left_frame, right_frame)
-
-        except Exception as e:
-            logger.error(f"Errore nella callback di acquisizione frame: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return (None, None)
-
     def cleanup(self):
         """Pulizia delle risorse."""
         try:
@@ -911,120 +976,3 @@ class ScanManager:
 
         except Exception as e:
             logger.error(f"Errore nella pulizia del gestore di scansione: {e}")
-
-    def sync_pattern_projection(self, pattern_index: int) -> Dict[str, Any]:
-        """
-        Sincronizza la proiezione di un pattern specifico con gestione avanzata dei tempi di attesa.
-
-        Args:
-            pattern_index: Indice del pattern da proiettare
-
-        Returns:
-            Dizionario con risultato dell'operazione e timestamp di acquisizione
-        """
-        try:
-            if not self._scan_controller:
-                return {
-                    'status': 'error',
-                    'message': 'Controller di scansione non inizializzato',
-                    'pattern_index': pattern_index
-                }
-
-            # Verifica che il controller sia disponibile
-            # MODIFICATO: rimuovere controllo is_projector_initialized() e tentare direttamente l'inizializzazione
-            if not self._scan_controller.initialize_projector():
-                return {
-                    'status': 'error',
-                    'message': f'Inizializzazione proiettore fallita: {self._scan_controller.error_message}',
-                    'pattern_index': pattern_index
-                }
-
-            # Timer per misurare prestazioni per diagnostica
-            projection_start = time.time()
-
-            # Pattern speciali: 0=white, 1=black
-            pattern_name = ""
-            if pattern_index == 0:
-                pattern_name = "white"
-                projection_success = self._scan_controller.project_pattern(0, is_white=True)
-            elif pattern_index == 1:
-                pattern_name = "black"
-                projection_success = self._scan_controller.project_pattern(0, is_white=False)
-            else:
-                # Calcola se è un pattern orizzontale o verticale
-                num_patterns = self._scan_config.get('num_patterns', 12)
-                is_horizontal = pattern_index >= (2 + num_patterns)
-
-                if is_horizontal:
-                    effective_idx = pattern_index - 2 - num_patterns
-                    pattern_name = f"horizontal_{effective_idx}"
-                else:
-                    effective_idx = pattern_index - 2
-                    pattern_name = f"vertical_{effective_idx}"
-
-                # Proietta pattern
-                projection_success = self._scan_controller.project_pattern(
-                    effective_idx,
-                    is_horizontal=is_horizontal,
-                    is_inverted=False
-                )
-
-            if not projection_success:
-                return {
-                    'status': 'error',
-                    'message': f'Errore nella proiezione del pattern: {self._scan_controller.error_message}',
-                    'pattern_index': pattern_index
-                }
-
-            projection_time = time.time() - projection_start
-
-            # Tempi di attesa adattivi in base al tipo di pattern
-            # Pattern diversi potrebbero richiedere tempi diversi per stabilizzarsi
-            if pattern_index <= 1:  # White/Black (maggiore contrasto, richiede più tempo)
-                stabilization_time = 0.08  # 80ms
-            elif pattern_index < 6:  # Primi pattern (frequenze più basse)
-                stabilization_time = 0.06  # 60ms
-            else:  # Pattern ad alta frequenza (cambiano meno l'illuminazione globale)
-                stabilization_time = 0.04  # 40ms
-
-            # Attendi che il pattern sia effettivamente proiettato e stabilizzato
-            time.sleep(stabilization_time)
-
-            # Timestamp dopo la stabilizzazione per la sincronizzazione
-            stabilized_timestamp = time.time()
-
-            # Verifica se ci sono camere disponibili prima di procedere
-            if not self.server.cameras or len(self.server.cameras) < 1:
-                return {
-                    'status': 'warning',
-                    'message': 'Camere non disponibili, pattern proiettato ma non acquisito',
-                    'pattern_index': pattern_index,
-                    'pattern_name': pattern_name,
-                    'projection_time_ms': int(projection_time * 1000),
-                    'stabilization_time_ms': int(stabilization_time * 1000),
-                    'timestamp': stabilized_timestamp
-                }
-
-            # Acquisizione eseguita in _capture_frame_callback, qui restituiamo solo lo stato
-            # e dettagli tecnici per diagnostica
-            return {
-                'status': 'success',
-                'message': f'Pattern {pattern_name} proiettato con successo',
-                'pattern_index': pattern_index,
-                'pattern_name': pattern_name,
-                'projection_time_ms': int(projection_time * 1000),
-                'stabilization_time_ms': int(stabilization_time * 1000),
-                'timestamp': stabilized_timestamp
-            }
-
-        except Exception as e:
-            logger.error(f"Errore nella sincronizzazione del pattern {pattern_index}: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
-            return {
-                'status': 'error',
-                'message': f'Errore nella proiezione del pattern: {str(e)}',
-                'pattern_index': pattern_index
-            }
-
