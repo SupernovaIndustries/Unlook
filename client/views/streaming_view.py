@@ -197,88 +197,71 @@ class StreamView(QWidget):
 
             self.info_label.setText(f"Camera {camera_name} | {size_text} | {fps_text}")
 
-    def _process_frame(self, frame: np.ndarray) -> np.ndarray:
+    def process_frame(self, camera_index, frame, frame_info):
         """
-        Elabora un frame applicando le opzioni di visualizzazione.
-        Versione ottimizzata per prestazioni ed efficienza.
+        Elabora un frame di scansione in tempo reale.
+        Versione ottimizzata con gestione dei pattern automatica.
 
         Args:
-            frame: Frame da elaborare
+            camera_index: Indice della camera (0=sinistra, 1=destra)
+            frame: Frame come array NumPy
+            frame_info: Informazioni sul frame
 
         Returns:
-            Frame elaborato
+            True se il frame è stato elaborato correttamente, False altrimenti
         """
-        # Per migliorare le prestazioni, evitiamo conversioni inutili di formato
-        is_color = len(frame.shape) == 3 and frame.shape[2] >= 3
+        if not self.is_scanning:
+            # Avvia automaticamente la scansione se non è attiva
+            logger.info("Avvio automatico della scansione")
+            scan_id = f"RealTimeScan_{int(time.time())}"
+            self.start_scan(scan_id=scan_id)
 
-        # Se nessuna elaborazione è abilitata, restituisci il frame originale
-        if not (self._enhance_contrast or self._show_grid or self._show_features):
-            return frame
+        try:
+            # Assegna automaticamente un pattern_index se non presente
+            pattern_index = frame_info.get("pattern_index", -1)
 
-        # Solo se necessario, crea una copia in scala di grigi per elaborazione
-        if is_color:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = frame.copy() if self._enhance_contrast or self._show_features else frame
+            # Se non c'è un pattern_index esplicito, usa l'analisi dell'immagine
+            if pattern_index < 0:
+                # Analisi del frame per determinare il tipo
+                # Possiamo analizzare la luminosità media per distinguere white/black
+                if not hasattr(self, '_frame_counter'):
+                    self._frame_counter = {0: 0, 1: 0}
 
-        # Applica miglioramento del contrasto se abilitato
-        if self._enhance_contrast:
-            # Equalizzazione adattiva dell'istogramma (CLAHE)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            enhanced = clahe.apply(gray)
+                self._frame_counter[camera_index] += 1
 
-            # Se il frame originale era a colori, applica miglioramento solo alla luminosità
-            if is_color:
-                # Converti in HSV
-                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                # Sostituisci canale V (luminosità)
-                hsv[:, :, 2] = enhanced
-                # Torna a BGR
-                frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-            else:
-                frame = enhanced
+                # Prima passata: primi due frame sono white e black
+                if self._frame_counter[camera_index] <= 2:
+                    pattern_index = self._frame_counter[camera_index] - 1
+                else:
+                    # Per i frame successivi, alterna pattern orizzontali e verticali
+                    pattern_index = self._frame_counter[camera_index]
 
-        # Applica griglia se abilitata (versione ottimizzata)
-        if self._show_grid:
-            height, width = frame.shape[:2]
-            grid_size = min(50, max(width, height) // 10)  # Adatta dimensione griglia
+            # Imposta un nome di pattern se non presente
+            pattern_name = frame_info.get("pattern_name", f"pattern_{pattern_index}")
 
-            grid_color = (0, 255, 0) if is_color else 200
-            grid_thickness = 1
+            # Memorizza nel buffer
+            self._frame_buffer.add_frame(camera_index, pattern_index, frame.copy(), frame_info)
 
-            # Disegna solo le linee principali per migliorare le prestazioni
-            # Linee orizzontali e verticali con incremento di grid_size
-            for y in range(0, height, grid_size):
-                cv2.line(frame, (0, y), (width, y), grid_color, grid_thickness)
-            for x in range(0, width, grid_size):
-                cv2.line(frame, (x, 0), (x, height), grid_color, grid_thickness)
+            # Segnala al thread di elaborazione
+            self._new_frame_event.set()
 
-        # Rileva e disegna caratteristiche se abilitato (versione ottimizzata)
-        if self._show_features:
-            # Usa rilevatore più veloce con un limite di punti
-            max_features = 100  # Limita il numero di caratteristiche per prestazioni
-            feature_detector = cv2.FastFeatureDetector_create(threshold=30)
+            # Chiamate callback solo occasionalmente per limitare l'overhead
+            frame_count = self.frame_counters.get(camera_index, 0) + 1
+            self.frame_counters[camera_index] = frame_count
 
-            # Rileva keypoints
-            keypoints = feature_detector.detect(gray, None)
+            if frame_count % 10 == 0:
+                logger.debug(f"Elaborati {frame_count} frame dalla camera {camera_index}")
 
-            # Limita il numero di keypoints per prestazioni
-            if len(keypoints) > max_features:
-                keypoints = sorted(keypoints, key=lambda x: -x.response)[:max_features]
+                # Aggiorna callback di progresso
+                if self._progress_callback:
+                    progress = min(100, (frame_count / 100) * 100)  # Max 100%
+                    self._progress_callback(progress, f"Elaborazione frame: {frame_count}")
 
-            # Disegna keypoints con colore
-            feature_color = (0, 0, 255)  # Rosso per i keypoints
-            if is_color:
-                cv2.drawKeypoints(frame, keypoints, frame, feature_color,
-                                  cv2.DRAW_MATCHES_FLAGS_DEFAULT)  # Usa flag più semplice
-            else:
-                # Converti a colore se necessario
-                color_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                cv2.drawKeypoints(color_frame, keypoints, color_frame, feature_color,
-                                  cv2.DRAW_MATCHES_FLAGS_DEFAULT)
-                frame = color_frame
+            return True
 
-        return frame
+        except Exception as e:
+            logger.error(f"Errore nell'elaborazione del frame: {e}")
+            return False
 
     def _update_status(self, message):
         """
@@ -1155,6 +1138,35 @@ class DualStreamView(QWidget):
 
             # Crea un nuovo ricevitore
             self.stream_receiver = StreamReceiver(host, port)
+
+            # Configura il processore di scansione per il direct routing
+            try:
+                # Importa ScanFrameProcessor solo quando necessario
+                from client.processing.scan_frame_processor import ScanFrameProcessor
+
+                # Crea o ottieni il processore di frame
+                if not hasattr(self, '_scan_processor') or self._scan_processor is None:
+                    output_dir = Path.home() / "UnLook" / "scans"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    self._scan_processor = ScanFrameProcessor(output_dir=output_dir)
+
+                    # Configura callback per reindirizzare la visualizzazione
+                    self._scan_processor.set_callbacks(
+                        progress_callback=self._on_scan_progress,
+                        frame_callback=self._on_scan_frame
+                    )
+
+                    # Avvia subito la scansione in modalità real-time
+                    scan_id = f"RealTimeScan_{int(time.time())}"
+                    self._scan_processor.start_scan(scan_id=scan_id)
+                    logger.info(f"Scansione real-time avviata automaticamente: {scan_id}")
+
+                # Configura il routing diretto
+                self.stream_receiver.set_frame_processor(self._scan_processor)
+                self.stream_receiver.enable_direct_routing(True)
+                logger.info("Direct routing abilitato per scansione real-time")
+            except Exception as e:
+                logger.error(f"Errore nella configurazione della scansione real-time: {e}")
 
             # Collega i segnali
             self.stream_receiver.frame_received.connect(self._on_frame_received)
