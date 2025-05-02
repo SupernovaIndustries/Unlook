@@ -26,6 +26,38 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QSize, QSettings, QThread, QObject
 from PySide6.QtGui import QIcon, QFont, QColor, QPixmap, QImage
 
+
+# Definizione della classe ScanFrameProcessor come fallback globale
+# in caso di fallimento dell'importazione
+class ScanFrameProcessor:
+    """Classe fallback per ScanFrameProcessor quando non è disponibile il modulo originale."""
+
+    def __init__(self, output_dir=None):
+        self.output_dir = output_dir
+        self._progress_callback = None
+        self._frame_callback = None
+        logger = logging.getLogger(__name__)
+        logger.warning("Utilizzando versione fallback di ScanFrameProcessor")
+
+    def set_callbacks(self, progress_callback=None, frame_callback=None):
+        self._progress_callback = progress_callback
+        self._frame_callback = frame_callback
+
+    def start_scan(self, scan_id=None, num_patterns=24, pattern_type="PROGRESSIVE"):
+        if scan_id is None:
+            scan_id = f"Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        return scan_id
+
+    def process_frame(self, camera_index, frame, frame_info):
+        return True
+
+    def stop_scan(self):
+        return {"success": True, "message": "Scan stopped (mock implementation)"}
+
+    def get_scan_progress(self):
+        return {"state": "IDLE", "progress": 0.0}
+
+
 # Importa il modulo di triangolazione
 try:
     from client.processing.triangulation import ScanProcessor, PatternType
@@ -33,18 +65,8 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.error("Impossibile importare il modulo di triangolazione. La visualizzazione 3D sarà disabilitata.")
 
-    try:
-        from client.processing.scan_frame_processor import ScanFrameProcessor
-    except ImportError:
-        logger.error("Impossibile importare ScanFrameProcessor")
 
-
-        # Classe mock se l'importazione fallisce
-        class ScanFrameProcessor:
-            def __init__(self, *args, **kwargs):
-                pass
-
-    # Classi mock per quando il modulo non è disponibile
+    # Definizione di PatternType come fallback
     class PatternType:
         PROGRESSIVE = "PROGRESSIVE"
         GRAY_CODE = "GRAY_CODE"
@@ -52,9 +74,31 @@ except ImportError:
         PHASE_SHIFT = "PHASE_SHIFT"
 
 
+    # Definizione di ScanProcessor come fallback
     class ScanProcessor:
         def __init__(self, *args, **kwargs):
             pass
+
+        def set_callbacks(self, *args, **kwargs):
+            pass
+
+        def load_local_scan(self, *args, **kwargs):
+            return False
+
+        def process_scan(self, *args, **kwargs):
+            return False
+
+# Ora tentiamo di importare la versione reale di ScanFrameProcessor
+try:
+    from client.processing.scan_frame_processor import ScanFrameProcessor
+
+    logger = logging.getLogger(__name__)
+    logger.info("ScanFrameProcessor importato con successo")
+except ImportError:
+    logger = logging.getLogger(__name__)
+    logger.error("Impossibile importare ScanFrameProcessor, utilizzo versione fallback")
+    # Nota: Non è necessario ridefinire ScanFrameProcessor qui perché
+    # l'abbiamo già definito a livello globale prima del blocco try
 
 # Verifica se Open3D è disponibile per la visualizzazione 3D
 try:
@@ -482,6 +526,7 @@ class ScanView(QWidget):
         super().__init__(parent)
         self.scanner_controller = scanner_controller
         logger.info("Inizializzazione ScanView")
+
         # Stato della scansione
         self.is_scanning = False
         self.selected_scanner = None
@@ -490,6 +535,10 @@ class ScanView(QWidget):
         self.progress_dialog = None
         self.test_thread = None
         self.test_worker = None
+
+        # Directory di output per le scansioni e nuvole di punti
+        # IMPORTANTE: inizializzare output_dir PRIMA di usarlo per ScanFrameProcessor
+        self.output_dir = self._get_default_output_dir()
 
         # Registra il gestore di frame
         self._register_frame_handler()
@@ -512,9 +561,6 @@ class ScanView(QWidget):
 
         # Processor per la triangolazione
         self.scan_processor = ScanProcessor()
-
-        # Directory di output per le scansioni e nuvole di punti
-        self.output_dir = self._get_default_output_dir()
 
         # Configurazione della scansione
         self.scan_config = {
@@ -2582,22 +2628,23 @@ class ScanView(QWidget):
 
                     # Se lo streaming widget ha un receiver, colleghiamo la nostra funzione
                     if hasattr(streaming_widget, 'stream_receiver') and streaming_widget.stream_receiver:
-                        # Funzione che verrà chiamata quando riceviamo un frame di scansione
-                        def on_scan_frame_received(camera_index, frame, frame_info):
-                            # Verifichiamo che sia un frame di scansione
-                            if not frame_info.get("is_scan_frame", False):
-                                return
+                        # Ottieni il riferimento allo stream_receiver
+                        stream_receiver = streaming_widget.stream_receiver
+                        logger.info(f"StreamReceiver trovato, collegamento segnale scan_frame_received...")
 
-                            # Verifichiamo se c'è una scansione attiva
-                            if not self.is_scanning:
-                                return
+                        # IMPORTANTE: Assicuriamoci di disconnettere eventuali connessioni precedenti
+                        try:
+                            stream_receiver.scan_frame_received.disconnect(self._on_scan_frame_received)
+                        except Exception:
+                            # È normale se non c'erano connessioni precedenti
+                            pass
 
-                            # Elabora il frame con il nostro processore
-                            self.scan_frame_processor.process_frame(camera_index, frame, frame_info)
-
-                        # Colleghiamo la nostra funzione allo streaming receiver
-                        streaming_widget.stream_receiver.scan_frame_received.connect(on_scan_frame_received)
-                        logger.info("Collegato gestore di frame di scansione allo StreamReceiver")
+                        # Ricollega la nostra funzione
+                        stream_receiver.scan_frame_received.connect(
+                            lambda camera_index, frame, frame_info: self._handle_scan_frame(camera_index, frame,
+                                                                                            frame_info)
+                        )
+                        logger.info("Segnale scan_frame_received collegato con successo")
                     else:
                         logger.warning("StreamReceiver non trovato nello streaming_widget")
                 else:
@@ -2610,6 +2657,38 @@ class ScanView(QWidget):
         else:
             logger.error("Scanner controller o connection manager non disponibile")
 
+    def _handle_scan_frame(self, camera_index, frame, frame_info):
+        """
+        Gestore centralizzato per i frame di scansione.
+
+        Args:
+            camera_index: Indice della camera (0=sinistra, 1=destra)
+            frame: Frame come array NumPy
+            frame_info: Informazioni sul frame (pattern_index, pattern_name, ecc.)
+        """
+        # Verifichiamo che sia un frame di scansione
+        if not frame_info.get("is_scan_frame", False):
+            return
+
+        # Verifichiamo se c'è una scansione attiva
+        if not self.is_scanning:
+            logger.warning("Ricevuto frame di scansione ma nessuna scansione è attiva")
+            return
+
+        # Log dettagliato
+        pattern_index = frame_info.get("pattern_index", 0)
+        pattern_name = frame_info.get("pattern_name", "unknown")
+        logger.info(f"Gestione frame {pattern_index} ({pattern_name}) della camera {camera_index}")
+
+        # Elabora il frame con il nostro processore
+        success = self.scan_frame_processor.process_frame(camera_index, frame, frame_info)
+
+        if success:
+            # Aggiorna l'anteprima dell'interfaccia
+            if camera_index == 1:  # Solo dopo il frame della camera destra
+                self._update_preview_image()
+        else:
+            logger.error(f"Errore nell'elaborazione del frame {pattern_index} della camera {camera_index}")
     def _setup_frame_receiver(self):
         """
         Configura un ricevitore dedicato per i frame di scansione.
@@ -2709,10 +2788,6 @@ class ScanView(QWidget):
         """
         Gestisce la ricezione di un frame di scansione in tempo reale con gestione errori migliorata.
         Versione migliorata con maggiore robustezza nel salvataggio delle immagini.
-
-        Args:
-            device_id: ID del dispositivo che ha inviato il frame
-            message: Messaggio contenente i dati del frame
         """
         try:
             # Verifica minima del messaggio
@@ -2774,31 +2849,50 @@ class ScanView(QWidget):
                 logger.warning(f"Dati frame mancanti per pattern {pattern_index}")
                 return
 
-            # Decodifica i dati dei frame
+            # Decodifica i dati dei frame - AGGIUNGI QUESTO FIX
             import base64
             try:
-                left_frame_data = base64.b64decode(left_frame_data)
-                right_frame_data = base64.b64decode(right_frame_data)
+                # Verifica se i dati sono già in formato binario o necessitano decodifica base64
+                if isinstance(left_frame_data, str):
+                    left_frame_data = base64.b64decode(left_frame_data)
+                if isinstance(right_frame_data, str):
+                    right_frame_data = base64.b64decode(right_frame_data)
             except Exception as e:
                 logger.error(f"Errore nella decodifica base64: {e}")
                 return
 
-            # Definisci nomi file con estensione corretta
-            left_file = left_dir / f"{pattern_index:04d}_{pattern_name}.png"
-            right_file = right_dir / f"{pattern_index:04d}_{pattern_name}.png"
+            # Definisci nomi file con estensione corretta e percorsi assoluti
+            left_file = os.path.join(left_dir, f"{pattern_index:04d}_{pattern_name}.png")
+            right_file = os.path.join(right_dir, f"{pattern_index:04d}_{pattern_name}.png")
 
-            # Salvataggio diretto dei dati binari (più affidabile)
+            # Salvataggio diretto dei dati binari con controllo errori migliorato
             try:
-                # Metodo 1: Salva i dati grezzi direttamente
+                # Metodo 1: Salvataggio binario diretto
                 with open(left_file, "wb") as f:
                     f.write(left_frame_data)
+                logger.debug(f"File sinistro salvato: {left_file}")
 
                 with open(right_file, "wb") as f:
                     f.write(right_frame_data)
+                logger.debug(f"File destro salvato: {right_file}")
 
-                # Metodo 2: Prova a decodificare e salvare come immagine se OpenCV è disponibile
-                if 'cv2' in globals():
+                # Verifica che i file esistano e hanno dimensione > 0
+                if not os.path.exists(left_file) or os.path.getsize(left_file) == 0:
+                    logger.error(f"File sinistro non creato o vuoto: {left_file}")
+
+                if not os.path.exists(right_file) or os.path.getsize(right_file) == 0:
+                    logger.error(f"File destro non creato o vuoto: {right_file}")
+
+                # Log informativo
+                logger.info(f"Frame {pattern_index} salvato con successo")
+
+            except Exception as e:
+                logger.error(f"Errore nel salvataggio diretto: {e}")
+
+                # Metodo alternativo: decodifica e salva tramite OpenCV
+                try:
                     import numpy as np
+                    import cv2
 
                     # Decodifica il frame sinistro
                     left_np = np.frombuffer(left_frame_data, np.uint8)
@@ -2810,38 +2904,32 @@ class ScanView(QWidget):
 
                     # Salva solo se la decodifica è riuscita
                     if left_img is not None and left_img.size > 0:
-                        cv2.imwrite(str(left_file), left_img)
+                        cv2.imwrite(left_file, left_img)
+                        logger.info(f"Frame sinistro salvato via OpenCV: {left_file}")
 
                     if right_img is not None and right_img.size > 0:
-                        cv2.imwrite(str(right_file), right_img)
-
-                # Log e verifica
-                logger.info(f"Frame {pattern_index} salvato con successo")
-
-                # Verifica che i file siano stati creati correttamente
-                if not left_file.exists() or not right_file.exists():
-                    logger.warning(f"Verifica fallita: uno o entrambi i file non esistono")
-
-            except Exception as e:
-                logger.error(f"Errore nel salvataggio dei frame: {e}")
-
-                # Tentativo di fallback con nomi file alternativi
-                try:
-                    alt_left_file = left_dir / f"{pattern_index:04d}_{pattern_name}.jpg"
-                    alt_right_file = right_dir / f"{pattern_index:04d}_{pattern_name}.jpg"
-
-                    with open(alt_left_file, "wb") as f:
-                        f.write(left_frame_data)
-
-                    with open(alt_right_file, "wb") as f:
-                        f.write(right_frame_data)
-
-                    logger.info(f"Frame {pattern_index} salvato con estensione alternativa")
+                        cv2.imwrite(right_file, right_img)
+                        logger.info(f"Frame destro salvato via OpenCV: {right_file}")
                 except Exception as e2:
-                    logger.error(f"Anche il salvataggio di fallback è fallito: {e2}")
+                    logger.error(f"Anche il salvataggio alternativo è fallito: {e2}")
+
+                    # Tentativo di fallback con nomi file alternativi
+                    try:
+                        alt_left_file = os.path.join(left_dir, f"{pattern_index:04d}_{pattern_name}.jpg")
+                        alt_right_file = os.path.join(right_dir, f"{pattern_index:04d}_{pattern_name}.jpg")
+
+                        with open(alt_left_file, "wb") as f:
+                            f.write(left_frame_data)
+
+                        with open(alt_right_file, "wb") as f:
+                            f.write(right_frame_data)
+
+                        logger.info(f"Frame {pattern_index} salvato con estensione alternativa")
+                    except Exception as e3:
+                        logger.error(f"Tutti i tentativi di salvataggio falliti: {e3}")
 
             # Aggiorna l'anteprima delle immagini
-            self._update_preview_image(scan_dir)
+            self._update_preview_image()
 
         except Exception as e:
             logger.error(f"Errore generale nella gestione del frame ricevuto: {e}")
