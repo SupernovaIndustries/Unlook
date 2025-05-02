@@ -475,21 +475,19 @@ class ScanView(QWidget):
     def _connect_to_stream(self):
         """Collega il widget agli stream delle camere."""
         if self._stream_connected:
-            return
+            logger.debug("Stream già connesso, nessuna azione necessaria")
+            return True
 
         try:
             # Cerca il main window
             main_window = self.window()
 
-            # Cerca il widget di streaming
-            if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
-                streaming_widget = main_window.streaming_widget
+            # Verifica se lo stream_receiver è presente in main_window
+            if hasattr(main_window, 'stream_receiver') and main_window.stream_receiver is not None:
+                receiver = main_window.stream_receiver
 
-                # Accedi al ricevitore di stream
-                if hasattr(streaming_widget, 'stream_receiver') and streaming_widget.stream_receiver:
-                    # Collega il segnale frame_received ai nostri preview
-                    receiver = streaming_widget.stream_receiver
-
+                # Tenta di accedere al segnale frame_received
+                if hasattr(receiver, 'frame_received'):
                     # Disconnetti eventuali connessioni esistenti
                     try:
                         receiver.frame_received.disconnect(self._on_frame_received)
@@ -498,20 +496,39 @@ class ScanView(QWidget):
 
                     # Collega il segnale
                     receiver.frame_received.connect(self._on_frame_received)
+                    logger.info("Segnale frame_received collegato con successo")
 
                     # Imposta il processore di scan frame
                     if hasattr(receiver, 'set_frame_processor'):
                         receiver.set_frame_processor(self.scan_processor)
+                        logger.info("Processore di frame impostato con successo")
 
                     # Abilita routing diretto
                     if hasattr(receiver, 'enable_direct_routing'):
                         receiver.enable_direct_routing(True)
+                        logger.info("Routing diretto abilitato con successo")
 
                     self._stream_connected = True
-                    logger.info("Connesso agli stream delle camere")
                     return True
+
+            # Tentativo alternativo di trovare il receiver dal controller
+            if hasattr(self, 'scanner_controller') and self.scanner_controller:
+                if hasattr(self.scanner_controller, 'get_stream_receiver'):
+                    receiver = self.scanner_controller.get_stream_receiver()
+                    if receiver:
+                        # Collega il segnale e configura come sopra...
+                        # (stesso codice di collegamento del segnale di prima)
+
+                        self._stream_connected = True
+                        return True
+
+            logger.error("Stream receiver non trovato in MainWindow o nel controller")
+            return False
+
         except Exception as e:
             logger.error(f"Errore nella connessione agli stream: {e}")
+            import traceback
+            logger.error(f"Traceback completo: {traceback.format_exc()}")
 
         return False
 

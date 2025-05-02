@@ -10,7 +10,7 @@ import time
 from typing import List, Optional, Callable, Dict, Any
 
 from PySide6.QtCore import QObject, Signal, Slot, Property, QSettings, QTimer, QCoreApplication
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMainWindow
 
 # Importa i moduli del progetto in modo che funzionino sia con esecuzione diretta che tramite launcher
 try:
@@ -423,7 +423,24 @@ class ScannerController(QObject):
                 settings.setValue("scanner/last_device_id", device_id)
             except Exception as e:
                 logger.error(f"Errore nel salvataggio dell'ultimo scanner: {e}")
+    def get_stream_receiver(self):
+        """
+        Restituisce il receiver di stream se disponibile.
+        Questo metodo può essere usato da componenti che hanno bisogno di accedere
+        direttamente al receiver di stream.
 
+        Returns:
+            StreamReceiver o None se non disponibile
+        """
+        # Cerca in MainWindow
+        app = QApplication.instance()
+        if app:
+            for widget in app.topLevelWidgets():
+                if isinstance(widget, QMainWindow):
+                    if hasattr(widget, 'stream_receiver'):
+                        return widget.stream_receiver
+
+        return None
     @Slot(str, str)
     def _on_connection_failed(self, device_id: str, error: str):
         """Gestisce l'evento di fallimento della connessione."""

@@ -207,8 +207,7 @@ class MainWindow(QMainWindow):
             """Indici delle schede nella finestra principale."""
             SCANNER = 0
             CAMERA_CONFIG = 1
-            STREAMING = 2  # Manteniamo per retrocompatibilità
-            SCANNING = 3
+            SCANNING = 2  # Scansione 3D ora è la terza scheda
 
         # Sostituisce l'enum originale con quello aggiornato
         self.TabIndex = TabIndex
@@ -216,26 +215,24 @@ class MainWindow(QMainWindow):
         # Crea i widget delle schede
         self.scanner_widget = ScannerDiscoveryWidget(self.scanner_controller)
 
-        # Import la nuova classe CameraConfigView
+        # Import la classe CameraConfigView
         from client.views.camera_config_view import CameraConfigView
         self.camera_config_widget = CameraConfigView(self.scanner_controller)
 
-        # Manteniamo anche lo streaming per retrocompatibilità
-        # e per consentire la visualizzazione degli stream in una scheda separata
-        self.streaming_widget = DualStreamView(self.scanner_controller)
-
         # Widget di scansione
+        from client.views.scan_view import ScanView
         self.scanning_widget = ScanView(self.scanner_controller)
+
+        # Inizializza il receiver di stream (precedentemente gestito da StreamingView)
+        self._initialize_stream_receiver()
 
         # Aggiungi le schede
         self.central_tabs.addTab(self.scanner_widget, "Scanner")
         self.central_tabs.addTab(self.camera_config_widget, "Configurazione Camere")
-        self.central_tabs.addTab(self.streaming_widget, "Streaming")
         self.central_tabs.addTab(self.scanning_widget, "Scansione 3D")
 
         # Disabilita le schede che richiedono una connessione attiva
         self.central_tabs.setTabEnabled(self.TabIndex.CAMERA_CONFIG.value, False)
-        self.central_tabs.setTabEnabled(self.TabIndex.STREAMING.value, False)
         self.central_tabs.setTabEnabled(self.TabIndex.SCANNING.value, False)
 
         # Configura la barra di stato
@@ -640,25 +637,28 @@ class MainWindow(QMainWindow):
         # Aggiorna lo stato della connessione
         self.connection_status_label.setText(f"Connesso a {scanner.name}")
 
+        # Inizializza il receiver di stream se necessario
+        if not self._stream_initialized:
+            self._setup_stream_receiver(scanner)
+
         # Abilita le schede che richiedono una connessione
-        self.central_tabs.setTabEnabled(self.TabIndex.STREAMING.value, True)
-        self.central_tabs.setTabEnabled(self.TabIndex.SCANNING.value, True)  # Abilita la scheda di scansione
+        self.central_tabs.setTabEnabled(self.TabIndex.CAMERA_CONFIG.value, True)
+        self.central_tabs.setTabEnabled(self.TabIndex.SCANNING.value, True)
 
         # Cambia il testo del pulsante di connessione
         self.action_toggle_connection.setText("Disconnetti")
 
-        # Passa alla scheda di streaming
-        self.central_tabs.setCurrentIndex(self.TabIndex.STREAMING.value)
+        # Passa alla scheda di scansione
+        self.central_tabs.setCurrentIndex(self.TabIndex.SCANNING.value)
 
-        # Aggiorna lo scanner selezionato nella vista di scansione
+        # Aggiorna lo scanner selezionato nelle viste
         self.scanning_widget.update_selected_scanner(scanner)
+        self.camera_config_widget.update_selected_scanner(scanner)
 
     @Slot(Scanner)
     def _on_scanner_disconnected(self, scanner: Scanner):
         """
         Gestisce l'evento di disconnessione da uno scanner.
-        Versione migliorata che garantisce coerenza tra tutti i componenti
-        e ferma esplicitamente lo streaming.
         """
         logger.info(f"Disconnessione rilevata da {scanner.name}")
 
@@ -668,39 +668,33 @@ class MainWindow(QMainWindow):
         # Aggiorna lo stato della connessione
         self.connection_status_label.setText("Non connesso")
 
-        # Ferma esplicitamente lo streaming se attivo
-        streaming_was_active = False
-        if hasattr(self, 'streaming_widget') and self.streaming_widget:
+        # Ferma lo stream receiver se è inizializzato
+        if self._stream_initialized and self.stream_receiver:
             try:
-                if hasattr(self.streaming_widget, 'is_streaming') and self.streaming_widget.is_streaming():
-                    logger.info("Arresto dello streaming in seguito a disconnessione")
-                    streaming_was_active = True
-                    self.streaming_widget.stop_streaming()
+                # Invia comando di stop
+                self.scanner_controller.send_command(
+                    scanner.device_id,
+                    "STOP_STREAM"
+                )
+
+                # Ferma il receiver
+                self.stream_receiver.stop()
+                logger.info("Stream receiver fermato")
             except Exception as e:
-                logger.error(f"Errore nell'arresto dello streaming: {e}")
+                logger.error(f"Errore nell'arresto dello stream receiver: {e}")
+
+        # Reset dello stato
+        self._stream_initialized = False
 
         # Disabilita le schede che richiedono una connessione attiva
-        self.central_tabs.setTabEnabled(self.TabIndex.STREAMING.value, False)
+        self.central_tabs.setTabEnabled(self.TabIndex.CAMERA_CONFIG.value, False)
         self.central_tabs.setTabEnabled(self.TabIndex.SCANNING.value, False)
 
         # Cambia il testo del pulsante di connessione
         self.action_toggle_connection.setText("Connetti")
 
         # Passa alla scheda degli scanner
-        if self.central_tabs.currentIndex() in [self.TabIndex.STREAMING.value, self.TabIndex.SCANNING.value]:
-            logger.info("Passaggio alla scheda scanner dopo disconnessione")
-            self.central_tabs.setCurrentIndex(self.TabIndex.SCANNER.value)
-
-        # Se lo streaming era attivo e c'è stato un problema di comunicazione,
-        # mostra un messaggio informativo
-        if streaming_was_active and scanner.status == ScannerStatus.ERROR:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(
-                self,
-                "Connessione persa",
-                f"La connessione con {scanner.name} è stata persa durante lo streaming.\n"
-                "Lo streaming è stato interrotto automaticamente."
-            )
+        self.central_tabs.setCurrentIndex(self.TabIndex.SCANNER.value)
     @Slot(str, str)
     def _on_connection_error(self, device_id: str, error: str):
         """Gestisce l'evento di errore di connessione."""
@@ -775,28 +769,26 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_tab_changed(self, index: int):
         """Gestisce il cambio di scheda."""
-        # Aggiorna l'interfaccia in base alla scheda selezionata
-        if index == self.TabIndex.STREAMING.value:
-            # Verifica se lo streaming è attivo
-            selected_scanner = self.scanner_controller.selected_scanner
-            if selected_scanner and selected_scanner.status == ScannerStatus.CONNECTED:
-                # Se il dispositivo è connesso ma lo streaming non è attivo, avvia lo streaming automaticamente
-                if hasattr(self, 'streaming_widget') and self.streaming_widget:
-                    # Assicurati che scanner_controller sia impostato
-                    if not hasattr(self.streaming_widget,
-                                   'scanner_controller') or self.streaming_widget.scanner_controller is None:
-                        self.streaming_widget.scanner_controller = self.scanner_controller
+        # Ottieni il riferimento dello scanner selezionato
+        selected_scanner = self.scanner_controller.selected_scanner
 
-                    # Assicurati che selected_scanner sia impostato
-                    self.streaming_widget.selected_scanner = selected_scanner
+        # Se non c'è uno scanner connesso, non fare nulla di speciale
+        if not selected_scanner or selected_scanner.status not in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING):
+            return
 
-                    # Ora puoi avviare lo streaming in sicurezza
-                    if hasattr(self.streaming_widget, 'is_streaming') and not self.streaming_widget.is_streaming():
-                        self.streaming_widget.start_streaming(selected_scanner)
-        elif index == self.TabIndex.SCANNING.value:
+        # Gestisci il cambio alla scheda di scansione
+        if index == self.TabIndex.SCANNING.value:
             # Aggiorna lo stato dello scanner nella tab di scansione
             if hasattr(self, 'scanning_widget') and self.scanning_widget:
+                self.scanning_widget.update_selected_scanner(selected_scanner)
                 self.scanning_widget.refresh_scanner_state()
+
+        # Gestisci il cambio alla scheda di configurazione camera
+        elif index == self.TabIndex.CAMERA_CONFIG.value:
+            # Aggiorna lo scanner selezionato nella configurazione camera
+            if hasattr(self, 'camera_config_widget') and self.camera_config_widget:
+                if hasattr(self.camera_config_widget, 'update_selected_scanner'):
+                    self.camera_config_widget.update_selected_scanner(selected_scanner)
 
     @Slot()
     def _toggle_discovery(self):
@@ -884,6 +876,18 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Errore nella disconnessione da tutti gli scanner: {e}")
 
+    def _initialize_stream_receiver(self):
+        """
+        Inizializza il receiver di stream a livello di applicazione.
+        Questo sostituisce l'inizializzazione che era in DualStreamView.
+        """
+        # Memorizza il receiver come attributo della finestra principale
+        self.stream_receiver = None
+
+        # Questo sarà inizializzato quando ci si connette a uno scanner
+        self._stream_initialized = False
+
+        logger.info("Stream receiver sarà inizializzato alla connessione con uno scanner")
     def _update_ui_for_selected_scanner(self):
         """Aggiorna l'interfaccia in base allo scanner selezionato."""
         # Ottieni lo scanner selezionato
