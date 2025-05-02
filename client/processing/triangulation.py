@@ -115,8 +115,8 @@ class ScanProcessor:
         self._progress_callback = progress_callback
         self._completion_callback = completion_callback
 
-    def download_scan_data(self, scanner, scan_id) -> bool:
-        """
+    """def download_scan_data(self, scanner, scan_id) -> bool:
+        "
         Scarica i dati della scansione dal server.
 
         Args:
@@ -125,7 +125,7 @@ class ScanProcessor:
 
         Returns:
             True se il download è riuscito, False altrimenti
-        """
+        
         if not scanner or not scan_id:
             logger.error("Scanner o scan_id non validi")
             return False
@@ -313,7 +313,7 @@ class ScanProcessor:
             logger.error(f"Errore nel download dei dati della scansione: {e}")
             if self._progress_callback:
                 self._progress_callback(0, f"Errore: {str(e)}")
-            return False
+            return False"""
 
     def _request_scan_config(self, connection_manager, device_id):
         """Request scan configuration from the server."""
@@ -810,7 +810,7 @@ class ScanProcessor:
                 h_pattern_l_rect = cv2.remap(h_pattern_l, self.map_x_l, self.map_y_l, cv2.INTER_LINEAR)
                 h_pattern_r_rect = cv2.remap(h_pattern_r, self.map_x_r, self.map_y_r, cv2.INTER_LINEAR)
 
-                # Load and rectify vertical pattern
+                # Load and rectify vertical pattern if available
                 v_idx = 2 + pattern_pairs + i
                 if v_idx < len(self.left_images):
                     v_pattern_l = cv2.imread(self.left_images[v_idx], cv2.IMREAD_GRAYSCALE)
@@ -882,6 +882,67 @@ class ScanProcessor:
         except Exception as e:
             logger.error(f"Error in progressive pattern processing: {e}")
             return False
+
+    def _reproject_to_3d_incremental(self, disparity_map, mask):
+        """
+        Reproject disparity map to 3D points for incremental updates.
+        Similar to _reproject_to_3d but optimized for intermediate results.
+
+        Args:
+            disparity_map: Current disparity map
+            mask: Mask for valid pixels
+
+        Returns:
+            Numpy array of 3D points
+        """
+        try:
+            # Ensure we have valid disparity and calibration
+            if disparity_map is None or self.Q is None:
+                logger.error("Missing disparity map or calibration for reprojection")
+                return None
+
+            # Create point cloud from disparity map
+            logger.info("Reprojecting to 3D points (incremental)")
+
+            # Apply mask to disparity map
+            masked_disparity = disparity_map.copy()
+            masked_disparity[mask == 0] = 0
+
+            # Reproject to 3D
+            points_3d = cv2.reprojectImageTo3D(masked_disparity, self.Q)
+
+            # Filter invalid points
+            mask = (
+                    ~np.isnan(points_3d).any(axis=2) &
+                    ~np.isinf(points_3d).any(axis=2) &
+                    (mask > 0)
+            )
+
+            # Extract valid points
+            valid_points = points_3d[mask]
+
+            # Optional: Limit points to reasonable range (e.g., 1m cube around origin)
+            max_range = 500  # mm
+            in_range_mask = (
+                    (np.abs(valid_points[:, 0]) < max_range) &
+                    (np.abs(valid_points[:, 1]) < max_range) &
+                    (np.abs(valid_points[:, 2]) < max_range)
+            )
+
+            valid_points = valid_points[in_range_mask]
+
+            # If we have too many points, randomly sample for performance
+            if len(valid_points) > 50000:
+                # Random sampling for performance in incremental updates
+                sample_indices = np.random.choice(len(valid_points), 50000, replace=False)
+                valid_points = valid_points[sample_indices]
+
+            logger.info(f"Generated incremental point cloud with {len(valid_points)} points")
+            return valid_points
+
+        except Exception as e:
+            logger.error(f"Error in incremental 3D reprojection: {e}")
+            return None
 
     def _reproject_to_3d_incremental(self, disparity_map, mask):
         """

@@ -735,7 +735,7 @@ class ScanManager:
             left_frame = None
             right_frame = None
 
-            # Ritenta l'acquisizione fino a 3 volte in caso di fallimento
+            # OTTIMIZZAZIONE: Ritenta l'acquisizione fino a 3 volte in caso di fallimento
             for attempt in range(3):
                 try:
                     for cam_info in self.server.cameras:
@@ -779,7 +779,6 @@ class ScanManager:
             # OTTIMIZZAZIONE: Usa il socket di streaming esistente ed evita salvataggio su disco prima dell'invio
             if hasattr(self.server, "stream_socket") and self.server.stream_socket:
                 try:
-                    # Compressione JPEG degli frame per l'invio
                     # OTTIMIZZAZIONE: Adatta qualità in base all'indice pattern
                     # Frame di riferimento (white, black) con qualità alta, pattern con qualità media
                     quality = 95 if pattern_index <= 1 else 85
@@ -798,26 +797,26 @@ class ScanManager:
                                          'num_patterns'] * 2 + 2  # white, black, patterns orizzontali e verticali
                     progress = min(100, (pattern_index / total_patterns) * 100)
 
-                    # Invia frame sinistro
-                    left_header = {
-                        "camera": 0,  # Camera sinistra
-                        "frame": pattern_index,
-                        "timestamp": timestamp,
-                        "format": "jpeg",
-                        "is_scan_frame": True,  # Flag per identificare i frame di scansione
-                        "scan_id": scan_id,
-                        "pattern_index": pattern_index,
-                        "pattern_name": pattern_name,
-                        "client_id": client_id,
-                        "total_patterns": total_patterns,
-                        "progress": progress
-                    }
-
-                    # Verifica che il socket sia disponibile prima dell'invio
+                    # OTTIMIZZAZIONE: Verifica con polling che il socket sia pronto prima dell'invio
                     poller = zmq.Poller()
                     poller.register(self.server.stream_socket, zmq.POLLOUT)
+
                     if poller.poll(100):  # Timeout di 100ms
-                        # Socket pronto per l'invio
+                        # Socket pronto per l'invio del frame sinistro
+                        left_header = {
+                            "camera": 0,  # Camera sinistra
+                            "frame": pattern_index,
+                            "timestamp": timestamp,
+                            "format": "jpeg",
+                            "is_scan_frame": True,  # Flag per identificare i frame di scansione
+                            "scan_id": scan_id,
+                            "pattern_index": pattern_index,
+                            "pattern_name": pattern_name,
+                            "client_id": client_id,
+                            "total_patterns": total_patterns,
+                            "progress": progress
+                        }
+
                         self.server.stream_socket.send_json(left_header, zmq.SNDMORE)
                         self.server.stream_socket.send(left_encoded.tobytes(), copy=False)
 
@@ -853,7 +852,7 @@ class ScanManager:
             else:
                 logger.error("Socket di streaming non disponibile nel server")
 
-            # Salva i frame su disco come backup, in modo asincrono
+            # OTTIMIZZAZIONE: Salva i frame su disco come backup, in modo asincrono
             try:
                 import threading
 

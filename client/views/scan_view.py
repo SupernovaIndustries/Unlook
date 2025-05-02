@@ -1958,74 +1958,84 @@ class ScanView(QWidget):
         if scan_dir is None and self.current_scan_id:
             scan_dir = os.path.join(str(self.output_dir), self.current_scan_id)
 
-        if not scan_dir or not os.path.isdir(scan_dir):
-            # Prova a ottenere la preview direttamente dal processore di frame
-            if hasattr(self, 'scan_frame_processor') and self.scan_frame_processor:
-                pattern_frames = getattr(self.scan_frame_processor, 'pattern_frames', {})
-                if pattern_frames:
-                    # Trova l'ultimo pattern ricevuto
-                    pattern_indices = sorted(pattern_frames.keys())
-                    if pattern_indices:
-                        latest_idx = pattern_indices[-1]
-                        frames = pattern_frames[latest_idx]
+        # OTTIMIZZAZIONE: Prima cerca di ottenere dati in memoria per maggiore reattività
+        if hasattr(self, 'scan_frame_processor') and self.scan_frame_processor:
+            pattern_frames = getattr(self.scan_frame_processor, 'pattern_frames', {})
+            if pattern_frames:
+                # Trova l'ultimo pattern ricevuto per visualizzazione più reattiva
+                pattern_indices = sorted(pattern_frames.keys())
+                if pattern_indices:
+                    latest_idx = pattern_indices[-1]
+                    frames = pattern_frames[latest_idx]
 
-                        # Controlla se abbiamo entrambi i frame
-                        if 0 in frames and 1 in frames:
-                            left_frame = frames[0]
-                            right_frame = frames[1]
+                    # Controlla se abbiamo entrambi i frame
+                    if 0 in frames and 1 in frames:
+                        left_frame = frames[0]
+                        right_frame = frames[1]
 
-                            # Visualizza i frame
-                            self._display_preview_frames(left_frame, right_frame)
-                            return
+                        # Visualizza i frame
+                        self._display_preview_frames(left_frame, right_frame)
 
-            # Prova a ottenere la nuvola di punti in tempo reale
-            if hasattr(self, 'scan_frame_processor') and self.scan_frame_processor:
-                if hasattr(self.scan_frame_processor,
-                           '_realtime_pointcloud') and self.scan_frame_processor._realtime_pointcloud is not None:
-                    # Assicurati che il mutex sia disponibile
-                    if hasattr(self.scan_frame_processor, '_pointcloud_lock'):
-                        with self.scan_frame_processor._pointcloud_lock:
-                            pointcloud = self.scan_frame_processor._realtime_pointcloud
+                        # NOVITÀ: Tenta di visualizzare anche la nuvola di punti in tempo reale
+                        if hasattr(self.scan_frame_processor, '_realtime_pointcloud') and \
+                                self.scan_frame_processor._realtime_pointcloud is not None and \
+                                hasattr(self.scan_frame_processor, '_pointcloud_lock'):
 
-                            # Aggiorna la visualizzazione della nuvola di punti
-                            self._display_realtime_pointcloud(pointcloud)
-                            return
+                            with self.scan_frame_processor._pointcloud_lock:
+                                pointcloud = self.scan_frame_processor._realtime_pointcloud
 
-            # Se non abbiamo dati in memoria, prova a richiederli dallo scanner
+                            if pointcloud is not None and len(pointcloud) > 100:
+                                # Visualizza la nuvola di punti (limitata a 30K punti per prestazioni)
+                                if len(pointcloud) > 30000:
+                                    # Campionamento causale per visualizzazione rapida
+                                    indices = np.random.choice(len(pointcloud), 30000, replace=False)
+                                    display_cloud = pointcloud[indices]
+                                else:
+                                    display_cloud = pointcloud
+
+                                self._display_realtime_pointcloud(display_cloud)
+
+                        return
+
+        # Se non abbiamo dati in memoria, tentiamo di richiederli dal server
+        # con timeout breve per non bloccare l'interfaccia
+        if self.selected_scanner and self.scanner_controller and self.is_scanning:
             try:
-                if self.selected_scanner and self.scanner_controller:
-                    # Invia un comando per ottenere l'anteprima dell'ultima immagine
-                    preview_success = self.scanner_controller.send_command(
+                # Invia un comando per ottenere l'anteprima
+                preview_success = self.scanner_controller.send_command(
+                    self.selected_scanner.device_id,
+                    "GET_SCAN_PREVIEW",
+                    {"scan_id": self.current_scan_id if self.current_scan_id else "current"}
+                )
+
+                if preview_success:
+                    # Attendi la risposta con un timeout breve (200ms max)
+                    preview_response = self.scanner_controller.wait_for_response(
                         self.selected_scanner.device_id,
                         "GET_SCAN_PREVIEW",
-                        {"scan_id": self.current_scan_id if self.current_scan_id else "current"}
+                        timeout=0.2
                     )
 
-                    if preview_success:
-                        # Attendi la risposta con un timeout breve
-                        preview_response = self.scanner_controller.wait_for_response(
-                            self.selected_scanner.device_id,
-                            "GET_SCAN_PREVIEW",
-                            timeout=1.0
-                        )
-
-                        if preview_response and preview_response.get("status") == "ok":
-                            # Elabora le immagini di anteprima ricevute
-                            self._process_preview_images(preview_response)
-                            return
+                    if preview_response and preview_response.get("status") == "ok":
+                        # Elabora le immagini di anteprima ricevute
+                        self._process_preview_images(preview_response)
+                        return
             except Exception as e:
-                logger.debug(f"Errore nel tentativo di ottenere anteprime dallo scanner: {e}")
+                # Non blocchiamo l'interfaccia in caso di errore
+                logger.debug(f"Errore nel tentativo di ottenere anteprime: {e}")
 
+        # Fallback: cerca immagini su disco se non abbiamo dati in memoria
+        if not scan_dir or not os.path.isdir(scan_dir):
             return
 
-        # Cerca le immagini più recenti
+        # Cerca le immagini più recenti (usa glob con sorting ottimizzato)
         left_dir = os.path.join(scan_dir, "left")
         right_dir = os.path.join(scan_dir, "right")
 
         if not os.path.isdir(left_dir) or not os.path.isdir(right_dir):
             return
 
-        # Ottieni le immagini più recenti
+        # OTTIMIZZAZIONE: Usa sorting by mtime per trovare rapidamente le più recenti
         try:
             left_images = glob.glob(os.path.join(left_dir, "*.png"))
             right_images = glob.glob(os.path.join(right_dir, "*.png"))
@@ -2033,18 +2043,14 @@ class ScanView(QWidget):
             if not left_images or not right_images:
                 return
 
-            # Ordina per data di modifica (più recente prima)
-            left_images.sort(key=os.path.getmtime, reverse=True)
-            right_images.sort(key=os.path.getmtime, reverse=True)
-
-            # Prendi l'immagine più recente di ciascuna camera
-            left_image = left_images[0]
-            right_image = right_images[0]
+            # Ordina per data di modifica senza ordinare l'intero array
+            latest_left = max(left_images, key=os.path.getmtime)
+            latest_right = max(right_images, key=os.path.getmtime)
 
             # Carica e visualizza le immagini
             if OPENCV_AVAILABLE:
-                left_img = cv2.imread(left_image)
-                right_img = cv2.imread(right_image)
+                left_img = cv2.imread(latest_left)
+                right_img = cv2.imread(latest_right)
 
                 if left_img is not None and right_img is not None:
                     self._display_preview_frames(left_img, right_img)
