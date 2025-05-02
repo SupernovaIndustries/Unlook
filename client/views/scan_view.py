@@ -33,6 +33,16 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.error("Impossibile importare il modulo di triangolazione. La visualizzazione 3D sarà disabilitata.")
 
+    try:
+        from client.processing.scan_frame_processor import ScanFrameProcessor
+    except ImportError:
+        logger.error("Impossibile importare ScanFrameProcessor")
+
+
+        # Classe mock se l'importazione fallisce
+        class ScanFrameProcessor:
+            def __init__(self, *args, **kwargs):
+                pass
 
     # Classi mock per quando il modulo non è disponibile
     class PatternType:
@@ -484,6 +494,21 @@ class ScanView(QWidget):
         # Registra il gestore di frame
         self._register_frame_handler()
         logger.info("Gestore frame registrato")
+
+        # Processore per i frame di scansione in tempo reale
+        self.scan_frame_processor = ScanFrameProcessor(output_dir=self.output_dir)
+
+        # Imposta callback per aggiornare l'interfaccia utente
+        def progress_callback(progress_info):
+            self.progress_bar.setValue(int(progress_info["progress"]))
+            self.status_label.setText(
+                f"Stato: {progress_info['state']}, frame ricevuti: {progress_info['frames_total']}")
+
+        def frame_callback(camera_index, pattern_index, frame):
+            # Aggiorna l'anteprima
+            self._update_preview_image()
+
+        self.scan_frame_processor.set_callbacks(progress_callback, frame_callback)
 
         # Processor per la triangolazione
         self.scan_processor = ScanProcessor()
@@ -1262,6 +1287,13 @@ class ScanView(QWidget):
         # Genera un ID unico per la scansione
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.current_scan_id = f"{scan_name}_{timestamp}"
+        
+        # Avvia il processore di frame
+        self.scan_frame_processor.start_scan(
+            scan_id=self.current_scan_id,
+            num_patterns=self.scan_config.get("num_patterns", 12),
+            pattern_type=self.scan_config.get("pattern_type", "PROGRESSIVE")
+        )
 
         # Prepara la configurazione
         scan_config = self.scan_config.copy()
@@ -2397,32 +2429,37 @@ class ScanView(QWidget):
     def _register_frame_handler(self):
         """
         Registra un gestore per ricevere i frame della scansione in tempo reale.
-        Versione migliorata con verifica della registrazione.
+        Usa il ScanFrameProcessor per elaborare i frame ricevuti.
         """
         if self.scanner_controller and hasattr(self.scanner_controller, '_connection_manager'):
             try:
-                # Prima rimuovi eventuali registrazioni precedenti per evitare callback duplicati
-                cm = self.scanner_controller._connection_manager
-                if hasattr(cm, '_message_handlers') and "SCAN_FRAME" in cm._message_handlers:
-                    logger.info("Rimozione registrazione precedente del gestore SCAN_FRAME")
-                    cm._message_handlers.pop("SCAN_FRAME")
+                # Cerca nel main window uno streaming_widget
+                main_window = self.window()
+                if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
+                    streaming_widget = main_window.streaming_widget
 
-                # Registra il nuovo handler
-                logger.info("Registrazione del gestore SCAN_FRAME")
-                cm.register_message_handler(
-                    "SCAN_FRAME",
-                    self._on_scan_frame_received
-                )
+                    # Se lo streaming widget ha un receiver, colleghiamo la nostra funzione
+                    if hasattr(streaming_widget, 'stream_receiver') and streaming_widget.stream_receiver:
+                        # Funzione che verrà chiamata quando riceviamo un frame di scansione
+                        def on_scan_frame_received(camera_index, frame, frame_info):
+                            # Verifichiamo che sia un frame di scansione
+                            if not frame_info.get("is_scan_frame", False):
+                                return
 
-                # Verifica che la registrazione sia avvenuta con successo
-                if "SCAN_FRAME" in cm._message_handlers:
-                    logger.info("Gestore di frame di scansione registrato con successo")
+                            # Verifichiamo se c'è una scansione attiva
+                            if not self.is_scanning:
+                                return
+
+                            # Elabora il frame con il nostro processore
+                            self.scan_frame_processor.process_frame(camera_index, frame, frame_info)
+
+                        # Colleghiamo la nostra funzione allo streaming receiver
+                        streaming_widget.stream_receiver.scan_frame_received.connect(on_scan_frame_received)
+                        logger.info("Collegato gestore di frame di scansione allo StreamReceiver")
+                    else:
+                        logger.warning("StreamReceiver non trovato nello streaming_widget")
                 else:
-                    logger.error("Registrazione del gestore SCAN_FRAME fallita!")
-
-                # Aggiungi un modo alternativo per ricevere i frame
-                # Registra anche un listener per PUB/SUB come backup
-                self._setup_frame_receiver()
+                    logger.warning("streaming_widget non trovato nella finestra principale")
 
             except Exception as e:
                 logger.error(f"Errore nella registrazione del gestore di frame: {e}")

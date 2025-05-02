@@ -714,7 +714,7 @@ class ScanManager:
     def _capture_frame_callback(self, pattern_index: int) -> Tuple[np.ndarray, np.ndarray]:
         """
         Callback per l'acquisizione dei frame dalle camere e invio al client.
-        Versione migliorata con maggiore robustezza e integrazione con lo streaming.
+        Questa versione utilizza direttamente il socket di streaming esistente.
 
         Args:
             pattern_index: Indice del pattern corrente
@@ -739,10 +739,8 @@ class ScanManager:
                 try:
                     for cam_info in self.server.cameras:
                         if cam_info["name"] == "left":
-                            # Cattura il frame dalla camera sinistra
                             left_frame = cam_info["camera"].capture_array()
                         elif cam_info["name"] == "right":
-                            # Cattura il frame dalla camera destra
                             right_frame = cam_info["camera"].capture_array()
 
                     # Se entrambi i frame sono stati acquisiti, esci dal ciclo
@@ -766,11 +764,6 @@ class ScanManager:
                         "mode") == "grayscale":
                     right_frame = cv2.cvtColor(right_frame, cv2.COLOR_RGB2GRAY)
 
-            # Compressione JPEG degli frame per l'invio
-            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 90]
-            _, left_encoded = cv2.imencode('.jpg', left_frame, encode_params)
-            _, right_encoded = cv2.imencode('.jpg', right_frame, encode_params)
-
             # Determina il nome del pattern in base all'indice
             pattern_name = ""
             if pattern_index == 0:
@@ -782,25 +775,95 @@ class ScanManager:
             else:
                 pattern_name = f"horizontal_{pattern_index - 2 - self._scan_config['num_patterns']}"
 
-            # Informazioni sul frame
-            frame_info = {
-                "pattern_index": pattern_index,
-                "pattern_name": pattern_name,
-                "scan_id": getattr(self, 'current_scan_id', None),
-                "timestamp": time.time()
-            }
+            # IMPORTANTE: Utilizza il socket di streaming normale dal server
+            if hasattr(self.server, "stream_socket") and self.server.stream_socket:
+                try:
+                    # Compressione JPEG degli frame per l'invio
+                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, 90]
+                    _, left_encoded = cv2.imencode('.jpg', left_frame, encode_params)
+                    _, right_encoded = cv2.imencode('.jpg', right_frame, encode_params)
 
-            # Invio dei frame al client tramite il socket di streaming
-            self.notify_client_new_frames(
-                frame_info,
-                left_encoded.tobytes(),
-                right_encoded.tobytes()
-            )
+                    # Crea header con metadati che identificano questi come frame di scansione
+                    scan_id = getattr(self, 'current_scan_id', None)
+                    timestamp = time.time()
+
+                    # Invia frame sinistro
+                    left_header = {
+                        "camera": 0,  # Camera sinistra
+                        "frame": pattern_index,
+                        "timestamp": timestamp,
+                        "format": "jpeg",
+                        "is_scan_frame": True,  # Flag per identificare i frame di scansione
+                        "scan_id": scan_id,
+                        "pattern_index": pattern_index,
+                        "pattern_name": pattern_name
+                    }
+
+                    # Verifica che il socket sia disponibile prima dell'invio
+                    poller = zmq.Poller()
+                    poller.register(self.server.stream_socket, zmq.POLLOUT)
+                    if poller.poll(100):  # Timeout di 100ms
+                        # Socket pronto per l'invio
+                        self.server.stream_socket.send_json(left_header, zmq.SNDMORE)
+                        self.server.stream_socket.send(left_encoded.tobytes(), copy=False)
+
+                        # Breve pausa per evitare congestione
+                        time.sleep(0.01)
+
+                        # Invia frame destro
+                        right_header = {
+                            "camera": 1,  # Camera destra
+                            "frame": pattern_index,
+                            "timestamp": timestamp,
+                            "format": "jpeg",
+                            "is_scan_frame": True,
+                            "scan_id": scan_id,
+                            "pattern_index": pattern_index,
+                            "pattern_name": pattern_name
+                        }
+
+                        self.server.stream_socket.send_json(right_header, zmq.SNDMORE)
+                        self.server.stream_socket.send(right_encoded.tobytes(), copy=False)
+
+                        logger.info(f"Frame {pattern_index} ({pattern_name}) inviato tramite socket di streaming")
+                    else:
+                        logger.warning(f"Socket di streaming non pronto per l'invio del frame {pattern_index}")
+
+                except zmq.ZMQError as e:
+                    logger.error(f"Errore ZMQ nell'invio del frame: {e}")
+                except Exception as e:
+                    logger.error(f"Errore generale nell'invio del frame: {e}")
+            else:
+                logger.error("Socket di streaming non disponibile nel server")
+
+            # Salva i frame su disco come backup
+            try:
+                scan_dir = getattr(self, '_scan_dir',
+                                   self._scan_data_dir / getattr(self, 'current_scan_id', str(int(time.time()))))
+
+                # Assicurati che le directory esistano
+                left_dir = scan_dir / "left"
+                right_dir = scan_dir / "right"
+                left_dir.mkdir(exist_ok=True, parents=True)
+                right_dir.mkdir(exist_ok=True, parents=True)
+
+                # Salva i frame
+                left_path = left_dir / f"{pattern_index:04d}_{pattern_name}.png"
+                right_path = right_dir / f"{pattern_index:04d}_{pattern_name}.png"
+
+                cv2.imwrite(str(left_path), left_frame)
+                cv2.imwrite(str(right_path), right_frame)
+
+                logger.info(f"Frame {pattern_index} salvato su disco: {left_path}, {right_path}")
+            except Exception as e:
+                logger.error(f"Errore nel salvataggio dei frame su disco: {e}")
 
             return (left_frame, right_frame)
 
         except Exception as e:
             logger.error(f"Errore nella callback di acquisizione frame: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return (None, None)
 
     def cleanup(self):
