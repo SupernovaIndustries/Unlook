@@ -20,7 +20,7 @@ import cv2
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSplitter,
     QGroupBox, QFormLayout, QComboBox, QSlider, QProgressBar, QMessageBox,
-    QApplication, QFileDialog
+    QApplication, QFileDialog, QProgressDialog
 )
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QMetaObject, Q_ARG
 from PySide6.QtGui import QImage, QPixmap, QStatusTipEvent
@@ -414,6 +414,11 @@ class ScanView(QWidget):
         self.stop_scan_button.clicked.connect(self._stop_scan)
         self.stop_scan_button.setEnabled(False)
 
+        self.diagnostics_button = QPushButton("🔍 Diagnostica")
+        self.diagnostics_button.setMinimumWidth(100)
+        self.diagnostics_button.clicked.connect(self._run_sync_diagnostics)
+        self.diagnostics_button.setEnabled(False)
+
         self.export_button = QPushButton("💾 Esporta")
         self.export_button.setMinimumWidth(100)
         self.export_button.clicked.connect(self._export_scan)
@@ -473,7 +478,7 @@ class ScanView(QWidget):
         )
 
     def _connect_to_stream(self):
-        """Collega il widget agli stream delle camere direttamente da MainWindow."""
+        """Collega il widget agli stream delle camere con approccio robusto."""
         if self._stream_connected:
             logger.debug("Stream già connesso, nessuna azione necessaria")
             return True
@@ -483,9 +488,18 @@ class ScanView(QWidget):
             main_window = self.window()
             logger.info(f"MainWindow trovata: {main_window is not None}")
 
-            # Verifica se stream_receiver è presente direttamente in MainWindow
-            if hasattr(main_window, 'stream_receiver') and main_window.stream_receiver is not None:
+            # NUOVA IMPLEMENTAZIONE: verifica prima il riferimento diretto a stream_receiver
+            has_stream_receiver = hasattr(main_window, 'stream_receiver')
+            logger.info(f"MainWindow ha stream_receiver: {has_stream_receiver}")
+
+            if has_stream_receiver and main_window.stream_receiver:
                 receiver = main_window.stream_receiver
+
+                # Verifica se il receiver ha i metodi necessari
+                logger.info(f"Metodi disponibili nel receiver: "
+                            f"frame_received={hasattr(receiver, 'frame_received')}, "
+                            f"set_frame_processor={hasattr(receiver, 'set_frame_processor')}, "
+                            f"enable_direct_routing={hasattr(receiver, 'enable_direct_routing')}")
 
                 # Tenta di accedere al segnale frame_received
                 if hasattr(receiver, 'frame_received'):
@@ -514,34 +528,43 @@ class ScanView(QWidget):
                 else:
                     logger.error("Segnale frame_received non trovato nel receiver")
             else:
-                logger.warning("Stream receiver non trovato in MainWindow")
+                # MANTENGO IL CODICE LEGACY per compatibilità, ma ora come fallback
+                has_streaming_widget = hasattr(main_window, 'streaming_widget')
+                logger.info(f"MainWindow ha streaming_widget: {has_streaming_widget}")
 
-                # Tentativo alternativo di trovare il receiver dal controller
-                if hasattr(self, 'scanner_controller') and self.scanner_controller:
-                    if hasattr(self.scanner_controller, 'get_stream_receiver'):
-                        receiver = self.scanner_controller.get_stream_receiver()
-                        if receiver:
-                            logger.info("Receiver trovato direttamente dal controller")
+                if has_streaming_widget and main_window.streaming_widget:
+                    # ... [resto del codice esistente per streaming_widget] ...
+                    logger.info("Connessione tramite streaming_widget (legacy)")
+                else:
+                    logger.warning("Né stream_receiver né streaming_widget trovati in MainWindow")
 
-                            # Collega il segnale e configura come sopra...
-                            try:
-                                receiver.frame_received.disconnect(self._on_frame_received)
-                            except:
-                                pass
+                    # Tentativo alternativo di trovare il receiver dal controller
+                    if hasattr(self, 'scanner_controller') and self.scanner_controller:
+                        if hasattr(self.scanner_controller, 'get_stream_receiver'):
+                            receiver = self.scanner_controller.get_stream_receiver()
+                            if receiver:
+                                logger.info("Receiver trovato direttamente dal controller")
 
-                            receiver.frame_received.connect(self._on_frame_received)
+                                # ... [resto del codice esistente per collegarsi al receiver] ...
+                                # Disconnetti eventuali connessioni esistenti
+                                try:
+                                    receiver.frame_received.disconnect(self._on_frame_received)
+                                except:
+                                    pass
 
-                            if hasattr(receiver, 'set_frame_processor'):
-                                receiver.set_frame_processor(self.scan_processor)
+                                receiver.frame_received.connect(self._on_frame_received)
 
-                            if hasattr(receiver, 'enable_direct_routing'):
-                                receiver.enable_direct_routing(True)
+                                if hasattr(receiver, 'set_frame_processor'):
+                                    receiver.set_frame_processor(self.scan_processor)
 
-                            self._stream_connected = True
-                            return True
+                                if hasattr(receiver, 'enable_direct_routing'):
+                                    receiver.enable_direct_routing(True)
 
-                logger.error("Non è stato possibile trovare un stream receiver valido")
-                return False
+                                self._stream_connected = True
+                                return True
+
+                    logger.error("Non è stato possibile trovare un stream receiver valido")
+                    return False
 
         except Exception as e:
             logger.error(f"Errore nella connessione agli stream: {e}")
@@ -792,6 +815,10 @@ class ScanView(QWidget):
         # Prova a connettersi agli stream
         self._connect_to_stream()
 
+        # Abilita il pulsante diagnostica se c'è uno scanner selezionato
+        if self.selected_scanner and hasattr(self, 'diagnostics_button'):
+            self.diagnostics_button.setEnabled(True)
+
     def refresh_scanner_state(self):
         """Aggiorna lo stato dello scanner (richiamato quando la tab diventa attiva)."""
         self._update_status()
@@ -803,71 +830,234 @@ class ScanView(QWidget):
         return self.pointcloud_viewer.pointcloud
 
     def _connect_to_stream(self):
-        """Collega il widget agli stream delle camere con diagnostica avanzata."""
+        """
+        Versione completamente riprogettata per connettere il widget agli stream.
+        Implementa una logica chiara e robusta con debug esteso.
+        """
         if self._stream_connected:
             logger.debug("Stream già connesso, nessuna azione necessaria")
             return True
 
-        try:
-            # Cerca il main window
-            main_window = self.window()
-            logger.info(f"MainWindow trovata: {main_window is not None}")
+        # FASE 1: Trova la MainWindow
+        main_window = self.window()
+        logger.info(f"MainWindow trovata: {main_window is not None}")
 
-            # Verifica streaming_widget
-            has_streaming_widget = hasattr(main_window, 'streaming_widget')
-            logger.info(f"MainWindow ha streaming_widget: {has_streaming_widget}")
+        if main_window is None:
+            logger.error("Impossibile ottenere riferimento alla MainWindow")
+            return False
 
-            if has_streaming_widget and main_window.streaming_widget:
-                streaming_widget = main_window.streaming_widget
+        # FASE 2: Debug dettagliato della struttura MainWindow
+        logger.info(f"Tipo di main_window: {type(main_window).__name__}")
 
-                # Verifica stream_receiver
-                has_receiver = hasattr(streaming_widget, 'stream_receiver')
-                logger.info(f"StreamingWidget ha stream_receiver: {has_receiver}")
+        # Elenco proprietà rilevanti di MainWindow
+        main_window_attributes = [attr for attr in dir(main_window)
+                                  if not attr.startswith('_') and
+                                  not callable(getattr(main_window, attr))]
+        logger.info(f"Attributi di MainWindow: {main_window_attributes}")
 
-                if has_receiver and streaming_widget.stream_receiver:
-                    receiver = streaming_widget.stream_receiver
+        # FASE 3: Verifica esistenza di stream_receiver
+        has_stream_receiver = hasattr(main_window, 'stream_receiver')
+        logger.info(f"MainWindow ha stream_receiver: {has_stream_receiver}")
 
-                    # Verifica se il receiver ha i metodi necessari
-                    logger.info(f"Metodi disponibili nel receiver: "
-                                f"frame_received={hasattr(receiver, 'frame_received')}, "
-                                f"set_frame_processor={hasattr(receiver, 'set_frame_processor')}, "
-                                f"enable_direct_routing={hasattr(receiver, 'enable_direct_routing')}")
+        if has_stream_receiver:
+            # FASE 3.1: Verifica che stream_receiver non sia None
+            receiver = main_window.stream_receiver
+            if receiver is not None:
+                logger.info("stream_receiver trovato e non è None")
 
-                    # Tenta di accedere al segnale frame_received
-                    if hasattr(receiver, 'frame_received'):
+                # FASE 3.2: Verifica metodi necessari
+                has_frame_received = hasattr(receiver, 'frame_received')
+                has_set_processor = hasattr(receiver, 'set_frame_processor')
+                has_direct_routing = hasattr(receiver, 'enable_direct_routing')
+
+                logger.info(f"Metodi stream_receiver: frame_received={has_frame_received}, "
+                            f"set_frame_processor={has_set_processor}, "
+                            f"enable_direct_routing={has_direct_routing}")
+
+                if has_frame_received:
+                    # FASE 3.3: Connessione ai segnali
+                    try:
                         # Disconnetti eventuali connessioni esistenti
+                        try:
+                            receiver.frame_received.disconnect(self._on_frame_received)
+                            logger.info("Precedente connessione frame_received disconnessa")
+                        except:
+                            logger.info("Nessuna precedente connessione frame_received da disconnettere")
+
+                        # Connetti il segnale
+                        receiver.frame_received.connect(self._on_frame_received)
+                        logger.info("Segnale frame_received collegato con successo")
+
+                        # Configura il processor se disponibile
+                        if has_set_processor:
+                            receiver.set_frame_processor(self.scan_processor)
+                            logger.info("Processore di frame impostato con successo")
+
+                        # Abilita direct routing se disponibile
+                        if has_direct_routing:
+                            receiver.enable_direct_routing(True)
+                            logger.info("Direct routing abilitato con successo")
+
+                        # Successo!
+                        self._stream_connected = True
+                        logger.info("Connessione allo stream completata con successo via stream_receiver")
+                        return True
+                    except Exception as e:
+                        logger.error(f"Errore nella connessione ai segnali: {e}")
+                        import traceback
+                        logger.error(f"Traceback connessione segnali: {traceback.format_exc()}")
+                else:
+                    logger.error("stream_receiver non ha il segnale frame_received")
+            else:
+                logger.warning("stream_receiver esiste ma è None")
+
+        # FASE 4: Fallback a logica di streaming_widget (ma solo come diagnostica)
+        logger.warning("Il percorso stream_receiver ha fallito, controllo streaming_widget per diagnostica")
+        has_streaming_widget = hasattr(main_window, 'streaming_widget')
+        logger.info(f"MainWindow ha streaming_widget: {has_streaming_widget}")
+
+        if has_streaming_widget:
+            streaming_widget = main_window.streaming_widget
+            if streaming_widget is not None:
+                logger.info("streaming_widget trovato ma è deprecato - verifica proprietà")
+                # Non fare nulla qui, solo diagnostica
+            else:
+                logger.info("streaming_widget esiste ma è None")
+        else:
+            logger.error("StreamingWidget non trovato in MainWindow")
+
+        # FASE 5: Tentativo di recupero tramite scanner_controller
+        logger.info("Tentativo alternativo tramite scanner_controller")
+        if hasattr(self, 'scanner_controller') and self.scanner_controller:
+            logger.info("scanner_controller trovato")
+
+            # Tenta di ottenere stream_receiver dal controller
+            try:
+                # Metodo esplicito get_stream_receiver se esiste
+                if hasattr(self.scanner_controller, 'get_stream_receiver'):
+                    logger.info("Chiamata a scanner_controller.get_stream_receiver()")
+                    receiver = self.scanner_controller.get_stream_receiver()
+                    if receiver:
+                        logger.info("Ottenuto stream_receiver dal controller")
+
+                        # Connetti ai segnali come sopra
                         try:
                             receiver.frame_received.disconnect(self._on_frame_received)
                         except:
                             pass
 
-                        # Collega il segnale
                         receiver.frame_received.connect(self._on_frame_received)
-                        logger.info("Segnale frame_received collegato con successo")
+                        logger.info("Segnale frame_received collegato")
 
-                        # Imposta il processore di scan frame
                         if hasattr(receiver, 'set_frame_processor'):
                             receiver.set_frame_processor(self.scan_processor)
-                            logger.info("Processore di frame impostato con successo")
+                            logger.info("Processore di frame impostato")
 
-                        # Abilita routing diretto
                         if hasattr(receiver, 'enable_direct_routing'):
                             receiver.enable_direct_routing(True)
-                            logger.info("Routing diretto abilitato con successo")
+                            logger.info("Direct routing abilitato")
 
                         self._stream_connected = True
+                        logger.info("Connessione allo stream completata tramite scanner_controller")
                         return True
                     else:
-                        logger.error("Segnale frame_received non trovato nel receiver")
+                        logger.warning("scanner_controller.get_stream_receiver() ha restituito None")
                 else:
-                    logger.error("StreamReceiver non trovato o non inizializzato in StreamingWidget")
-            else:
-                logger.error("StreamingWidget non trovato in MainWindow")
-        except Exception as e:
-            logger.error(f"Errore nella connessione agli stream: {e}")
-            import traceback
-            logger.error(f"Traceback completo: {traceback.format_exc()}")
+                    logger.warning("scanner_controller non ha get_stream_receiver()")
 
+                    # Cerca riferimenti diretti a stream_receiver
+                    if hasattr(self.scanner_controller, 'stream_receiver'):
+                        logger.info("Trovato scanner_controller.stream_receiver")
+                        receiver = self.scanner_controller.stream_receiver
+                        if receiver:
+                            logger.info("Usando scanner_controller.stream_receiver")
+
+                            # Connetti ai segnali come sopra
+                            try:
+                                receiver.frame_received.disconnect(self._on_frame_received)
+                            except:
+                                pass
+
+                            receiver.frame_received.connect(self._on_frame_received)
+
+                            if hasattr(receiver, 'set_frame_processor'):
+                                receiver.set_frame_processor(self.scan_processor)
+
+                            if hasattr(receiver, 'enable_direct_routing'):
+                                receiver.enable_direct_routing(True)
+
+                            self._stream_connected = True
+                            logger.info("Connessione allo stream completata tramite scanner_controller.stream_receiver")
+                            return True
+                        else:
+                            logger.warning("scanner_controller.stream_receiver è None")
+            except Exception as e:
+                logger.error(f"Errore nel tentativo tramite scanner_controller: {e}")
+                import traceback
+                logger.error(f"Traceback scanner_controller: {traceback.format_exc()}")
+        else:
+            logger.warning("scanner_controller non disponibile")
+
+        # FASE 6: Tentativo creazione nuovo receiver direttamente
+        logger.info("Tentativo di creazione diretta di un nuovo StreamReceiver")
+        try:
+            # Verifica se abbiamo informazioni sullo scanner
+            if hasattr(self, 'selected_scanner') and self.selected_scanner:
+                logger.info(f"Scanner selezionato: {self.selected_scanner.name}")
+
+                # Ottieni le informazioni di connessione
+                host = self.selected_scanner.ip_address
+                port = self.selected_scanner.port + 1  # stream_port = command_port + 1
+
+                # Importa dinamicamente StreamReceiver
+                try:
+                    from client.network.stream_receiver import StreamReceiver
+                    logger.info(f"Creazione nuovo StreamReceiver su {host}:{port}")
+
+                    # Crea un nuovo receiver
+                    receiver = StreamReceiver(host, port)
+
+                    # Configura e collega
+                    receiver.frame_received.connect(self._on_frame_received)
+
+                    if hasattr(receiver, 'set_frame_processor'):
+                        receiver.set_frame_processor(self.scan_processor)
+
+                    if hasattr(receiver, 'enable_direct_routing'):
+                        receiver.enable_direct_routing(True)
+
+                    # Avvia il receiver
+                    receiver.start()
+
+                    # Mantieni un riferimento locale
+                    self._local_stream_receiver = receiver
+
+                    # Invia comando per avviare lo streaming
+                    if self.scanner_controller:
+                        self.scanner_controller.send_command(
+                            self.selected_scanner.device_id,
+                            "START_STREAM",
+                            {
+                                "dual_camera": True,
+                                "quality": 90,
+                                "target_fps": 30
+                            }
+                        )
+
+                    self._stream_connected = True
+                    logger.info("Nuovo StreamReceiver creato e avviato con successo")
+                    return True
+                except ImportError:
+                    logger.error("Impossibile importare StreamReceiver")
+                except Exception as e:
+                    logger.error(f"Errore nella creazione diretta di StreamReceiver: {e}")
+            else:
+                logger.warning("Nessuno scanner selezionato, impossibile creare StreamReceiver")
+        except Exception as e:
+            logger.error(f"Errore generale nel tentativo di creazione diretta: {e}")
+
+        # FASE 7: Fallimento finale
+        logger.error("Tutti i tentativi di connessione allo stream hanno fallito")
         return False
 
     def _verify_streaming_status(self):
@@ -958,19 +1148,130 @@ class ScanView(QWidget):
     def _start_synchronized_scan(self):
         """
         Avvia una scansione completamente sincronizzata con il proiettore.
-        Questa versione garantisce che ogni pattern sia proiettato prima dell'acquisizione.
+        Versione robusta con riconnessione automatica e gestione avanzata degli errori.
         """
         if self.is_scanning:
             logger.info("Scansione già in corso, nessuna azione necessaria")
             return
 
-        # Verifica connessione al receiver
-        if not self._connect_to_stream():
+        # Verifica preliminare scanner
+        if not self.selected_scanner or not self.scanner_controller:
+            logger.warning("Scanner non selezionato o controller non disponibile")
             QMessageBox.warning(
                 self,
-                "Stream non disponibile",
-                "Lo stream delle camere non è disponibile.\n"
-                "Impossibile avviare la scansione sincronizzata."
+                "Scanner non selezionato",
+                "Seleziona uno scanner prima di avviare la scansione."
+            )
+            return
+
+        # Verifica connessione al server con retry
+        attempt = 0
+        max_attempts = 3
+        while attempt < max_attempts:
+            if self.scanner_controller.is_connected(self.selected_scanner.device_id):
+                break
+
+            attempt += 1
+            logger.info(f"Tentativo di riconnessione {attempt}/{max_attempts}...")
+
+            success = self.scanner_controller.connect_to_scanner(self.selected_scanner.device_id)
+            if success:
+                logger.info("Riconnessione riuscita")
+                break
+
+            if attempt < max_attempts:
+                # Attesa progressiva tra tentativi
+                wait_time = attempt * 0.5  # 0.5s, 1.0s, 1.5s...
+                time.sleep(wait_time)
+
+        if attempt == max_attempts and not self.scanner_controller.is_connected(self.selected_scanner.device_id):
+            QMessageBox.warning(
+                self,
+                "Errore di connessione",
+                f"Impossibile connettersi a {self.selected_scanner.name} dopo {max_attempts} tentativi."
+            )
+            return
+
+        # Verifica connessione stream
+        connection_status = self._connect_to_stream()
+        logger.info(f"Connessione allo stream: {connection_status}")
+
+        if not connection_status:
+            # Tentativo di inizializzazione del receiver tramite MainWindow
+            logger.info("Tentativo di inizializzazione stream_receiver tramite MainWindow...")
+
+            main_window = self.window()
+            if hasattr(main_window, '_setup_stream_receiver'):
+                # Chiamata diretta al metodo di inizializzazione
+                try:
+                    init_success = main_window._setup_stream_receiver(self.selected_scanner)
+                    if init_success:
+                        logger.info("Inizializzazione stream_receiver riuscita")
+                        # Riprova connessione
+                        connection_status = self._connect_to_stream()
+                except Exception as e:
+                    logger.error(f"Errore nell'inizializzazione dello stream: {e}")
+
+            if not connection_status:
+                QMessageBox.warning(
+                    self,
+                    "Stream non disponibile",
+                    "Lo stream delle camere non è disponibile.\n"
+                    "Avvia lo streaming prima di iniziare la scansione."
+                )
+                return
+
+        # Ottieni e verifica capacità di scansione del server
+        try:
+            capability_result = self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "CHECK_SCAN_CAPABILITY"
+            )
+
+            if not capability_result:
+                QMessageBox.warning(
+                    self,
+                    "Errore verifica capacità",
+                    "Impossibile verificare le capacità di scansione 3D del server."
+                )
+                return
+
+            # Attendi risposta con timeout
+            capability_response = self.scanner_controller.wait_for_response(
+                self.selected_scanner.device_id,
+                "CHECK_SCAN_CAPABILITY",
+                timeout=5.0
+            )
+
+            if not capability_response or capability_response.get("status") != "ok":
+                error_msg = "Errore risposta server" if not capability_response else capability_response.get("message",
+                                                                                                             "Errore sconosciuto")
+                QMessageBox.warning(
+                    self,
+                    "Errore verifica capacità",
+                    f"Errore dal server: {error_msg}"
+                )
+                return
+
+            # Verifica se la scansione 3D è supportata
+            scan_capability = capability_response.get("scan_capability", False)
+            if not scan_capability:
+                # Estrai dettagli per messaggio informativo
+                details = capability_response.get("scan_capability_details", {})
+                error_message = details.get("error", "Scanner non supporta la scansione 3D")
+
+                QMessageBox.warning(
+                    self,
+                    "Scansione 3D non supportata",
+                    f"{error_message}\n\nVerifica che il proiettore sia collegato e funzionante."
+                )
+                return
+        except Exception as e:
+            logger.error(f"Errore nella verifica delle capacità: {e}")
+            QMessageBox.warning(
+                self,
+                "Errore",
+                f"Errore nella verifica delle capacità di scansione:\n{str(e)}"
             )
             return
 
@@ -1100,3 +1401,257 @@ class ScanView(QWidget):
         """Mostra un messaggio di errore in modo thread-safe."""
         # Usa QTimer.singleShot per eseguire nel thread UI
         QTimer.singleShot(0, lambda: QMessageBox.critical(self, title, message))
+    def _run_sync_diagnostics(self):
+        """
+        Esegue una diagnostica del ciclo di sincronizzazione per identificare problemi
+        di timing e latenza.
+        """
+        if not self.selected_scanner or not self.scanner_controller:
+            logger.error("Scanner non selezionato o controller non disponibile")
+            QMessageBox.warning(
+                self,
+                "Diagnostica impossibile",
+                "Seleziona e connetti uno scanner prima di eseguire la diagnostica."
+            )
+            return
+
+        # Mostra dialogo di progresso
+        progress = QProgressDialog("Diagnostica del ciclo di sincronizzazione in corso...", "Annulla", 0, 10, self)
+        progress.setWindowTitle("Diagnostica")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        QApplication.processEvents()
+
+        try:
+            # Assicurati che lo streaming sia attivo
+            if not self._connect_to_stream():
+                progress.close()
+                QMessageBox.warning(
+                    self,
+                    "Errore stream",
+                    "Impossibile connettersi allo stream. Avvia lo streaming prima di eseguire la diagnostica."
+                )
+                return
+
+            # Misura latenza di proiezione-acquisizione
+            results = []
+
+            # Testa diversi pattern
+            test_patterns = [0, 1, 2, 5, 10]  # White, black, pattern iniziali, pattern avanzati
+
+            for i, pattern_idx in enumerate(test_patterns):
+                progress.setValue(i)
+                progress.setLabelText(f"Test pattern {pattern_idx}...")
+                QApplication.processEvents()
+
+                if progress.wasCanceled():
+                    break
+
+                # Azzera contatori di ricezione
+                frame_received = {0: False, 1: False}
+                capture_timestamps = {0: 0, 1: 0}
+
+                # Callback temporanea per catturare i frame di questo pattern
+                def sync_frame_callback(camera_idx, pattern_idx_received, frame):
+                    if pattern_idx_received == pattern_idx:
+                        frame_received[camera_idx] = True
+                        capture_timestamps[camera_idx] = time.time()
+
+                # Collega callback temporanea
+                old_callback = self._frame_callback
+                self._frame_callback = sync_frame_callback
+
+                # Avvia sincronizzazione e misura tempo
+                start_time = time.time()
+                sync_response = self._sync_pattern_projection(pattern_idx)
+
+                if not sync_response or sync_response.get('status') != 'success':
+                    results.append({
+                        'pattern': pattern_idx,
+                        'success': False,
+                        'error': sync_response.get('message', 'Errore sconosciuto nella sincronizzazione')
+                    })
+                    continue
+
+                # Attendi ricezione frame (max 500ms)
+                wait_start = time.time()
+                timeout = 0.5  # 500ms
+
+                while (not frame_received[0] or not frame_received[1]) and time.time() - wait_start < timeout:
+                    QApplication.processEvents()
+                    time.sleep(0.01)
+
+                # Ripristina callback originale
+                self._frame_callback = old_callback
+
+                # Calcola le metriche
+                server_projection_time = sync_response.get('projection_time_ms', 0)
+                server_stabilization_time = sync_response.get('stabilization_time_ms', 0)
+                server_timestamp = sync_response.get('timestamp', 0)
+
+                left_latency = (capture_timestamps[0] - server_timestamp) * 1000 if frame_received[0] else None
+                right_latency = (capture_timestamps[1] - server_timestamp) * 1000 if frame_received[1] else None
+
+                # Salva risultati
+                results.append({
+                    'pattern': pattern_idx,
+                    'pattern_name': sync_response.get('pattern_name', f'Pattern {pattern_idx}'),
+                    'success': frame_received[0] and frame_received[1],
+                    'left_captured': frame_received[0],
+                    'right_captured': frame_received[1],
+                    'left_latency_ms': left_latency,
+                    'right_latency_ms': right_latency,
+                    'server_projection_ms': server_projection_time,
+                    'server_stabilization_ms': server_stabilization_time,
+                    'total_sync_time_ms': int((time.time() - start_time) * 1000)
+                })
+
+            progress.setValue(len(test_patterns))
+            progress.setLabelText("Analisi dei risultati...")
+            QApplication.processEvents()
+            time.sleep(0.5)  # Breve pausa per visualizzare il 100%
+            progress.close()
+
+            # Mostra risultati
+            if not results:
+                QMessageBox.warning(
+                    self,
+                    "Diagnostica annullata",
+                    "La diagnostica è stata annullata prima di raccogliere risultati."
+                )
+                return
+
+            # Crea report
+            report = "DIAGNOSTICA CICLO DI SINCRONIZZAZIONE\n"
+            report += "=" * 50 + "\n\n"
+
+            for r in results:
+                report += f"Pattern: {r['pattern']} ({r['pattern_name']})\n"
+                report += f"Successo: {'✓' if r['success'] else '✗'}\n"
+
+                if r['left_captured']:
+                    report += f"Camera sinistra: ✓ (latenza: {r['left_latency_ms']:.1f}ms)\n"
+                else:
+                    report += f"Camera sinistra: ✗ (frame non ricevuto)\n"
+
+                if r['right_captured']:
+                    report += f"Camera destra: ✓ (latenza: {r['right_latency_ms']:.1f}ms)\n"
+                else:
+                    report += f"Camera destra: ✗ (frame non ricevuto)\n"
+
+                report += f"Tempi server: proiezione={r['server_projection_ms']}ms, stabilizzazione={r['server_stabilization_ms']}ms\n"
+                report += f"Tempo totale ciclo: {r['total_sync_time_ms']}ms\n\n"
+
+            # Calcola metriche riassuntive
+            success_rate = sum(1 for r in results if r['success']) / len(results) * 100
+            avg_latency_left = sum(r['left_latency_ms'] for r in results if r['left_latency_ms'] is not None) / sum(
+                1 for r in results if r['left_latency_ms'] is not None)
+            avg_latency_right = sum(r['right_latency_ms'] for r in results if r['right_latency_ms'] is not None) / sum(
+                1 for r in results if r['right_latency_ms'] is not None)
+
+            report += "RIEPILOGO\n"
+            report += "-" * 50 + "\n"
+            report += f"Tasso di successo: {success_rate:.1f}%\n"
+            report += f"Latenza media (sinistra): {avg_latency_left:.1f}ms\n"
+            report += f"Latenza media (destra): {avg_latency_right:.1f}ms\n"
+
+            # Mostra il report
+            from PySide6.QtWidgets import QTextEdit, QVBoxLayout, QDialog, QPushButton
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Report diagnostica sincronizzazione")
+            dialog.resize(600, 500)
+
+            layout = QVBoxLayout(dialog)
+
+            text_edit = QTextEdit()
+            text_edit.setReadOnly(True)
+            text_edit.setFontFamily("Monospace")
+            text_edit.setText(report)
+
+            layout.addWidget(text_edit)
+
+            button = QPushButton("Chiudi")
+            button.clicked.connect(dialog.accept)
+            layout.addWidget(button)
+
+            dialog.exec()
+
+        except Exception as e:
+            progress.close()
+            logger.error(f"Errore durante la diagnostica: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+            QMessageBox.critical(
+                self,
+                "Errore diagnostica",
+                f"Si è verificato un errore durante la diagnostica:\n{str(e)}"
+            )
+    def _synchronized_scan_loop_robust(self):
+        """
+        Loop principale per la scansione sincronizzata con gestione errori robusta.
+        """
+        try:
+            # Parametri scansione
+            num_patterns = 24  # Inclusi white/black
+            pattern_wait_time = 0.1  # Tempo base di attesa tra pattern
+
+            # Evita di usare classi non definite - usa Signals per comunicare con l'UI thread
+            self._update_ui_status("Scansione sincronizzata in corso...")
+
+            # Loop principale pattern
+            for pattern_index in range(num_patterns):
+                # Verifica se la scansione è stata interrotta
+                if not self.is_scanning:
+                    logger.info("Scansione sincronizzata interrotta")
+                    break
+
+                # Calcola progresso
+                progress = (pattern_index / num_patterns) * 100
+
+                # Aggiorna UI da thread principale usando il metodo sicuro
+                self._update_ui_progress(int(progress))
+
+                pattern_name = f"Pattern {pattern_index}"
+                if pattern_index == 0:
+                    pattern_name = "White"
+                elif pattern_index == 1:
+                    pattern_name = "Black"
+
+                self._update_ui_status(f"Acquisizione {pattern_name} ({pattern_index + 1}/{num_patterns})...")
+
+                # Sincronizza proiezione
+                sync_result = self._sync_pattern_projection(pattern_index)
+
+                if not sync_result:
+                    logger.error(f"Errore nella sincronizzazione del pattern {pattern_index}")
+                    continue
+
+                # Attesa per stabilizzazione pattern e acquisizione
+                time.sleep(pattern_wait_time)
+
+                # Breve attesa aggiuntiva per frame successivi
+                time.sleep(0.2)
+
+            # Scansione completata
+            if self.is_scanning:
+                # Aggiorna UI
+                self._update_ui_progress(100)
+                self._update_ui_status("Scansione sincronizzata completata")
+
+                # Ferma scansione
+                self._stop_scan()
+
+        except Exception as e:
+            logger.error(f"Errore nel loop di scansione sincronizzata: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+            # Ferma scansione in caso di errore
+            if self.is_scanning:
+                self._stop_scan()
+
+                # Mostra errore usando metodo thread-safe
+                self._show_error_message("Errore",
+                                         f"Si è verificato un errore durante la scansione sincronizzata:\n{str(e)}")

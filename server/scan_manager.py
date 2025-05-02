@@ -911,15 +911,16 @@ class ScanManager:
 
         except Exception as e:
             logger.error(f"Errore nella pulizia del gestore di scansione: {e}")
+
     def sync_pattern_projection(self, pattern_index: int) -> Dict[str, Any]:
         """
-        Sincronizza la proiezione di un pattern specifico.
+        Sincronizza la proiezione di un pattern specifico con gestione avanzata dei tempi di attesa.
 
         Args:
             pattern_index: Indice del pattern da proiettare
 
         Returns:
-            Dizionario con risultato dell'operazione
+            Dizionario con risultato dell'operazione e timestamp di acquisizione
         """
         try:
             if not self._scan_controller:
@@ -939,14 +940,17 @@ class ScanManager:
                         'pattern_index': pattern_index
                     }
 
+            # Timer per misurare prestazioni per diagnostica
+            projection_start = time.time()
+
             # Pattern speciali: 0=white, 1=black
             pattern_name = ""
             if pattern_index == 0:
                 pattern_name = "white"
-                self._scan_controller.project_pattern(0, is_white=True)
+                projection_success = self._scan_controller.project_pattern(0, is_white=True)
             elif pattern_index == 1:
                 pattern_name = "black"
-                self._scan_controller.project_pattern(0, is_white=False)
+                projection_success = self._scan_controller.project_pattern(0, is_white=False)
             else:
                 # Calcola se è un pattern orizzontale o verticale
                 num_patterns = self._scan_config.get('num_patterns', 12)
@@ -960,21 +964,58 @@ class ScanManager:
                     pattern_name = f"vertical_{effective_idx}"
 
                 # Proietta pattern
-                self._scan_controller.project_pattern(
+                projection_success = self._scan_controller.project_pattern(
                     effective_idx,
                     is_horizontal=is_horizontal,
                     is_inverted=False
                 )
 
-            # Attendi che il pattern sia effettivamente proiettato
-            time.sleep(0.05)  # 50ms di attesa per la stabilizzazione
+            if not projection_success:
+                return {
+                    'status': 'error',
+                    'message': f'Errore nella proiezione del pattern: {self._scan_controller.error_message}',
+                    'pattern_index': pattern_index
+                }
 
+            projection_time = time.time() - projection_start
+
+            # Tempi di attesa adattivi in base al tipo di pattern
+            # Pattern diversi potrebbero richiedere tempi diversi per stabilizzarsi
+            if pattern_index <= 1:  # White/Black (maggiore contrasto, richiede più tempo)
+                stabilization_time = 0.08  # 80ms
+            elif pattern_index < 6:  # Primi pattern (frequenze più basse)
+                stabilization_time = 0.06  # 60ms
+            else:  # Pattern ad alta frequenza (cambiano meno l'illuminazione globale)
+                stabilization_time = 0.04  # 40ms
+
+            # Attendi che il pattern sia effettivamente proiettato e stabilizzato
+            time.sleep(stabilization_time)
+
+            # Timestamp dopo la stabilizzazione per la sincronizzazione
+            stabilized_timestamp = time.time()
+
+            # Verifica se ci sono camere disponibili prima di procedere
+            if not self.server.cameras or len(self.server.cameras) < 1:
+                return {
+                    'status': 'warning',
+                    'message': 'Camere non disponibili, pattern proiettato ma non acquisito',
+                    'pattern_index': pattern_index,
+                    'pattern_name': pattern_name,
+                    'projection_time_ms': int(projection_time * 1000),
+                    'stabilization_time_ms': int(stabilization_time * 1000),
+                    'timestamp': stabilized_timestamp
+                }
+
+            # Acquisizione eseguita in _capture_frame_callback, qui restituiamo solo lo stato
+            # e dettagli tecnici per diagnostica
             return {
                 'status': 'success',
                 'message': f'Pattern {pattern_name} proiettato con successo',
                 'pattern_index': pattern_index,
                 'pattern_name': pattern_name,
-                'timestamp': time.time()
+                'projection_time_ms': int(projection_time * 1000),
+                'stabilization_time_ms': int(stabilization_time * 1000),
+                'timestamp': stabilized_timestamp
             }
 
         except Exception as e:
@@ -987,3 +1028,4 @@ class ScanManager:
                 'message': f'Errore nella proiezione del pattern: {str(e)}',
                 'pattern_index': pattern_index
             }
+
