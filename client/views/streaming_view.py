@@ -197,71 +197,102 @@ class StreamView(QWidget):
 
             self.info_label.setText(f"Camera {camera_name} | {size_text} | {fps_text}")
 
-    def process_frame(self, camera_index, frame, frame_info):
+    def _process_frame(self, frame: np.ndarray) -> np.ndarray:
         """
-        Elabora un frame di scansione in tempo reale.
-        Versione ottimizzata con gestione dei pattern automatica.
+        Elabora un frame applicando le opzioni di visualizzazione.
+        Versione ottimizzata per prestazioni ed efficienza.
 
         Args:
-            camera_index: Indice della camera (0=sinistra, 1=destra)
-            frame: Frame come array NumPy
-            frame_info: Informazioni sul frame
+            frame: Frame da elaborare
 
         Returns:
-            True se il frame è stato elaborato correttamente, False altrimenti
+            Frame elaborato
         """
-        if not self.is_scanning:
-            # Avvia automaticamente la scansione se non è attiva
-            logger.info("Avvio automatico della scansione")
-            scan_id = f"RealTimeScan_{int(time.time())}"
-            self.start_scan(scan_id=scan_id)
-
         try:
-            # Assegna automaticamente un pattern_index se non presente
-            pattern_index = frame_info.get("pattern_index", -1)
+            # Per migliorare le prestazioni, evitiamo conversioni inutili di formato
+            is_color = len(frame.shape) == 3 and frame.shape[2] >= 3
 
-            # Se non c'è un pattern_index esplicito, usa l'analisi dell'immagine
-            if pattern_index < 0:
-                # Analisi del frame per determinare il tipo
-                # Possiamo analizzare la luminosità media per distinguere white/black
-                if not hasattr(self, '_frame_counter'):
-                    self._frame_counter = {0: 0, 1: 0}
+            # Se nessuna elaborazione è abilitata, restituisci il frame originale
+            if not hasattr(self, '_enhance_contrast') or not hasattr(self, '_show_grid') or not hasattr(self,
+                                                                                                        '_show_features'):
+                # Inizializza le opzioni se mancanti
+                if not hasattr(self, '_enhance_contrast'):
+                    self._enhance_contrast = False
+                if not hasattr(self, '_show_grid'):
+                    self._show_grid = False
+                if not hasattr(self, '_show_features'):
+                    self._show_features = False
 
-                self._frame_counter[camera_index] += 1
+            if not (self._enhance_contrast or self._show_grid or self._show_features):
+                return frame
 
-                # Prima passata: primi due frame sono white e black
-                if self._frame_counter[camera_index] <= 2:
-                    pattern_index = self._frame_counter[camera_index] - 1
+            # Solo se necessario, crea una copia in scala di grigi per elaborazione
+            if is_color:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = frame.copy() if self._enhance_contrast or self._show_features else frame
+
+            # Applica miglioramento del contrasto se abilitato
+            if self._enhance_contrast:
+                # Equalizzazione adattiva dell'istogramma (CLAHE)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                enhanced = clahe.apply(gray)
+
+                # Se il frame originale era a colori, applica miglioramento solo alla luminosità
+                if is_color:
+                    # Converti in HSV
+                    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                    # Sostituisci canale V (luminosità)
+                    hsv[:, :, 2] = enhanced
+                    # Torna a BGR
+                    frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
                 else:
-                    # Per i frame successivi, alterna pattern orizzontali e verticali
-                    pattern_index = self._frame_counter[camera_index]
+                    frame = enhanced
 
-            # Imposta un nome di pattern se non presente
-            pattern_name = frame_info.get("pattern_name", f"pattern_{pattern_index}")
+            # Applica griglia se abilitata
+            if self._show_grid:
+                height, width = frame.shape[:2]
+                grid_size = min(50, max(width, height) // 10)  # Adatta dimensione griglia
 
-            # Memorizza nel buffer
-            self._frame_buffer.add_frame(camera_index, pattern_index, frame.copy(), frame_info)
+                grid_color = (0, 255, 0) if is_color else 200
+                grid_thickness = 1
 
-            # Segnala al thread di elaborazione
-            self._new_frame_event.set()
+                # Disegna linee principali
+                for y in range(0, height, grid_size):
+                    cv2.line(frame, (0, y), (width, y), grid_color, grid_thickness)
+                for x in range(0, width, grid_size):
+                    cv2.line(frame, (x, 0), (x, height), grid_color, grid_thickness)
 
-            # Chiamate callback solo occasionalmente per limitare l'overhead
-            frame_count = self.frame_counters.get(camera_index, 0) + 1
-            self.frame_counters[camera_index] = frame_count
+            # Rileva e disegna caratteristiche se abilitato
+            if self._show_features:
+                # Usa rilevatore veloce con limite di punti
+                max_features = 100
+                feature_detector = cv2.FastFeatureDetector_create(threshold=30)
 
-            if frame_count % 10 == 0:
-                logger.debug(f"Elaborati {frame_count} frame dalla camera {camera_index}")
+                # Rileva keypoints
+                keypoints = feature_detector.detect(gray, None)
 
-                # Aggiorna callback di progresso
-                if self._progress_callback:
-                    progress = min(100, (frame_count / 100) * 100)  # Max 100%
-                    self._progress_callback(progress, f"Elaborazione frame: {frame_count}")
+                # Limita numero di keypoints
+                if len(keypoints) > max_features:
+                    keypoints = sorted(keypoints, key=lambda x: -x.response)[:max_features]
 
-            return True
+                # Disegna keypoints
+                feature_color = (0, 0, 255)  # Rosso
+                if is_color:
+                    cv2.drawKeypoints(frame, keypoints, frame, feature_color,
+                                      cv2.DRAW_MATCHES_FLAGS_DEFAULT)
+                else:
+                    # Converti a colore se necessario
+                    color_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                    cv2.drawKeypoints(color_frame, keypoints, color_frame, feature_color,
+                                      cv2.DRAW_MATCHES_FLAGS_DEFAULT)
+                    frame = color_frame
 
+            return frame
         except Exception as e:
-            logger.error(f"Errore nell'elaborazione del frame: {e}")
-            return False
+            logger.error(f"Errore in _process_frame: {e}")
+            # In caso di errore, restituisci il frame originale
+            return frame
 
     def _update_status(self, message):
         """

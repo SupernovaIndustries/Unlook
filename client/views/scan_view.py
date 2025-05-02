@@ -3527,72 +3527,75 @@ class ScanView(QWidget):
         Registra un gestore per ricevere i frame della scansione in tempo reale.
         Versione migliorata con gestione più robusta e inizializzazione corretta.
         """
-        if self.scanner_controller and hasattr(self.scanner_controller, '_connection_manager'):
-            try:
-                # Importa esplicitamente le classi necessarie
-                from client.processing.scan_frame_processor import ScanFrameProcessor, RealTimeTriangulator
+        try:
+            # Inizializza ScanFrameProcessor se necessario
+            if not hasattr(self, 'scan_frame_processor') or self.scan_frame_processor is None:
+                from client.processing.scan_frame_processor import ScanFrameProcessor
+                self.scan_frame_processor = ScanFrameProcessor(output_dir=self.output_dir)
+                logger.info("ScanFrameProcessor creato con successo")
 
-                # Assicurati che il ScanFrameProcessor sia correttamente inizializzato
-                if not hasattr(self, 'scan_frame_processor') or self.scan_frame_processor is None:
-                    self.scan_frame_processor = ScanFrameProcessor(output_dir=self.output_dir)
-                    logger.info("ScanFrameProcessor creato con successo")
+                # Imposta le callback
+                def progress_callback(progress):
+                    if isinstance(progress, dict):
+                        # Nuovo formato progresso
+                        percent = progress.get("progress", 0)
+                        message = progress.get("message", "")
+                    else:
+                        # Vecchio formato
+                        percent = progress
+                        message = ""
 
-                    # Inizializza esplicitamente il triangolatore se necessario
-                    if hasattr(self.scan_frame_processor,
-                               '_triangulator') and self.scan_frame_processor._triangulator is None:
-                        self.scan_frame_processor._triangulator = RealTimeTriangulator(output_dir=self.output_dir)
-                        logger.info("RealTimeTriangulator inizializzato esplicitamente")
+                    # Aggiorna UI con controlli di sicurezza
+                    if hasattr(self, 'progress_bar'):
+                        self.progress_bar.setValue(int(percent))
+                    if hasattr(self, 'status_label') and message:
+                        self.status_label.setText(message)
 
-                    # Imposta callback
-                    if hasattr(self, '_progress_callback') and self._progress_callback:
-                        self.scan_frame_processor.set_callbacks(self._progress_callback, self._frame_callback)
-                        logger.info("Callback impostati su ScanFrameProcessor")
+                def frame_callback(camera_index, pattern_index, frame_info):
+                    # Aggiorna preview con controlli di sicurezza
+                    if hasattr(self, '_update_preview_image'):
+                        self._update_preview_image()
 
-                # Cerca nel main window uno streaming_widget
-                main_window = self.window()
-                if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
-                    streaming_widget = main_window.streaming_widget
+                self.scan_frame_processor.set_callbacks(progress_callback, frame_callback)
 
-                    # Se lo streaming widget ha un receiver, colleghiamo la nostra funzione
-                    if hasattr(streaming_widget, 'stream_receiver') and streaming_widget.stream_receiver:
-                        # Ottieni il riferimento allo stream_receiver
-                        stream_receiver = streaming_widget.stream_receiver
-                        logger.info(f"StreamReceiver trovato, collegamento segnale scan_frame_received...")
+            # Ottieni riferimento allo streaming_widget dalla finestra principale
+            main_window = self.window()
+            if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
+                streaming_widget = main_window.streaming_widget
 
-                        # IMPORTANTE: Assicuriamoci di disconnettere eventuali connessioni precedenti
+                # Se lo streaming widget ha un receiver, colleghiamo la funzione di scan_frame_received
+                if hasattr(streaming_widget, 'stream_receiver') and streaming_widget.stream_receiver:
+                    stream_receiver = streaming_widget.stream_receiver
+
+                    # Verifica che il segnale esiste
+                    if hasattr(stream_receiver, 'scan_frame_received'):
+                        # Disconnetti eventuali connessioni precedenti per evitare duplicati
                         try:
                             stream_receiver.scan_frame_received.disconnect(self._handle_scan_frame)
-                        except (TypeError, RuntimeError):
-                            logger.debug("Nessuna connessione precedente da disconnettere")
-                            pass
+                        except Exception:
+                            pass  # Ignora errori se non era connesso
 
-                        # Ricollega direttamente alla funzione di gestione
+                        # Collega il segnale
                         stream_receiver.scan_frame_received.connect(self._handle_scan_frame)
                         logger.info("Segnale scan_frame_received collegato con successo")
 
-                        # Configura il routing diretto
+                        # Imposta il routing diretto
                         if hasattr(stream_receiver, 'set_frame_processor'):
-                            # Imposta il processore di frame
                             stream_receiver.set_frame_processor(self.scan_frame_processor)
-                            # Abilita il routing diretto
-                            stream_receiver.enable_direct_routing(True)
-                            logger.info("Routing diretto configurato con successo")
-                        else:
-                            logger.warning("Stream receiver non supporta il routing diretto")
-
-                        # Verifica lo stato e i componenti chiave
-                        self._verify_scan_components()
+                            if hasattr(stream_receiver, 'enable_direct_routing'):
+                                stream_receiver.enable_direct_routing(True)
+                                logger.info("Routing diretto configurato con successo")
                     else:
-                        logger.warning("StreamReceiver non trovato nello streaming_widget")
+                        logger.warning("Il segnale scan_frame_received non esiste nello stream_receiver")
                 else:
-                    logger.warning("streaming_widget non trovato nella finestra principale")
+                    logger.warning("Stream receiver non trovato")
+            else:
+                logger.warning("Streaming widget non trovato nella finestra principale")
 
-            except Exception as e:
-                logger.error(f"Errore nella registrazione del gestore di frame: {e}")
-                import traceback
-                logger.error(f"Traceback: {traceback.format_exc()}")
-        else:
-            logger.error("Scanner controller o connection manager non disponibile")
+        except Exception as e:
+            import traceback
+            logger.error(f"Errore nella registrazione del frame handler: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def _verify_scan_components(self):
         """Verifica che tutti i componenti critici per la scansione siano inizializzati correttamente."""
