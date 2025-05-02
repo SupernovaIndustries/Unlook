@@ -133,13 +133,21 @@ logger = logging.getLogger(__name__)
 
 
 class RealtimeViewer3D(QWidget):
-    """Widget per la visualizzazione in tempo reale della nuvola di punti 3D."""
+    """Widget per la visualizzazione in tempo reale della nuvola di punti 3D.
+    Versione ottimizzata per l'elaborazione in-memory con aggiornamenti in tempo reale.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.pointcloud = None
         self.last_update_time = 0
         self._setup_ui()
+
+        # Nuovi attributi per gestione memoria e prestazioni
+        self._max_points_display = 30000  # Limite punti per visualizzazione
+        self._auto_center = True  # Auto-centra la vista quando ci sono nuovi punti
+        self._last_points_count = 0  # Per rilevare cambiamenti significativi
+        self._update_interval = 0.2  # Intervallo minimo tra aggiornamenti (secondi)
 
     def _setup_ui(self):
         """Configura l'interfaccia utente del visualizzatore."""
@@ -149,7 +157,7 @@ class RealtimeViewer3D(QWidget):
         if WEBENGINE_AVAILABLE:
             self.web_view = QWebEngineView()
             self.web_view.setMinimumHeight(300)
-            layout.addWidget(self.web_view)
+            layout.addWidget(self.web_view, 1)  # Proporzione aumentata
 
             # Carica una pagina HTML con Three.js per la visualizzazione
             self._load_threejs_viewer()
@@ -159,12 +167,22 @@ class RealtimeViewer3D(QWidget):
             self.view_label.setAlignment(Qt.AlignCenter)
             self.view_label.setMinimumHeight(300)
             self.view_label.setStyleSheet("background-color: #f0f0f0; border: 1px solid #ccc;")
-            layout.addWidget(self.view_label)
+            layout.addWidget(self.view_label, 1)  # Proporzione aumentata
 
         # Aggiunge informazioni sulla nuvola di punti
+        info_layout = QHBoxLayout()
+
         self.info_label = QLabel("Nessuna nuvola di punti disponibile")
         self.info_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.info_label)
+        info_layout.addWidget(self.info_label)
+
+        # Aggiunto indicatore FPS
+        self.fps_label = QLabel("0 FPS")
+        self.fps_label.setAlignment(Qt.AlignRight)
+        self.fps_label.setStyleSheet("color: #888; font-size: 10px;")
+        info_layout.addWidget(self.fps_label)
+
+        layout.addLayout(info_layout)
 
         # Aggiungi controlli per la visualizzazione
         controls_layout = QHBoxLayout()
@@ -175,17 +193,55 @@ class RealtimeViewer3D(QWidget):
         self.reset_button = QPushButton("Reset")
         self.reset_button.clicked.connect(self._reset_view)
 
+        # Nuovo pulsante per esportare la nuvola corrente
+        self.export_button = QPushButton("Esporta Nuvola...")
+        self.export_button.clicked.connect(self._export_pointcloud)
+        self.export_button.setEnabled(False)  # Disabilitato finché non c'è una nuvola
+
+        # Checkbox per auto-center
+        self.auto_center_checkbox = QCheckBox("Auto-centra")
+        self.auto_center_checkbox.setChecked(self._auto_center)
+        self.auto_center_checkbox.toggled.connect(self._toggle_auto_center)
+
         controls_layout.addWidget(self.center_button)
         controls_layout.addWidget(self.reset_button)
+        controls_layout.addWidget(self.export_button)
+        controls_layout.addWidget(self.auto_center_checkbox)
 
         layout.addLayout(controls_layout)
 
+        # Timer per aggiornamento FPS
+        self._fps_timer = QTimer(self)
+        self._fps_timer.timeout.connect(self._update_fps)
+        self._fps_timer.start(1000)  # Aggiorna ogni secondo
+
+        # Contatori FPS
+        self._frame_count = 0
+        self._last_fps_time = time.time()
+
+    def _toggle_auto_center(self, checked):
+        """Toggle per l'auto-centraggio della vista."""
+        self._auto_center = checked
+
+    def _update_fps(self):
+        """Aggiorna l'indicatore FPS."""
+        current_time = time.time()
+        elapsed = current_time - self._last_fps_time
+
+        if elapsed > 0:
+            fps = self._frame_count / elapsed
+            self.fps_label.setText(f"{fps:.1f} FPS")
+
+            # Reset contatori
+            self._frame_count = 0
+            self._last_fps_time = current_time
+
     def _load_threejs_viewer(self):
-        """Carica il visualizzatore Three.js."""
+        """Carica il visualizzatore Three.js ottimizzato."""
         if not hasattr(self, 'web_view'):
             return
 
-        # HTML base per il visualizzatore
+        # HTML base per il visualizzatore - versione ottimizzata per prestazioni
         html = """
         <!DOCTYPE html>
         <html>
@@ -193,17 +249,38 @@ class RealtimeViewer3D(QWidget):
             <meta charset="utf-8">
             <title>UnLook 3D Viewer</title>
             <style>
-                body { margin: 0; overflow: hidden; }
+                body { margin: 0; overflow: hidden; background-color: #f0f0f0; }
                 canvas { width: 100%; height: 100%; display: block; }
+                .stats { position: absolute; top: 0; left: 0; }
+                .loading { 
+                    position: absolute; 
+                    top: 50%; 
+                    left: 50%; 
+                    transform: translate(-50%, -50%);
+                    background-color: rgba(0,0,0,0.7);
+                    color: white;
+                    padding: 10px 20px;
+                    border-radius: 5px;
+                    font-family: Arial, sans-serif;
+                }
             </style>
             <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
             <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js"></script>
+            <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/libs/stats.min.js"></script>
         </head>
         <body>
+            <div id="loading" class="loading" style="display: none;">Caricamento...</div>
             <script>
                 // Variabili globali
-                let scene, camera, renderer, controls;
+                let scene, camera, renderer, controls, stats;
                 let pointcloud;
+                let lastPointsCount = 0;
+                let loadingTimeout;
+                let autoCenter = true;
+
+                // Performance settings
+                const USE_INSTANCING = true;  // Usa InstancedBufferGeometry per migliori prestazioni
+                const USE_ADAPTIVE_DETAIL = true;  // Riduce dettaglio durante rotazione
 
                 // Inizializza la scena
                 function init() {
@@ -218,12 +295,16 @@ class RealtimeViewer3D(QWidget):
                     // Crea renderer
                     renderer = new THREE.WebGLRenderer({ antialias: true });
                     renderer.setSize(window.innerWidth, window.innerHeight);
+                    renderer.setPixelRatio(window.devicePixelRatio > 1 ? 2 : 1);
                     document.body.appendChild(renderer.domElement);
 
                     // Aggiungi controlli
                     controls = new THREE.OrbitControls(camera, renderer.domElement);
                     controls.enableDamping = true;
                     controls.dampingFactor = 0.25;
+                    controls.rotateSpeed = 0.5;
+                    controls.addEventListener('start', onControlsStart);
+                    controls.addEventListener('end', onControlsEnd);
 
                     // Aggiungi luci
                     const ambientLight = new THREE.AmbientLight(0xcccccc, 0.5);
@@ -240,11 +321,33 @@ class RealtimeViewer3D(QWidget):
                     const axesHelper = new THREE.AxesHelper(100);
                     scene.add(axesHelper);
 
+                    // Stats for performance monitoring
+                    stats = new Stats();
+                    document.body.appendChild(stats.dom);
+                    stats.dom.style.position = 'absolute';
+                    stats.dom.style.top = '0px';
+                    stats.dom.style.left = '0px';
+
                     // Gestisci resize
                     window.addEventListener('resize', onWindowResize, false);
 
                     // Avvia animazione
                     animate();
+                }
+
+                // Callback per controlli start/end
+                function onControlsStart() {
+                    if (USE_ADAPTIVE_DETAIL && pointcloud) {
+                        // Riduce dimensione punti durante interazione per performance
+                        pointcloud.material.size = 1.0;
+                    }
+                }
+
+                function onControlsEnd() {
+                    if (USE_ADAPTIVE_DETAIL && pointcloud) {
+                        // Ripristina dimensione punti dopo interazione
+                        pointcloud.material.size = 1.5;
+                    }
                 }
 
                 // Aggiorna dimensioni al resize
@@ -258,52 +361,169 @@ class RealtimeViewer3D(QWidget):
                 function animate() {
                     requestAnimationFrame(animate);
                     controls.update();
+                    stats.update();
                     renderer.render(scene, camera);
                 }
 
-                // Funzione per aggiornare la nuvola di punti
+                // Funzione per aggiornare la nuvola di punti (ottimizzata)
                 function updatePointCloud(points) {
-                    // Rimuovi nuvola esistente
+                    const startTime = performance.now();
+
+                    // Mostra loader solo per nuvole grandi che richiedono tempo
+                    if (points && points.length > 20000) {
+                        document.getElementById('loading').style.display = 'block';
+                        clearTimeout(loadingTimeout);
+                        loadingTimeout = setTimeout(() => {
+                            document.getElementById('loading').style.display = 'none';
+                        }, 500);
+                    }
+
+                    // Se non ci sono punti, usa nuvola esistente o esci
+                    if (!points || points.length === 0) {
+                        if (pointcloud) {
+                            // Nascondi loader
+                            document.getElementById('loading').style.display = 'none';
+                        }
+                        return;
+                    }
+
+                    // Evita di ricreare se non ci sono cambiamenti significativi
+                    const significantChange = !pointcloud || 
+                                              Math.abs(lastPointsCount - points.length) > points.length * 0.1;
+
+                    // Se la nuvola esiste e non ci sono cambiamenti significativi,
+                    // aggiorna solo i punti senza ricreare tutto
+                    if (pointcloud && !significantChange) {
+                        const positions = pointcloud.geometry.attributes.position.array;
+                        let updated = false;
+
+                        // Aggiorna solo se il numero di punti è lo stesso
+                        if (points.length === lastPointsCount) {
+                            for (let i = 0; i < points.length; i++) {
+                                positions[i*3] = points[i][0];
+                                positions[i*3+1] = points[i][1];
+                                positions[i*3+2] = points[i][2];
+                            }
+                            pointcloud.geometry.attributes.position.needsUpdate = true;
+                            updated = true;
+                        }
+
+                        // Se l'aggiornamento rapido non è possibile, ricrea la geometria
+                        if (!updated) {
+                            // Rimuovi nuvola esistente
+                            scene.remove(pointcloud);
+                            pointcloud = null;
+                        } else {
+                            // Nascondi loader se aggiornamento è completato
+                            document.getElementById('loading').style.display = 'none';
+                            return;
+                        }
+                    }
+
+                    // Rimuovi nuvola esistente se necessario
                     if (pointcloud) {
                         scene.remove(pointcloud);
                     }
 
-                    if (!points || points.length === 0) {
-                        return;
+                    // Crea nuova geometria
+                    let geometry;
+
+                    if (USE_INSTANCING && points.length > 10000) {
+                        // Per grandi nuvole, usa InstancedBufferGeometry per migliori prestazioni
+                        geometry = new THREE.InstancedBufferGeometry();
+
+                        // Crea geometria base (un punto)
+                        const baseGeometry = new THREE.BufferGeometry();
+                        const positions = new Float32Array(3);
+                        positions[0] = 0;
+                        positions[1] = 0;
+                        positions[2] = 0;
+                        baseGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+                        // Clona attributi dalla geometria base
+                        geometry.copy(baseGeometry);
+
+                        // Crea attributo di offset per ogni istanza
+                        const offsets = new Float32Array(points.length * 3);
+                        for (let i = 0; i < points.length; i++) {
+                            offsets[i*3] = points[i][0];
+                            offsets[i*3+1] = points[i][1];
+                            offsets[i*3+2] = points[i][2];
+                        }
+
+                        // Aggiungi attributo offset
+                        geometry.setAttribute('offset', new THREE.InstancedBufferAttribute(offsets, 3));
+                        geometry.instanceCount = points.length;
+                    } else {
+                        // Per nuvole più piccole, usa BufferGeometry standard
+                        geometry = new THREE.BufferGeometry();
+                        const vertices = new Float32Array(points.length * 3);
+
+                        for (let i = 0; i < points.length; i++) {
+                            vertices[i*3] = points[i][0];
+                            vertices[i*3+1] = points[i][1];
+                            vertices[i*3+2] = points[i][2];
+                        }
+
+                        geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
                     }
 
-                    // Crea geometria
-                    const geometry = new THREE.BufferGeometry();
-                    const vertices = new Float32Array(points.length * 3);
-
-                    for (let i = 0; i < points.length; i++) {
-                        vertices[i*3] = points[i][0];
-                        vertices[i*3+1] = points[i][1];
-                        vertices[i*3+2] = points[i][2];
-                    }
-
-                    geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+                    // Calcola raggio della nuvola e centro
+                    geometry.computeBoundingSphere();
 
                     // Crea materiale
-                    const material = new THREE.PointsMaterial({
-                        size: 1.5,
-                        color: 0x0088ff,
-                        sizeAttenuation: true
-                    });
+                    let material;
+
+                    if (USE_INSTANCING && points.length > 10000) {
+                        // Shader personalizzato per geometria istanziata
+                        material = new THREE.ShaderMaterial({
+                            uniforms: {
+                                color: { value: new THREE.Color(0x0088ff) },
+                                pointSize: { value: 1.5 }
+                            },
+                            vertexShader: `
+                                uniform float pointSize;
+                                attribute vec3 offset;
+                                void main() {
+                                    vec3 pos = position + offset;
+                                    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+                                    gl_PointSize = pointSize;
+                                }
+                            `,
+                            fragmentShader: `
+                                uniform vec3 color;
+                                void main() {
+                                    gl_FragColor = vec4(color, 1.0);
+                                }
+                            `,
+                            transparent: false
+                        });
+                    } else {
+                        // PointsMaterial standard per geometria normale
+                        material = new THREE.PointsMaterial({
+                            size: 1.5,
+                            color: 0x0088ff,
+                            sizeAttenuation: true
+                        });
+                    }
 
                     // Crea nuvola di punti
                     pointcloud = new THREE.Points(geometry, material);
                     scene.add(pointcloud);
 
-                    // Centra camera sulla nuvola
-                    geometry.computeBoundingSphere();
-                    const center = geometry.boundingSphere.center;
-                    const radius = geometry.boundingSphere.radius;
+                    // Auto-centra la vista se richiesto
+                    if (autoCenter) {
+                        centerView();
+                    }
 
-                    camera.position.set(center.x, center.y, center.z + radius * 2);
-                    controls.target.set(center.x, center.y, center.z);
-                    camera.updateProjectionMatrix();
-                    controls.update();
+                    lastPointsCount = points.length;
+
+                    // Nascondi loader
+                    document.getElementById('loading').style.display = 'none';
+
+                    // Log prestazioni
+                    const endTime = performance.now();
+                    console.log(`Aggiornamento nuvola: ${endTime - startTime}ms, ${points.length} punti`);
                 }
 
                 // Funzione per centrare la vista
@@ -329,6 +549,49 @@ class RealtimeViewer3D(QWidget):
                     controls.update();
                 }
 
+                // Funzione per impostare auto-center
+                function setAutoCenter(enabled) {
+                    autoCenter = enabled;
+                }
+
+                // Funzione per esportare la nuvola di punti
+                function getCurrentPointCloudData() {
+                    if (!pointcloud) {
+                        return null;
+                    }
+
+                    // Estrai i punti dalla geometria
+                    let points = [];
+
+                    if (USE_INSTANCING && pointcloud.geometry instanceof THREE.InstancedBufferGeometry) {
+                        // Per geometria istanziata, usa l'attributo offset
+                        const offsetAttr = pointcloud.geometry.getAttribute('offset');
+                        const count = pointcloud.geometry.instanceCount;
+
+                        for (let i = 0; i < count; i++) {
+                            points.push([
+                                offsetAttr.getX(i),
+                                offsetAttr.getY(i),
+                                offsetAttr.getZ(i)
+                            ]);
+                        }
+                    } else {
+                        // Per geometria standard, usa l'attributo position
+                        const positionAttr = pointcloud.geometry.getAttribute('position');
+                        const count = positionAttr.count;
+
+                        for (let i = 0; i < count; i++) {
+                            points.push([
+                                positionAttr.getX(i),
+                                positionAttr.getY(i),
+                                positionAttr.getZ(i)
+                            ]);
+                        }
+                    }
+
+                    return points;
+                }
+
                 // Inizializza
                 document.addEventListener('DOMContentLoaded', init);
             </script>
@@ -341,45 +604,84 @@ class RealtimeViewer3D(QWidget):
 
     def update_pointcloud(self, pointcloud):
         """
-        Aggiorna la nuvola di punti visualizzata.
+        Aggiorna la nuvola di punti visualizzata con ottimizzazioni di performance.
 
         Args:
             pointcloud: Nuvola di punti come array NumPy
         """
-        # Limita aggiornamenti troppo frequenti (max uno ogni 0.5 secondi)
+        # Limita aggiornamenti troppo frequenti (max uno ogni 0.2 secondi)
         current_time = time.time()
-        if current_time - self.last_update_time < 0.5:
+        if current_time - self.last_update_time < self._update_interval:
             return
 
         self.last_update_time = current_time
         self.pointcloud = pointcloud
 
+        # Incrementa contatore frame per FPS
+        self._frame_count += 1
+
         if pointcloud is None or len(pointcloud) == 0:
             self.info_label.setText("Nessuna nuvola di punti disponibile")
+            self.export_button.setEnabled(False)
             return
 
-        # Aggiorna informazioni
-        self.info_label.setText(f"Nuvola di punti: {len(pointcloud)} punti")
+        # Aggiorna informazioni con più dettagli
+        x_range = (np.min(pointcloud[:, 0]), np.max(pointcloud[:, 0]))
+        y_range = (np.min(pointcloud[:, 1]), np.max(pointcloud[:, 1]))
+        z_range = (np.min(pointcloud[:, 2]), np.max(pointcloud[:, 2]))
+
+        # Dimensioni della nuvola
+        dimensions = (
+            x_range[1] - x_range[0],
+            y_range[1] - y_range[0],
+            z_range[1] - z_range[0]
+        )
+
+        info_text = f"{len(pointcloud):,} punti | "
+        info_text += f"Dim: {dimensions[0]:.1f} x {dimensions[1]:.1f} x {dimensions[2]:.1f} mm"
+
+        self.info_label.setText(info_text)
+
+        # Abilita il pulsante di esportazione
+        self.export_button.setEnabled(True)
+
+        # Campionamento per prestazioni migliori se necessario
+        if len(pointcloud) > self._max_points_display:
+            # Usa una strategia di campionamento adattiva
+            # Se la differenza con l'ultimo conteggio è grande, usiamo campionamento casuale
+            # altrimenti campionamento uniforme più veloce
+            if abs(len(pointcloud) - self._last_points_count) > self._max_points_display * 0.2:
+                # Campionamento casuale: migliore qualità visiva ma più lento
+                indices = np.random.choice(len(pointcloud), self._max_points_display, replace=False)
+                display_cloud = pointcloud[indices]
+            else:
+                # Campionamento uniforme: più veloce ma meno rappresentativo
+                step = len(pointcloud) // self._max_points_display
+                display_cloud = pointcloud[::step][:self._max_points_display]
+        else:
+            display_cloud = pointcloud
+
+        # Aggiorna l'ultimo conteggio
+        self._last_points_count = len(pointcloud)
 
         # Se stiamo usando WebEngine, aggiorna la nuvola nel visualizzatore 3D
         if WEBENGINE_AVAILABLE and hasattr(self, 'web_view'):
             # Converti la nuvola in formato JSON per JavaScript
             import json
-            points_list = pointcloud.tolist()
 
-            # Limita a max 20,000 punti per performance
-            if len(points_list) > 20000:
-                import random
-                points_list = random.sample(points_list, 20000)
-
+            # Ottimizzazione: invia solo i punti che verranno visualizzati
+            points_list = display_cloud.tolist()
             points_json = json.dumps(points_list)
 
             # Chiama la funzione JavaScript per aggiornare la nuvola
             js_code = f"updatePointCloud({points_json});"
             self.web_view.page().runJavaScript(js_code)
+
+            # Aggiorna lo stato di auto-center
+            self.web_view.page().runJavaScript(f"setAutoCenter({str(self._auto_center).lower()});")
         else:
             # Se WebEngine non è disponibile, genera un'immagine statica
-            self._update_static_image(pointcloud)
+            self._update_static_image(display_cloud)
 
     def _update_static_image(self, pointcloud):
         """Genera un'immagine statica della nuvola di punti."""
@@ -443,6 +745,106 @@ class RealtimeViewer3D(QWidget):
         """Ripristina la vista predefinita."""
         if WEBENGINE_AVAILABLE and hasattr(self, 'web_view'):
             self.web_view.page().runJavaScript("resetView();")
+
+    def _export_pointcloud(self):
+        """Esporta la nuvola di punti corrente."""
+        if not self.pointcloud is not None:
+            QMessageBox.warning(
+                self,
+                "Nessuna nuvola di punti",
+                "Non ci sono dati da esportare."
+            )
+            return
+
+        # Ottieni i dati correnti della nuvola dal visualizzatore
+        if WEBENGINE_AVAILABLE and hasattr(self, 'web_view'):
+            # Ottieni i dati direttamente da JavaScript
+            self.web_view.page().runJavaScript(
+                "getCurrentPointCloudData();",
+                self._handle_export_data
+            )
+        else:
+            # Usa i dati locali
+            self._handle_export_data(self.pointcloud.tolist() if self.pointcloud is not None else None)
+
+    def _handle_export_data(self, data):
+        """Gestisce i dati ricevuti per l'esportazione."""
+        if not data:
+            QMessageBox.warning(
+                self,
+                "Errore",
+                "Impossibile ottenere i dati della nuvola di punti."
+            )
+            return
+
+        try:
+            # Converti i dati in NumPy array
+            if isinstance(data, list):
+                pointcloud = np.array(data)
+            else:
+                pointcloud = self.pointcloud
+
+            if pointcloud is None or len(pointcloud) == 0:
+                QMessageBox.warning(
+                    self,
+                    "Errore",
+                    "Nessun dato valido da esportare."
+                )
+                return
+
+            # Mostra dialog per selezionare file
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Esporta Nuvola di Punti",
+                os.path.join(str(Path.home()), "pointcloud.ply"),
+                "PLY Files (*.ply);;All Files (*)"
+            )
+
+            if not file_path:
+                return
+
+            # Assicura che l'estensione sia .ply
+            if not file_path.lower().endswith('.ply'):
+                file_path += '.ply'
+
+            # Crea directory se necessario
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+            # Salva la nuvola
+            if OPEN3D_AVAILABLE:
+                # Usa Open3D
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(pointcloud)
+                o3d.io.write_point_cloud(file_path, pcd)
+            else:
+                # Fallback a salvataggio manuale
+                with open(file_path, 'w') as f:
+                    # Scrivi header
+                    f.write("ply\n")
+                    f.write("format ascii 1.0\n")
+                    f.write(f"element vertex {len(pointcloud)}\n")
+                    f.write("property float x\n")
+                    f.write("property float y\n")
+                    f.write("property float z\n")
+                    f.write("end_header\n")
+
+                    # Scrivi vertici
+                    for point in pointcloud:
+                        f.write(f"{point[0]} {point[1]} {point[2]}\n")
+
+            QMessageBox.information(
+                self,
+                "Esportazione Completata",
+                f"La nuvola di punti con {len(pointcloud):,} punti è stata esportata con successo in:\n{file_path}"
+            )
+
+        except Exception as e:
+            logger.error(f"Errore nell'esportazione della nuvola di punti: {e}")
+            QMessageBox.critical(
+                self,
+                "Errore",
+                f"Si è verificato un errore durante l'esportazione:\n{str(e)}"
+            )
 
 class TestCapabilityWorker(QObject):
     """Worker per eseguire il test delle capacità di scansione in un thread separato."""
@@ -599,19 +1001,24 @@ class ScanOptionsDialog(QDialog):
 class PointCloudViewerDialog(QDialog):
     """Dialog per visualizzare la nuvola di punti 3D."""
 
-    def __init__(self, parent=None, pointcloud_path=None, screenshot_path=None):
+    def __init__(self, parent=None, pointcloud_path=None, screenshot_path=None, in_memory_pointcloud=None):
         super().__init__(parent)
         self.setWindowTitle("Visualizzatore Nuvola di Punti 3D")
         self.setMinimumSize(800, 600)
 
         self.pointcloud_path = pointcloud_path
         self.screenshot_path = screenshot_path
+        self.in_memory_pointcloud = in_memory_pointcloud  # Nuova proprietà per dati in memoria
 
         # Configura l'interfaccia
         self._setup_ui()
 
         # Carica la nuvola di punti se disponibile
-        if pointcloud_path and OPEN3D_AVAILABLE:
+        if in_memory_pointcloud is not None and OPEN3D_AVAILABLE:
+            # Usa direttamente la nuvola in memoria
+            self._display_in_memory_pointcloud(in_memory_pointcloud)
+        elif pointcloud_path and OPEN3D_AVAILABLE:
+            # Fallback al caricamento da file
             self.load_pointcloud(pointcloud_path)
 
     def _setup_ui(self):
@@ -647,8 +1054,22 @@ class PointCloudViewerDialog(QDialog):
             layout.addWidget(info_label)
 
         # Informazioni sulla nuvola di punti
-        if self.pointcloud_path:
-            info_text = f"File: {os.path.basename(self.pointcloud_path)}\n"
+        info_text = ""
+
+        # Caso 1: Nuvola in memoria
+        if self.in_memory_pointcloud is not None:
+            num_points = len(self.in_memory_pointcloud)
+            info_text += f"Nuvola di punti in memoria\n"
+            info_text += f"Numero di punti: {num_points:,}\n"
+            info_text += f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+
+            # Se esiste anche un percorso di salvataggio
+            if self.pointcloud_path:
+                info_text += f"Salvata su: {os.path.basename(self.pointcloud_path)}\n"
+
+        # Caso 2: Nuvola da file
+        elif self.pointcloud_path:
+            info_text += f"File: {os.path.basename(self.pointcloud_path)}\n"
             if os.path.exists(self.pointcloud_path):
                 info_text += f"Dimensione: {os.path.getsize(self.pointcloud_path) / 1024:.1f} KB\n"
 
@@ -663,9 +1084,13 @@ class PointCloudViewerDialog(QDialog):
             else:
                 info_text += "File non trovato\n"
 
-            info_label = QLabel(info_text)
-            info_label.setAlignment(Qt.AlignCenter)
-            layout.addWidget(info_label)
+        # Caso 3: Nessuna nuvola disponibile
+        else:
+            info_text = "Nessuna nuvola di punti disponibile"
+
+        self.info_label = QLabel(info_text)
+        self.info_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.info_label)
 
         # Pulsanti di azione
         button_layout = QHBoxLayout()
@@ -682,12 +1107,169 @@ class PointCloudViewerDialog(QDialog):
             self.open_dir_button.clicked.connect(self._open_directory)
             button_layout.addWidget(self.open_dir_button)
 
+        # Pulsante per esportare la nuvola in memoria
+        if self.in_memory_pointcloud is not None and not self.pointcloud_path:
+            self.export_button = QPushButton("Esporta Nuvola...")
+            self.export_button.clicked.connect(self._export_pointcloud)
+            button_layout.addWidget(self.export_button)
+
         # Pulsante di chiusura
         self.close_button = QPushButton("Chiudi")
         self.close_button.clicked.connect(self.accept)
         button_layout.addWidget(self.close_button)
 
         layout.addLayout(button_layout)
+
+    def _display_in_memory_pointcloud(self, pointcloud):
+        """
+        Visualizza una nuvola di punti direttamente dalla memoria.
+
+        Args:
+            pointcloud: Nuvola di punti come array NumPy
+        """
+        if not OPEN3D_AVAILABLE or pointcloud is None or len(pointcloud) == 0:
+            if hasattr(self, "image_label"):
+                self.image_label.setText("Visualizzazione 3D non disponibile")
+            return
+
+        try:
+            import tempfile
+
+            # Visualizza la nuvola Open3D
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(pointcloud)
+
+            # Aggiungi un sistema di coordinate per riferimento
+            coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=20)
+
+            # Crea visualizzatore
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(visible=False, width=800, height=600)
+            vis.add_geometry(pcd)
+            vis.add_geometry(coord_frame)
+
+            # Configura vista
+            vis.get_render_option().point_size = 2.0
+            vis.get_render_option().background_color = np.array([0.9, 0.9, 0.9])
+            vis.poll_events()
+            vis.update_renderer()
+
+            # Cattura immagine
+            temp_img = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            vis.capture_screen_image(temp_img.name)
+            vis.destroy_window()
+
+            # Memorizza il percorso dello screenshot
+            self.screenshot_path = temp_img.name
+
+            # Mostra immagine
+            pixmap = QPixmap(temp_img.name)
+            if hasattr(self, "image_label"):
+                self.image_label.setPixmap(pixmap.scaled(
+                    self.width(), self.height(),
+                    Qt.KeepAspectRatio, Qt.SmoothTransformation
+                ))
+                self.image_label.setText("")
+
+        except Exception as e:
+            logger.error(f"Errore nella visualizzazione della nuvola di punti in memoria: {e}")
+            if hasattr(self, "image_label"):
+                self.image_label.setText(f"Errore nella visualizzazione: {str(e)}")
+
+    def _export_pointcloud(self):
+        """Esporta la nuvola di punti in memoria su file."""
+        if self.in_memory_pointcloud is None or len(self.in_memory_pointcloud) == 0:
+            QMessageBox.warning(
+                self,
+                "Errore",
+                "Nessuna nuvola di punti in memoria da esportare."
+            )
+            return
+
+        try:
+            # Mostra dialog per selezionare file
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Esporta Nuvola di Punti",
+                os.path.join(str(Path.home()), "pointcloud.ply"),
+                "PLY Files (*.ply);;All Files (*)"
+            )
+
+            if not file_path:
+                return
+
+            # Assicura che l'estensione sia .ply
+            if not file_path.lower().endswith('.ply'):
+                file_path += '.ply'
+
+            # Crea directory se necessario
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+            # Salva la nuvola
+            if OPEN3D_AVAILABLE:
+                # Usa Open3D
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(self.in_memory_pointcloud)
+                o3d.io.write_point_cloud(file_path, pcd)
+            else:
+                # Fallback a salvataggio manuale
+                with open(file_path, 'w') as f:
+                    # Scrivi header
+                    f.write("ply\n")
+                    f.write("format ascii 1.0\n")
+                    f.write(f"element vertex {len(self.in_memory_pointcloud)}\n")
+                    f.write("property float x\n")
+                    f.write("property float y\n")
+                    f.write("property float z\n")
+                    f.write("end_header\n")
+
+                    # Scrivi vertici
+                    for point in self.in_memory_pointcloud:
+                        f.write(f"{point[0]} {point[1]} {point[2]}\n")
+
+            # Aggiorna l'interfaccia
+            self.pointcloud_path = file_path
+            self.info_label.setText(
+                f"File: {os.path.basename(file_path)}\n"
+                f"Numero di punti: {len(self.in_memory_pointcloud):,}\n"
+                f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Esportato con successo!"
+            )
+
+            # Abilita pulsanti per il file
+            button_layout = self.layout().itemAt(self.layout().count() - 1)
+            if isinstance(button_layout, QHBoxLayout):
+                # Rimuovi il pulsante di esportazione
+                for i in range(button_layout.count()):
+                    widget = button_layout.itemAt(i).widget()
+                    if widget and widget == getattr(self, 'export_button', None):
+                        widget.setVisible(False)
+                        break
+
+                # Aggiungi pulsanti per il file
+                if not hasattr(self, 'open_external_button'):
+                    self.open_external_button = QPushButton("Apri con Software Esterno")
+                    self.open_external_button.clicked.connect(self._open_pointcloud_external)
+                    button_layout.insertWidget(0, self.open_external_button)
+
+                if not hasattr(self, 'open_dir_button'):
+                    self.open_dir_button = QPushButton("Apri Directory")
+                    self.open_dir_button.clicked.connect(self._open_directory)
+                    button_layout.insertWidget(1, self.open_dir_button)
+
+            QMessageBox.information(
+                self,
+                "Esportazione Completata",
+                f"La nuvola di punti è stata esportata con successo in:\n{file_path}"
+            )
+
+        except Exception as e:
+            logger.error(f"Errore nell'esportazione della nuvola di punti: {e}")
+            QMessageBox.critical(
+                self,
+                "Errore",
+                f"Si è verificato un errore durante l'esportazione:\n{str(e)}"
+            )
 
     def load_pointcloud(self, pointcloud_path):
         """Carica e visualizza la nuvola di punti."""
@@ -871,10 +1453,13 @@ class ScanView(QWidget):
         self.scan_frame_processor = ScanFrameProcessor(output_dir=self.output_dir)
 
         # Imposta callback per aggiornare l'interfaccia utente
-        def progress_callback(progress_info):
-            self.progress_bar.setValue(int(progress_info["progress"]))
-            self.status_label.setText(
-                f"Stato: {progress_info['state']}, frame ricevuti: {progress_info['frames_total']}")
+        def progress_callback(progress, message):
+            self.progress_bar.setValue(int(progress))
+            self.status_label.setText(message)
+
+            # Aggiorna il log occasionalmente
+            if int(progress) % 10 == 0:
+                self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Progresso: {int(progress)}%, {message}\n"
 
         def frame_callback(camera_index, pattern_index, frame):
             # Aggiorna l'anteprima
@@ -2322,114 +2907,65 @@ class ScanView(QWidget):
 
     def _update_preview_image(self, scan_dir=None):
         """
-        Aggiorna l'anteprima delle immagini durante la scansione in modo più efficiente.
-        Migliora la visualizzazione in tempo reale delle immagini catturate e della nuvola di punti.
+        Aggiorna l'anteprima delle immagini durante la scansione, operando esclusivamente in memoria.
+        Elimina completamente la dipendenza dalla lettura di file dal disco.
 
         Args:
-            scan_dir: Directory della scansione (opzionale, usa la corrente se None)
+            scan_dir: Directory della scansione (non utilizzato nella versione in-memory)
         """
-        if scan_dir is None and self.current_scan_id:
-            scan_dir = os.path.join(str(self.output_dir), self.current_scan_id)
-
-        # OTTIMIZZAZIONE: Prima cerca di ottenere dati in memoria per maggiore reattività
+        # OTTIMIZZAZIONE: Accedi direttamente ai frame in memoria attraverso ScanFrameProcessor
         if hasattr(self, 'scan_frame_processor') and self.scan_frame_processor:
-            pattern_frames = getattr(self.scan_frame_processor, 'pattern_frames', {})
-            if pattern_frames:
-                # Trova l'ultimo pattern ricevuto per visualizzazione più reattiva
-                pattern_indices = sorted(pattern_frames.keys())
-                if pattern_indices:
-                    latest_idx = pattern_indices[-1]
-                    frames = pattern_frames[latest_idx]
-
-                    # Controlla se abbiamo entrambi i frame
-                    if 0 in frames and 1 in frames:
-                        left_frame = frames[0]
-                        right_frame = frames[1]
-
-                        # Visualizza i frame
-                        self._display_preview_frames(left_frame, right_frame)
-
-                        # NOVITÀ: Tenta di visualizzare anche la nuvola di punti in tempo reale
-                        if hasattr(self.scan_frame_processor, '_realtime_pointcloud') and \
-                                self.scan_frame_processor._realtime_pointcloud is not None and \
-                                hasattr(self.scan_frame_processor, '_pointcloud_lock'):
-
-                            with self.scan_frame_processor._pointcloud_lock:
-                                pointcloud = self.scan_frame_processor._realtime_pointcloud
-
-                            if pointcloud is not None and len(pointcloud) > 100:
-                                # Visualizza la nuvola di punti (limitata a 30K punti per prestazioni)
-                                if len(pointcloud) > 30000:
-                                    # Campionamento causale per visualizzazione rapida
-                                    indices = np.random.choice(len(pointcloud), 30000, replace=False)
-                                    display_cloud = pointcloud[indices]
-                                else:
-                                    display_cloud = pointcloud
-
-                                self._display_realtime_pointcloud(display_cloud)
-
-                        return
-
-        # Se non abbiamo dati in memoria, tentiamo di richiederli dal server
-        # con timeout breve per non bloccare l'interfaccia
-        if self.selected_scanner and self.scanner_controller and self.is_scanning:
+            # Cerca i frame di pattern più recenti nella memoria
             try:
-                # Invia un comando per ottenere l'anteprima
-                preview_success = self.scanner_controller.send_command(
-                    self.selected_scanner.device_id,
-                    "GET_SCAN_PREVIEW",
-                    {"scan_id": self.current_scan_id if self.current_scan_id else "current"}
-                )
+                # Ottieni i pattern più recenti (assumendo che higher pattern_index = more recent)
+                progress = self.scan_frame_processor.get_scan_progress()
+                patterns_received = progress.get("patterns_received", 0)
 
-                if preview_success:
-                    # Attendi la risposta con un timeout breve (200ms max)
-                    preview_response = self.scanner_controller.wait_for_response(
-                        self.selected_scanner.device_id,
-                        "GET_SCAN_PREVIEW",
-                        timeout=0.2
-                    )
+                if patterns_received >= 2:  # Abbiamo almeno white e black
+                    # Trova l'ultimo pattern ricevuto
+                    # Ottieni direttamente dal buffer circolare interno
+                    frame_buffer = getattr(self.scan_frame_processor, '_frame_buffer', None)
+                    if frame_buffer:
+                        # Ottieni pattern con coppie complete (entrambe le camere)
+                        pattern_indices = frame_buffer.get_patterns_with_complete_pairs()
 
-                    if preview_response and preview_response.get("status") == "ok":
-                        # Elabora le immagini di anteprima ricevute
-                        self._process_preview_images(preview_response)
-                        return
+                        if pattern_indices:
+                            # Prendi il pattern più recente
+                            latest_idx = max(pattern_indices)
+
+                            # Ottieni la coppia di frame
+                            left_frame, right_frame = frame_buffer.get_frame_pair(latest_idx)
+
+                            if left_frame is not None and right_frame is not None:
+                                # Visualizza i frame
+                                self._display_preview_frames(left_frame, right_frame)
+
+                                # NOVITÀ: Visualizza anche la nuvola di punti in tempo reale se disponibile
+                                pointcloud = self.scan_frame_processor.get_realtime_pointcloud()
+                                if pointcloud is not None and len(pointcloud) > 100:
+                                    # Visualizza la nuvola di punti (limitata a 30K punti per prestazioni)
+                                    if len(pointcloud) > 30000:
+                                        # Campionamento causale per visualizzazione rapida
+                                        indices = np.random.choice(len(pointcloud), 30000, replace=False)
+                                        display_cloud = pointcloud[indices]
+                                    else:
+                                        display_cloud = pointcloud
+
+                                    self._display_realtime_pointcloud(display_cloud)
+
+                                return
+
             except Exception as e:
-                # Non blocchiamo l'interfaccia in caso di errore
-                logger.debug(f"Errore nel tentativo di ottenere anteprime: {e}")
+                logger.debug(f"Errore nell'accesso diretto ai frame in memoria: {e}")
 
-        # Fallback: cerca immagini su disco se non abbiamo dati in memoria
-        if not scan_dir or not os.path.isdir(scan_dir):
-            return
-
-        # Cerca le immagini più recenti (usa glob con sorting ottimizzato)
-        left_dir = os.path.join(scan_dir, "left")
-        right_dir = os.path.join(scan_dir, "right")
-
-        if not os.path.isdir(left_dir) or not os.path.isdir(right_dir):
-            return
-
-        # OTTIMIZZAZIONE: Usa sorting by mtime per trovare rapidamente le più recenti
-        try:
-            left_images = glob.glob(os.path.join(left_dir, "*.png"))
-            right_images = glob.glob(os.path.join(right_dir, "*.png"))
-
-            if not left_images or not right_images:
-                return
-
-            # Ordina per data di modifica senza ordinare l'intero array
-            latest_left = max(left_images, key=os.path.getmtime)
-            latest_right = max(right_images, key=os.path.getmtime)
-
-            # Carica e visualizza le immagini
-            if OPENCV_AVAILABLE:
-                left_img = cv2.imread(latest_left)
-                right_img = cv2.imread(latest_right)
-
-                if left_img is not None and right_img is not None:
-                    self._display_preview_frames(left_img, right_img)
-
-        except Exception as e:
-            logger.error(f"Errore nell'aggiornamento delle anteprime: {e}")
+        # Se il metodo in-memory fallisce, non cercare più su disco ma mostra un messaggio
+        if hasattr(self, 'preview_widget') and not self.preview_widget.isVisible():
+            # Crea un widget di anteprima con messaggio informativo
+            self.preview_widget.setVisible(True)
+            if hasattr(self, 'left_preview'):
+                self.left_preview.setText("In attesa dei frame...")
+            if hasattr(self, 'right_preview'):
+                self.right_preview.setText("In attesa dei frame...")
 
     def _display_preview_frames(self, left_img, right_img):
         """
@@ -2715,7 +3251,10 @@ class ScanView(QWidget):
             logger.error(f"Errore nell'elaborazione delle anteprime: {e}")
 
     def _process_scan(self):
-        """Elabora i dati della scansione per generare la nuvola di punti 3D."""
+        """
+        Elabora i dati della scansione per generare la nuvola di punti 3D.
+        Versione riprogettata per operare esclusivamente in-memory senza dipendenza dai file su disco.
+        """
         if not self.current_scan_id:
             QMessageBox.warning(
                 self,
@@ -2724,49 +3263,48 @@ class ScanView(QWidget):
             )
             return
 
-        # Verifica che il modulo di triangolazione sia disponibile
-        if not hasattr(self, 'scan_processor') or not self.scan_processor:
+        # Verifica disponibilità della scansione in memoria
+        if not hasattr(self, 'scan_frame_processor') or not self.scan_frame_processor:
             QMessageBox.critical(
                 self,
                 "Errore",
-                "Il modulo di triangolazione non è disponibile. Verifica l'installazione."
+                "Processore di frame non disponibile. Impossibile elaborare la scansione."
             )
             return
 
-        # Percorso della scansione
-        scan_path = os.path.join(str(self.output_dir), self.current_scan_id)
+        # Verifica se abbiamo già una nuvola di punti in tempo reale
+        pointcloud = self.scan_frame_processor.get_realtime_pointcloud()
+        if pointcloud is not None and len(pointcloud) > 100:
+            # Abbiamo già una nuvola di punti valida in memoria
+            logger.info(f"Utilizzando nuvola di punti già disponibile in memoria con {len(pointcloud)} punti")
 
-        # Verifica che la directory della scansione esista
-        if not os.path.isdir(scan_path):
-            # Prova a cercare la scansione sul server e scaricarla
+            # Aggiorna l'interfaccia
+            self.status_label.setText("Nuvola di punti già disponibile")
+            self.progress_bar.setValue(100)
 
-            if not self.selected_scanner or not self.scanner_controller:
-                QMessageBox.warning(
-                    self,
-                    "Errore",
-                    f"Directory della scansione non trovata: {scan_path}\n"
-                    "Verifica che la scansione sia stata completata."
-                )
-                return
+            # Abilita il pulsante di visualizzazione 3D
+            self.view_3d_button.setEnabled(True)
 
-            # Chiedi all'utente se vuole scaricare i dati
-            reply = QMessageBox.question(
+            # Aggiorna il viewer 3D
+            if hasattr(self, 'realtime_viewer'):
+                self.realtime_viewer.update_pointcloud(pointcloud)
+
+            # Aggiorna la sezione dei risultati
+            self._update_results_section(has_pointcloud=True)
+
+            # Notifica di completamento
+            QMessageBox.information(
                 self,
-                "Scaricare Dati",
-                f"I dati della scansione non sono presenti in locale.\n"
-                f"Vuoi scaricarli dallo scanner?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes
+                "Elaborazione Completata",
+                f"La nuvola di punti è già disponibile in memoria con {len(pointcloud):,} punti.\n\n"
+                f"Vuoi visualizzarla ora?"
             )
 
-            if reply == QMessageBox.Yes:
-                # Scarica i dati
-                success = self._download_scan_data()
-                if not success:
-                    return
-            else:
-                return
+            # Visualizza la nuvola di punti
+            self._view_pointcloud()
+            return
 
+        # Se non abbiamo già una nuvola in memoria, avvia l'elaborazione
         # Aggiorna il log
         self.scan_log += f"[{datetime.now().strftime('%H:%M:%S')}] Inizio elaborazione della scansione\n"
 
@@ -2819,37 +3357,68 @@ class ScanView(QWidget):
                     f"Si è verificato un errore durante l'elaborazione della scansione:\n{message}"
                 )
 
-        # Configura il processor
-        self.scan_processor.set_callbacks(progress_callback, completion_callback)
-
-        # Carica la scansione
-        if not self.scan_processor.load_local_scan(scan_path):
-            QMessageBox.critical(
-                self,
-                "Errore",
-                f"Impossibile caricare i dati della scansione da: {scan_path}"
-            )
-            return
-
         # Aggiorna l'interfaccia
         self.status_label.setText("Elaborazione in corso...")
         self.progress_bar.setValue(0)
         self.process_button.setEnabled(False)
 
-        # Avvia l'elaborazione
-        success = self.scan_processor.process_scan(use_threading=True)
+        try:
+            # Prova a utilizzare il triangolatore già presente nel ScanFrameProcessor
+            triangulator = getattr(self.scan_frame_processor, '_triangulator', None)
 
-        if not success:
-            # Reset dell'interfaccia
-            self.status_label.setText("Errore nell'avvio dell'elaborazione")
-            self.process_button.setEnabled(True)
+            if triangulator:
+                # Configura le callback
+                triangulator.set_callbacks(progress_callback, completion_callback)
 
-            # Mostra un messaggio di errore
+                # Ottieni i frame direttamente dal buffer
+                frame_buffer = getattr(self.scan_frame_processor, '_frame_buffer', None)
+
+                if frame_buffer:
+                    # Ottieni tutti i pattern con coppie complete
+                    pattern_indices = frame_buffer.get_patterns_with_complete_pairs()
+
+                    # Prepara le coppie di frame
+                    frame_pairs = []
+                    for idx in pattern_indices:
+                        pair = frame_buffer.get_frame_pair(idx)
+                        if pair:
+                            frame_pairs.append((idx, pair[0], pair[1]))
+
+                    # Ordina per indice pattern
+                    frame_pairs.sort(key=lambda x: x[0])
+
+                    if len(frame_pairs) < 2:
+                        QMessageBox.warning(
+                            self,
+                            "Dati insufficienti",
+                            "Non ci sono abbastanza frame per elaborare la scansione."
+                        )
+                        self.process_button.setEnabled(True)
+                        return
+
+                    # Elabora i frame
+                    triangulator.triangulate_frames(frame_pairs)
+                    return
+
+            # Se non è stato possibile utilizzare il triangolatore interno,
+            # mostra un messaggio di errore
             QMessageBox.critical(
                 self,
                 "Errore",
-                "Impossibile avviare l'elaborazione della scansione."
+                "Impossibile accedere al triangolatore interno.\n"
+                "Verifica che la scansione sia stata inizializzata correttamente."
             )
+            self.process_button.setEnabled(True)
+
+        except Exception as e:
+            logger.error(f"Errore nell'elaborazione: {e}")
+            self.status_label.setText(f"Errore: {str(e)}")
+            QMessageBox.critical(
+                self,
+                "Errore",
+                f"Si è verificato un errore durante l'elaborazione:\n{str(e)}"
+            )
+            self.process_button.setEnabled(True)
 
     def _download_scan_data(self):
         """Scarica i dati della scansione dal server."""
@@ -3001,7 +3570,7 @@ class ScanView(QWidget):
     def _handle_scan_frame(self, camera_index, frame, frame_info):
         """
         Gestore centralizzato per i frame di scansione.
-        Versione migliorata con salvataggio di sicurezza e diagnostica approfondita.
+        Versione riprogettata per l'elaborazione diretta in memoria senza salvataggio intermedio.
 
         Args:
             camera_index: Indice della camera (0=sinistra, 1=destra)
@@ -3038,15 +3607,21 @@ class ScanView(QWidget):
             logger.warning(f"Frame non marcato come frame di scansione: {frame_info}")
             return
 
-        # Verifica se c'è una scansione attiva - se non c'è, salviamo comunque ma con warning
+        # Verifica se c'è una scansione attiva - se non c'è, inizializziamo lo stato
         if not self.is_scanning:
-            logger.warning(f"Ricevuto frame {pattern_index} ma nessuna scansione è attiva. Salvando comunque.")
-            # Prova ad attivare automaticamente lo stato di scansione se non attivo
+            logger.warning(
+                f"Ricevuto frame {pattern_index} ma nessuna scansione è attiva. Inizializzazione automatica.")
+            # Inizializzazione automatica dello stato di scansione se necessario
             if self.current_scan_id is None:
                 timestamp = int(time.time())
-                self.current_scan_id = f"EmergencyScan_{timestamp}"
-                logger.warning(f"Creato scan_id di emergenza: {self.current_scan_id}")
+                self.current_scan_id = f"AutoScan_{timestamp}"
+                logger.warning(f"Creato scan_id automatico: {self.current_scan_id}")
+                # Attiva lo stato di scansione
                 self.is_scanning = True
+                # Aggiorna l'interfaccia
+                self.status_label.setText(f"Scansione automatica avviata: {self.current_scan_id}")
+                self.progress_bar.setValue(0)
+                self.stop_scan_button.setEnabled(True)
 
         # Verifica l'ID della scansione
         if not scan_id and self.current_scan_id:
@@ -3065,73 +3640,21 @@ class ScanView(QWidget):
 
         logger.info(f"Frame valido: shape={frame.shape}, dtype={frame.dtype}, min={frame.min()}, max={frame.max()}")
 
-        # Salvataggio di emergenza diretto (bypass ScanFrameProcessor per sicurezza)
+        # ELABORAZIONE DIRETTA IN MEMORIA: Passiamo il frame al processore in-memory
+        # senza salvare su disco come step intermedio
         try:
-            # Crea directory di scan
-            scan_dir = Path(self.output_dir) / scan_id
-            scan_dir.mkdir(parents=True, exist_ok=True)
-
-            # Crea directory per camera
-            camera_dir = scan_dir / ("left" if camera_index == 0 else "right")
-            camera_dir.mkdir(parents=True, exist_ok=True)
-
-            # Componi nome file e percorso
-            if pattern_index < 0:
-                # Caso speciale per frames di test o non numerati
-                filename = f"test_{int(time.time() * 1000)}.png"
-            else:
-                filename = f"{pattern_index:04d}_{pattern_name}.png"
-
-            file_path = camera_dir / filename
-
-            # Salva direttamente con OpenCV
-            success = cv2.imwrite(str(file_path), frame)
-            if success:
-                logger.info(f"SALVATAGGIO DIRETTO: Frame salvato in {file_path}")
-                # Verifica file esistente
-                if os.path.exists(str(file_path)):
-                    file_size = os.path.getsize(str(file_path))
-                    logger.info(f"Verifica file: {file_path} - dimensione: {file_size} bytes")
-                else:
-                    logger.error(f"ERRORE CRITICO: File {file_path} non esiste dopo il salvataggio!")
-            else:
-                logger.error(f"ERRORE CRITICO: cv2.imwrite ha fallito per {file_path}")
-
-                # Tentativo alternativo con PIL
-                try:
-                    from PIL import Image
-                    img = Image.fromarray(frame)
-                    img.save(str(file_path))
-                    logger.info(f"Salvataggio alternativo con PIL successo: {file_path}")
-                except Exception as e:
-                    logger.error(f"Anche salvataggio PIL fallito: {e}")
-
-                    # Salvataggio binario come ultima risorsa
-                    try:
-                        np.save(str(file_path).replace('.png', '.npy'), frame)
-                        logger.info(f"Salvataggio binario numpy successo: {file_path}.npy")
-                    except Exception as e2:
-                        logger.error(f"Tutti i metodi di salvataggio hanno fallito: {e2}")
-
-        except Exception as e:
-            logger.error(f"Errore nel salvataggio diretto del frame: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
-        # Passaggio al ScanFrameProcessor (dopo il salvataggio diretto di sicurezza)
-        try:
-            # Verifica processor
+            # Verifica che il processore sia disponibile
             if not hasattr(self, 'scan_frame_processor') or self.scan_frame_processor is None:
                 logger.error("ScanFrameProcessor non disponibile!")
                 self.scan_frame_processor = ScanFrameProcessor(output_dir=self.output_dir)
-                logger.info("Creato nuovo ScanFrameProcessor di emergenza")
+                logger.info("Creato nuovo ScanFrameProcessor")
 
-            # Assicurati che il processor abbia lo scan_id corretto
+            # Verifica che il processore abbia lo scan_id corretto
             if not self.scan_frame_processor.is_scanning:
                 self.scan_frame_processor.start_scan(scan_id=scan_id)
                 logger.info(f"Avviato scan_id nel processor: {scan_id}")
 
-            # Elabora il frame (anche se abbiamo già fatto un salvataggio di emergenza)
+            # Elabora il frame direttamente in memoria
             success = self.scan_frame_processor.process_frame(camera_index, frame, frame_info)
 
             if success:
@@ -3139,11 +3662,16 @@ class ScanView(QWidget):
                 # Aggiorna l'anteprima dell'interfaccia
                 if camera_index == 1:  # Solo dopo il frame della camera destra
                     self._update_preview_image()
+
+                # Aggiorna lo stato nell'interfaccia
+                if self._progress_callback:
+                    progress = self.scan_frame_processor.get_scan_progress()
+                    self._progress_callback(progress)
             else:
                 logger.error(f"ScanFrameProcessor: errore nell'elaborazione del frame {pattern_index}")
 
         except Exception as e:
-            logger.error(f"Errore generale nel passaggio a ScanFrameProcessor: {e}")
+            logger.error(f"Errore generale nell'elaborazione del frame: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
     def _setup_frame_receiver(self):
@@ -3461,11 +3989,112 @@ class ScanView(QWidget):
         dialog.exec()
 
     def _view_pointcloud(self):
-        """Visualizza la nuvola di punti 3D."""
+        """
+        Visualizza la nuvola di punti 3D direttamente dalla memoria.
+        Versione riprogettata per eliminare la dipendenza dal filesystem.
+        """
         if not self.current_scan_id:
             return
 
-        # Percorso della nuvola di punti
+        # Cerca una nuvola di punti in memoria
+        pointcloud = None
+
+        # Prima controlla se abbiamo una nuvola salvata nell'istanza corrente
+        if hasattr(self, '_current_pointcloud') and self._current_pointcloud is not None:
+            pointcloud = self._current_pointcloud
+        # Altrimenti prova a ottenerla dal processore
+        elif hasattr(self, 'scan_frame_processor') and self.scan_frame_processor:
+            pointcloud = self.scan_frame_processor.get_realtime_pointcloud()
+
+        if pointcloud is not None and len(pointcloud) > 100:
+            # Usa direttamente la nuvola di punti in memoria
+            # Genera un'immagine temporanea se necessario
+            screenshot_path = None
+
+            # Genera screenshot per il dialog
+            try:
+                import tempfile
+                import open3d as o3d
+
+                # Crea una directory temporanea se non esiste
+                if not hasattr(self, '_temp_dir') or not os.path.isdir(self._temp_dir):
+                    self._temp_dir = tempfile.mkdtemp(prefix="unlook_preview_")
+
+                # Percorso per lo screenshot
+                screenshot_path = os.path.join(self._temp_dir, f"pointcloud_preview_{int(time.time())}.png")
+
+                # Crea un visualizzatore Open3D
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(pointcloud)
+
+                # Opzionale: applica un filtro per rimuovere outlier
+                if len(pointcloud) > 100:
+                    try:
+                        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+                    except Exception as e:
+                        logger.debug(f"Errore nell'applicazione del filtro outlier: {e}")
+
+                # Aggiungi un sistema di coordinate per riferimento
+                coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=20)
+
+                # Crea una finestra di visualizzazione nascosta
+                vis = o3d.visualization.Visualizer()
+                vis.create_window(visible=False, width=640, height=480)
+                vis.add_geometry(pcd)
+                vis.add_geometry(coord_frame)
+
+                # Ottimizza la vista
+                vis.get_render_option().point_size = 2.0
+                vis.get_render_option().background_color = np.array([0.9, 0.9, 0.9])
+                vis.get_view_control().set_zoom(0.8)
+                vis.poll_events()
+                vis.update_renderer()
+
+                # Cattura lo screenshot
+                vis.capture_screen_image(screenshot_path)
+                vis.destroy_window()
+
+            except Exception as e:
+                logger.error(f"Errore nella generazione dello screenshot: {e}")
+                screenshot_path = None
+
+            # Opzionalmente, salva la nuvola di punti su disco in background
+            pointcloud_path = None
+            if self.current_scan_id:
+                try:
+                    scan_dir = os.path.join(str(self.output_dir), self.current_scan_id)
+                    os.makedirs(scan_dir, exist_ok=True)
+                    pointcloud_path = os.path.join(scan_dir, "pointcloud.ply")
+
+                    # Salva su un thread separato per non bloccare la UI
+                    def save_pointcloud_thread(pcd_data, path):
+                        try:
+                            import open3d as o3d
+                            pcd = o3d.geometry.PointCloud()
+                            pcd.points = o3d.utility.Vector3dVector(pcd_data)
+                            o3d.io.write_point_cloud(path, pcd)
+                            logger.info(f"Nuvola di punti salvata su: {path}")
+                        except Exception as e:
+                            logger.error(f"Errore nel salvataggio della nuvola di punti: {e}")
+
+                    import threading
+                    save_thread = threading.Thread(
+                        target=save_pointcloud_thread,
+                        args=(pointcloud, pointcloud_path)
+                    )
+                    save_thread.daemon = True
+                    save_thread.start()
+
+                except Exception as e:
+                    logger.error(f"Errore nella preparazione del salvataggio: {e}")
+                    pointcloud_path = None
+
+            # Mostra il visualizzatore con i dati in memoria
+            dialog = PointCloudViewerDialog(self, pointcloud_path, screenshot_path, in_memory_pointcloud=pointcloud)
+            dialog.exec()
+            return
+
+        # Se non abbiamo una nuvola in memoria, prova a caricarla da disco (fallback)
         scan_dir = os.path.join(str(self.output_dir), self.current_scan_id)
         pointcloud_path = os.path.join(scan_dir, "pointcloud.ply")
 
@@ -3473,9 +4102,8 @@ class ScanView(QWidget):
         if not os.path.isfile(pointcloud_path):
             QMessageBox.warning(
                 self,
-                "File Non Trovato",
-                f"Nuvola di punti non trovata:\n{pointcloud_path}\n\n"
-                "Elabora prima la scansione per generare la nuvola di punti."
+                "Nuvola non trovata",
+                "Nessuna nuvola di punti disponibile. Elabora prima la scansione per generarla."
             )
             return
 

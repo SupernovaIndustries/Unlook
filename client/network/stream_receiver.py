@@ -1,21 +1,16 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 """
-Versione ottimizzata di StreamReceiver che elimina il buffering e processa i frame direttamente.
-Implementa un meccanismo di controllo di flusso "pull" per evitare l'accumulo di lag.
-Migliorato per il supporto dual camera e prestazioni ottimizzate.
+Versione ottimizzata di StreamReceiver che implementa un sistema di streaming
+a bassa latenza con gestione diretta dei frame per il processore di scansione.
+Questa versione è progettata specificamente per l'integrazione con il nuovo
+ScanFrameProcessor in-memory.
 """
 
-import json
 import logging
 import time
 import threading
 import cv2
 import numpy as np
-from typing import Dict, Any, Optional, Callable, Tuple, List, Set
-from pathlib import Path
-
+from typing import Dict, Any, Optional, Callable, Set
 import zmq
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QMutex, QMutexLocker, QThread
 
@@ -26,8 +21,7 @@ logger = logging.getLogger(__name__)
 class StreamReceiver(QObject):
     """
     Gestore principale per la ricezione di stream video.
-    Versione migliorata con gestione di dual camera, riconnessione automatica,
-    e supporto per frame di scansione 3D.
+    Versione ottimizzata per l'integrazione con ScanFrameProcessor in-memory.
     """
     frame_received = Signal(int, np.ndarray, float)  # camera_index, frame, timestamp
     scan_frame_received = Signal(int, np.ndarray, dict)  # camera_index, frame, frame_info
@@ -50,6 +44,23 @@ class StreamReceiver(QObject):
         self._is_receiving = False
         self._cameras_active = set()
 
+        # Riferimento al processore di frame (opzionale)
+        self._frame_processor = None
+
+        # Flag per abilitare il routing diretto dei frame (ottimizzazione)
+        self._direct_routing = True
+
+    def set_frame_processor(self, processor):
+        """
+        Imposta un processore di frame per l'invio diretto dei dati,
+        bypassando i segnali Qt per migliorare le prestazioni.
+
+        Args:
+            processor: Istanza di ScanFrameProcessor
+        """
+        self._frame_processor = processor
+        logger.info("Frame processor impostato per routing diretto")
+
     def start(self):
         """Avvia la ricezione dello stream."""
         if self._is_receiving:
@@ -62,6 +73,11 @@ class StreamReceiver(QObject):
 
             # Crea e avvia un nuovo thread
             self._receiver_thread = StreamReceiverThread(self.ip_address, self.port)
+
+            # Passa il processore di frame al thread per routing diretto
+            if self._frame_processor:
+                self._receiver_thread.set_frame_processor(self._frame_processor)
+                self._receiver_thread.set_direct_routing(self._direct_routing)
 
             # Collega i segnali
             self._receiver_thread.frame_decoded.connect(self._on_frame_decoded)
@@ -79,6 +95,22 @@ class StreamReceiver(QObject):
             logger.error(f"Errore nell'avvio dello StreamReceiver: {e}")
             self.error.emit(f"Errore nell'avvio dello streaming: {str(e)}")
             self._is_receiving = False
+
+    def enable_direct_routing(self, enabled: bool):
+        """
+        Abilita o disabilita il routing diretto dei frame al processore.
+
+        Args:
+            enabled: True per abilitare il routing diretto, False per disabilitarlo
+        """
+        self._direct_routing = enabled
+        if self._receiver_thread:
+            self._receiver_thread.set_direct_routing(enabled)
+
+        if enabled:
+            logger.info("Routing diretto dei frame abilitato per alte prestazioni")
+        else:
+            logger.info("Routing diretto disabilitato, utilizzo segnali Qt standard")
 
     def stop(self):
         """
@@ -188,9 +220,7 @@ class StreamReceiver(QObject):
 class StreamReceiverThread(QThread):
     """
     Thread dedicato per ricevere lo stream video senza buffering.
-    Processa ed emette ogni frame direttamente senza code intermedie.
-    Versione ottimizzata con riconnessione automatica, gestione robusta degli errori,
-    e supporto per frame di scansione 3D.
+    Versione ottimizzata per il routing diretto dei frame al ScanFrameProcessor.
     """
     frame_decoded = Signal(int, np.ndarray, float)  # camera_index, frame, timestamp
     scan_frame_received = Signal(int, np.ndarray, dict)  # camera_index, frame, frame_info
@@ -212,6 +242,57 @@ class StreamReceiverThread(QThread):
         self._max_reconnect_attempts = 5
         self._mutex = QMutex()  # Mutex per proteggere lo stato
 
+        # Nuove proprietà per il routing diretto
+        self._frame_processor = None
+        self._direct_routing = False
+
+        # Statistiche di prestazioni
+        self._processing_times = []  # Ultimi 50 tempi di elaborazione
+        self._max_times_history = 50
+        self._frames_processed = 0
+        self._start_time = time.time()
+
+        # Timers per FPS e diagnostica
+        self._fps_timer = QTimer()
+        self._fps_timer.timeout.connect(self._log_performance_stats)
+        self._fps_timer.start(5000)  # Log ogni 5 secondi
+
+    def set_frame_processor(self, processor):
+        """
+        Imposta un processore di frame per routing diretto.
+
+        Args:
+            processor: Istanza di ScanFrameProcessor
+        """
+        self._frame_processor = processor
+
+    def set_direct_routing(self, enabled: bool):
+        """
+        Abilita o disabilita il routing diretto dei frame.
+
+        Args:
+            enabled: True per abilitare, False per disabilitare
+        """
+        with QMutexLocker(self._mutex):
+            self._direct_routing = enabled
+
+    def _log_performance_stats(self):
+        """Registra statistiche di prestazioni nei log."""
+        if not self._running or self._frames_processed == 0:
+            return
+
+        elapsed = time.time() - self._start_time
+        if elapsed > 0:
+            fps = self._frames_processed / elapsed
+            avg_process_time = sum(self._processing_times) / len(
+                self._processing_times) if self._processing_times else 0
+
+            logger.info(f"Stream performance: {fps:.1f} FPS, avg processing: {avg_process_time * 1000:.1f}ms/frame")
+
+            # Reset per il prossimo periodo
+            self._frames_processed = 0
+            self._start_time = time.time()
+
     def run(self):
         """Loop principale del thread con meccanismo di riconnessione automatica e controllo di flusso adattivo."""
         reconnect_delay = 1.0  # Delay iniziale in secondi
@@ -224,6 +305,11 @@ class StreamReceiverThread(QThread):
         self._last_frame_time = 0  # Timestamp dell'ultimo frame ricevuto
         self._adaptive_mode = True  # Abilita/disabilita modalità adattiva
 
+        # Reset delle statistiche
+        self._frames_processed = 0
+        self._start_time = time.time()
+        self._processing_times = []
+
         while self._reconnect_attempts <= self._max_reconnect_attempts:
             try:
                 # Inizializza ZeroMQ
@@ -234,8 +320,7 @@ class StreamReceiverThread(QThread):
                 self._socket.setsockopt(zmq.LINGER, 0)  # Non attendere alla chiusura
 
                 # IMPORTANTE: Limita il buffer di ricezione per evitare accumulo di frame
-                self._socket.setsockopt(zmq.RCVHWM,
-                                        self._max_queue_size)  # Limita la dimensione della coda di ricezione
+                self._socket.setsockopt(zmq.RCVHWM, self._max_queue_size)  # Limita la dimensione della coda
 
                 self._socket.setsockopt_string(zmq.SUBSCRIBE, "")  # Sottoscrivi a tutto
                 self._socket.setsockopt(zmq.RCVTIMEO, 500)  # 500ms timeout
@@ -264,7 +349,7 @@ class StreamReceiverThread(QThread):
                     f"StreamReceiverThread inizializzato con controllo di flusso adattivo (max_queue={self._max_queue_size})")
 
                 # Loop principale con controllo di flusso adattivo
-                while self._is_running():
+                while self._running:
                     try:
                         # Misuriamo il tempo di inizio elaborazione
                         process_start_time = time.time()
@@ -343,20 +428,11 @@ class StreamReceiverThread(QThread):
                             logger.warning("Header JSON non valido")
                             continue
 
-                        if header.get("is_scan_frame", False):
+                        # Log specifico per i frame di scansione
+                        if is_scan_frame:
+                            pattern_index = header.get('pattern_index', 'unknown')
                             logger.info(
-                                f"Ricevuto frame di scansione: camera={camera_index}, pattern={header.get('pattern_index', 'unknown')}")
-                            # Salva una copia raw del frame per debug
-                            try:
-                                debug_dir = Path.home() / "UnLook" / "debug"
-                                debug_dir.mkdir(parents=True, exist_ok=True)
-                                timestamp = int(time.time() * 1000)
-                                debug_file = debug_dir / f"scan_frame_raw_{timestamp}_{camera_index}.bin"
-                                with open(debug_file, 'wb') as f:
-                                    f.write(frame_data)
-                                logger.debug(f"Frame raw salvato per debug: {debug_file}")
-                            except Exception as e:
-                                logger.debug(f"Impossibile salvare frame raw per debug: {e}")
+                                f"Ricevuto frame di scansione: camera={camera_index}, pattern={pattern_index}")
 
                         # Verifica dati minimi necessari
                         if None in (camera_index, timestamp, format_str):
@@ -400,20 +476,44 @@ class StreamReceiverThread(QThread):
                                     logger.warning(f"Decodifica fallita per frame della camera {camera_index}")
                                     continue
 
-                                # Emetti il segnale appropriato in base al tipo di frame
-                                if is_scan_frame:
-                                    # Estraiamo informazioni aggiuntive per i frame di scansione
-                                    frame_info = {
-                                        "scan_id": header.get("scan_id"),
-                                        "pattern_index": header.get("pattern_index"),
-                                        "pattern_name": header.get("pattern_name"),
-                                        "timestamp": timestamp,
-                                        "is_scan_frame": True
-                                    }
-                                    self.scan_frame_received.emit(camera_index, frame, frame_info)
-                                else:
-                                    # Frame normale di streaming
-                                    self.frame_decoded.emit(camera_index, frame, timestamp)
+                                # Incrementa contatore frame elaborati
+                                self._frames_processed += 1
+
+                                # ROUTING DIRETTO:
+                                # Se abbiamo un processore di frame e il routing diretto è abilitato,
+                                # bypassiamo il sistema di segnali Qt e inviamo direttamente al processore
+                                direct_routed = False
+
+                                with QMutexLocker(self._mutex):
+                                    can_route_direct = (
+                                            self._direct_routing and
+                                            self._frame_processor is not None and
+                                            is_scan_frame
+                                    )
+
+                                if can_route_direct:
+                                    try:
+                                        # Invia direttamente al processore di frame
+                                        if hasattr(self._frame_processor, 'process_frame'):
+                                            success = self._frame_processor.process_frame(camera_index, frame, header)
+                                            direct_routed = success
+                                            if success:
+                                                logger.debug(
+                                                    f"Frame inviato direttamente al processore: camera={camera_index}, pattern={header.get('pattern_index', 'unknown')}")
+                                    except Exception as route_error:
+                                        logger.error(f"Errore nel routing diretto: {route_error}")
+                                        # Fallback ai segnali standard
+                                        direct_routed = False
+
+                                # Se il routing diretto non è stato usato o ha fallito, usa i segnali standard
+                                if not direct_routed:
+                                    # Emetti il segnale appropriato in base al tipo di frame
+                                    if is_scan_frame:
+                                        # Invia il frame di scansione tramite segnale Qt
+                                        self.scan_frame_received.emit(camera_index, frame, header)
+                                    else:
+                                        # Frame normale di streaming
+                                        self.frame_decoded.emit(camera_index, frame, timestamp)
 
                             except Exception as decode_error:
                                 logger.warning(f"Errore nella decodifica: {decode_error}")
@@ -421,7 +521,15 @@ class StreamReceiverThread(QThread):
 
                         # Misurazione del tempo di elaborazione per il controllo di flusso
                         process_end_time = time.time()
-                        process_time_ms = (process_end_time - process_start_time) * 1000
+                        process_time = process_end_time - process_start_time
+
+                        # Salva tempo di elaborazione per statistiche
+                        self._processing_times.append(process_time)
+                        if len(self._processing_times) > self._max_times_history:
+                            self._processing_times.pop(0)
+
+                        # Converti in millisecondi per confronto con soglie
+                        process_time_ms = process_time * 1000
 
                         # Aggiorna il lag di elaborazione con media mobile
                         alpha = 0.3  # Fattore di smorzamento
@@ -444,7 +552,7 @@ class StreamReceiverThread(QThread):
                             # Timeout normale
                             continue
                         logger.error(f"Errore ZMQ: {e}")
-                        if not self._is_running():
+                        if not self._running:
                             break
                         break  # Usciamo per riconnessione
 
@@ -454,13 +562,13 @@ class StreamReceiverThread(QThread):
                         time.sleep(0.1)  # Breve pausa
 
                 # Se usciti dal loop in modo pulito
-                if not self._running or self._shutdown_event.is_set():
+                if not self._running:
                     break
 
             except Exception as e:
                 logger.error(f"Errore fatale nel thread di ricezione: {e}")
                 self.error_occurred.emit(str(e))
-                if not self._is_running():
+                if not self._running:
                     break
                 self._cleanup_socket()
                 self._reconnect_attempts += 1
@@ -477,27 +585,6 @@ class StreamReceiverThread(QThread):
             self.connection_state_changed.emit(False)
         logger.info("Thread di ricezione terminato")
 
-    # Aggiungiamo nuovi metodi per controllare il flusso
-    def set_high_performance(self, enabled: bool):
-        """
-        Abilita/disabilita la modalità ad alte prestazioni con riduzione della qualità
-        per migliorare la reattività.
-
-        Args:
-            enabled: True per abilitare, False per disabilitare
-        """
-        with QMutexLocker(self._mutex):
-            if enabled:
-                self._max_queue_size = 1  # Riduce al minimo la coda
-                self._frame_drop_threshold = 50  # Imposta una soglia bassa per il drop
-                self._adaptive_mode = True  # Abilita il controllo adattivo
-                logger.info("Modalità alte prestazioni abilitata")
-            else:
-                self._max_queue_size = 2  # Coda standard
-                self._frame_drop_threshold = 100  # Soglia standard
-                self._adaptive_mode = False  # Disabilita adattamento
-                logger.info("Modalità alte prestazioni disabilitata")
-
     def get_performance_stats(self) -> dict:
         """
         Restituisce le statistiche di prestazione del ricevitore.
@@ -506,20 +593,23 @@ class StreamReceiverThread(QThread):
             Dizionario con informazioni di prestazione
         """
         with QMutexLocker(self._mutex):
+            elapsed = time.time() - self._start_time
+            fps = self._frames_processed / elapsed if elapsed > 0 else 0
+            avg_process_time = sum(self._processing_times) / len(
+                self._processing_times) if self._processing_times else 0
+
             return {
                 "processing_lag": self._processing_lag,
                 "frame_interval": self._frame_interval * 1000 if self._frame_interval > 0 else 0,
-                "estimated_fps": 1.0 / self._frame_interval if self._frame_interval > 0 else 0,
+                "estimated_fps": fps,
+                "avg_process_time_ms": avg_process_time * 1000,
                 "drop_threshold": self._frame_drop_threshold,
                 "adaptive_mode": self._adaptive_mode,
                 "cameras_active": list(self._received_cameras),
-                "max_queue_size": self._max_queue_size
+                "max_queue_size": self._max_queue_size,
+                "direct_routing": self._direct_routing,
+                "frames_processed": self._frames_processed
             }
-
-    def _is_running(self) -> bool:
-        """Verifica se il thread è in esecuzione in modo thread-safe."""
-        with QMutexLocker(self._mutex):
-            return self._running
 
     def _cleanup_socket(self):
         """Pulisce il socket e il contesto ZMQ in modo sicuro."""
@@ -550,6 +640,10 @@ class StreamReceiverThread(QThread):
 
         with QMutexLocker(self._mutex):
             self._running = False
+
+        # Termina il timer di diagnostica
+        if hasattr(self, '_fps_timer') and self._fps_timer:
+            self._fps_timer.stop()
 
         # Attendi che il thread termini con un timeout
         if self.isRunning() and not self.wait(2000):  # 2 secondi di timeout
