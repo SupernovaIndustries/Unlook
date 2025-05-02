@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 class CameraPreviewWidget(QWidget):
-    """Widget per visualizzare il preview di una singola camera."""
+    """Widget per visualizzare il preview di una singola camera con lag meter."""
 
     def __init__(self, camera_index: int, parent=None):
         super().__init__(parent)
@@ -51,6 +51,8 @@ class CameraPreviewWidget(QWidget):
         self._last_update_time = time.time()
         self._fps = 0
         self._frame_count = 0
+        self._lag_ms = 0
+        self._max_lag_warning = 200  # ms, soglia per avviso lag
 
         # Setup UI
         layout = QVBoxLayout(self)
@@ -63,16 +65,28 @@ class CameraPreviewWidget(QWidget):
         self.display_label.setStyleSheet("background-color: black; color: white;")
         self.display_label.setText("Camera non attiva\nIn attesa dei frame...")
 
+        # Layout info con FPS e lag
+        info_layout = QHBoxLayout()
+
         # Etichetta informativa
         self.info_label = QLabel("Camera non attiva")
-        self.info_label.setAlignment(Qt.AlignCenter)
+        self.info_label.setAlignment(Qt.AlignLeft)
+
+        # Etichetta lag
+        self.lag_label = QLabel("Lag: N/A")
+        self.lag_label.setAlignment(Qt.AlignRight)
+        self.lag_label.setStyleSheet("color: green;")
+
+        info_layout.addWidget(self.info_label)
+        info_layout.addStretch(1)
+        info_layout.addWidget(self.lag_label)
 
         layout.addWidget(self.display_label)
-        layout.addWidget(self.info_label)
+        layout.addLayout(info_layout)
 
     @Slot(np.ndarray, float)
     def update_frame(self, frame: np.ndarray, timestamp: float = None):
-        """Aggiorna il frame visualizzato."""
+        """Aggiorna il frame visualizzato con calcolo lag."""
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
             return
 
@@ -112,24 +126,42 @@ class CameraPreviewWidget(QWidget):
 
         self._last_update_time = current_time
 
+        # Calcola lag se è stato fornito un timestamp
+        if timestamp is not None:
+            self._lag_ms = int((time.time() - timestamp) * 1000)
+            self._update_lag_label()
+        else:
+            self.lag_label.setText("Lag: N/A")
+            self.lag_label.setStyleSheet("color: gray;")
+
         # Aggiorna etichetta informativa
         camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
         fps_text = f"{self._fps:.1f} FPS" if self._fps > 0 else ""
         self.info_label.setText(f"Camera {camera_name} | {width}x{height} | {fps_text}")
 
-    def get_current_frame(self) -> Optional[np.ndarray]:
-        """Restituisce il frame corrente."""
-        return self._frame.copy() if self._frame is not None else None
+    def _update_lag_label(self):
+        """Aggiorna l'etichetta del lag e imposta il colore appropriato."""
+        # Valori soglia ottimizzati per un Raspberry Pi
+        if self._lag_ms < 200:  # Ottimo
+            self.lag_label.setStyleSheet("color: green; font-weight: bold;")
+        elif self._lag_ms < 400:  # Accettabile
+            self.lag_label.setStyleSheet("color: orange; font-weight: bold;")
+        else:  # Problematico
+            self.lag_label.setStyleSheet("color: red; font-weight: bold;")
 
-    def clear(self):
-        """Pulisce il display."""
-        self.display_label.clear()
-        self.display_label.setStyleSheet("background-color: black; color: white;")
-        self.display_label.setText("Camera non attiva")
-        self.info_label.setText("Camera non attiva")
-        self._frame = None
-        self._fps = 0
-        self._frame_count = 0
+        self.lag_label.setText(f"Lag: {self._lag_ms}ms")
+
+        # Logga avvisi solo per lag molto elevato e non troppo frequentemente
+        if self._lag_ms > self._max_lag_warning:
+            # Evita spam nel log usando un contatore
+            if not hasattr(self, '_lag_warning_count'):
+                self._lag_warning_count = 0
+
+            self._lag_warning_count += 1
+
+            # Logga solo ogni 10 rilevamenti di lag alto
+            if self._lag_warning_count % 10 == 1:
+                logger.warning(f"Lag elevato su camera {self.camera_index}: {self._lag_ms}ms")
 
 
 class PointCloudViewerWidget(QWidget):
@@ -592,12 +624,14 @@ class ScanView(QWidget):
             logger.error(f"Errore nel callback frame_processed: {e}")
 
     def _start_scan(self):
-        """Avvia una nuova scansione."""
+        """Avvia una nuova scansione con diagnostica avanzata."""
         if self.is_scanning:
+            logger.info("Scansione già in corso, nessuna azione necessaria")
             return
 
         # Verifica connessione scanner
         if not self.selected_scanner or not self.scanner_controller:
+            logger.warning("Scanner non selezionato o controller non disponibile")
             QMessageBox.warning(
                 self,
                 "Scanner non selezionato",
@@ -605,17 +639,50 @@ class ScanView(QWidget):
             )
             return
 
+        # Verifica preliminare stato streaming
+        streaming_status = self._verify_streaming_status()
+        logger.info(f"Stato streaming verificato: {streaming_status}")
+
         # Verifica connessione stream
-        if not self._connect_to_stream():
+        connection_status = self._connect_to_stream()
+        logger.info(f"Connessione allo stream: {connection_status}")
+
+        if not connection_status:
+            # Se entrambe le verifiche falliscono, mostra errore dettagliato
+            error_info = ""
+            main_window = self.window()
+            if hasattr(main_window, 'streaming_widget'):
+                error_info += "StreamingWidget è presente nel main_window.\n"
+                if hasattr(main_window.streaming_widget, 'stream_receiver'):
+                    error_info += "StreamReceiver è presente nello StreamingWidget.\n"
+                    if main_window.streaming_widget.stream_receiver:
+                        error_info += "StreamReceiver è inizializzato.\n"
+                    else:
+                        error_info += "StreamReceiver è NULL.\n"
+                else:
+                    error_info += "StreamReceiver non è presente nello StreamingWidget.\n"
+
+                # Verifica metodo is_streaming
+                if hasattr(main_window.streaming_widget, 'is_streaming'):
+                    is_streaming = main_window.streaming_widget.is_streaming()
+                    error_info += f"Stato streaming (is_streaming): {is_streaming}\n"
+            else:
+                error_info += "StreamingWidget non è presente nel main_window.\n"
+
+            logger.error(f"Dettagli diagnostici: {error_info}")
+
             QMessageBox.warning(
                 self,
                 "Stream non disponibile",
-                "Lo stream delle camere non è disponibile.\nAvvia lo streaming prima di iniziare la scansione."
+                f"Lo stream delle camere non è disponibile.\n"
+                f"Avvia lo streaming prima di iniziare la scansione.\n\n"
+                f"Dettagli tecnici:\n{error_info}"
             )
             return
 
         # Registra il gestore dei frame
-        self._register_frame_handler()
+        frame_handler_status = self._register_frame_handler()
+        logger.info(f"Registrazione frame handler: {frame_handler_status}")
 
         # Genera ID scansione
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -641,6 +708,8 @@ class ScanView(QWidget):
                     "quality": 3
                 }
             )
+
+            logger.info(f"Comando START_SCAN inviato: {success}")
 
             if not success:
                 QMessageBox.critical(
@@ -670,6 +739,8 @@ class ScanView(QWidget):
 
         except Exception as e:
             logger.error(f"Errore nell'avvio della scansione: {e}")
+            import traceback
+            logger.error(f"Traceback completo: {traceback.format_exc()}")
             QMessageBox.critical(
                 self,
                 "Errore",
@@ -782,3 +853,110 @@ class ScanView(QWidget):
     def get_realtime_pointcloud(self):
         """Restituisce l'ultima nuvola di punti generata."""
         return self.pointcloud_viewer.pointcloud
+
+    def _connect_to_stream(self):
+        """Collega il widget agli stream delle camere con diagnostica avanzata."""
+        if self._stream_connected:
+            logger.debug("Stream già connesso, nessuna azione necessaria")
+            return True
+
+        try:
+            # Cerca il main window
+            main_window = self.window()
+            logger.info(f"MainWindow trovata: {main_window is not None}")
+
+            # Verifica streaming_widget
+            has_streaming_widget = hasattr(main_window, 'streaming_widget')
+            logger.info(f"MainWindow ha streaming_widget: {has_streaming_widget}")
+
+            if has_streaming_widget and main_window.streaming_widget:
+                streaming_widget = main_window.streaming_widget
+
+                # Verifica stream_receiver
+                has_receiver = hasattr(streaming_widget, 'stream_receiver')
+                logger.info(f"StreamingWidget ha stream_receiver: {has_receiver}")
+
+                if has_receiver and streaming_widget.stream_receiver:
+                    receiver = streaming_widget.stream_receiver
+
+                    # Verifica se il receiver ha i metodi necessari
+                    logger.info(f"Metodi disponibili nel receiver: "
+                                f"frame_received={hasattr(receiver, 'frame_received')}, "
+                                f"set_frame_processor={hasattr(receiver, 'set_frame_processor')}, "
+                                f"enable_direct_routing={hasattr(receiver, 'enable_direct_routing')}")
+
+                    # Tenta di accedere al segnale frame_received
+                    if hasattr(receiver, 'frame_received'):
+                        # Disconnetti eventuali connessioni esistenti
+                        try:
+                            receiver.frame_received.disconnect(self._on_frame_received)
+                        except:
+                            pass
+
+                        # Collega il segnale
+                        receiver.frame_received.connect(self._on_frame_received)
+                        logger.info("Segnale frame_received collegato con successo")
+
+                        # Imposta il processore di scan frame
+                        if hasattr(receiver, 'set_frame_processor'):
+                            receiver.set_frame_processor(self.scan_processor)
+                            logger.info("Processore di frame impostato con successo")
+
+                        # Abilita routing diretto
+                        if hasattr(receiver, 'enable_direct_routing'):
+                            receiver.enable_direct_routing(True)
+                            logger.info("Routing diretto abilitato con successo")
+
+                        self._stream_connected = True
+                        return True
+                    else:
+                        logger.error("Segnale frame_received non trovato nel receiver")
+                else:
+                    logger.error("StreamReceiver non trovato o non inizializzato in StreamingWidget")
+            else:
+                logger.error("StreamingWidget non trovato in MainWindow")
+        except Exception as e:
+            logger.error(f"Errore nella connessione agli stream: {e}")
+            import traceback
+            logger.error(f"Traceback completo: {traceback.format_exc()}")
+
+        return False
+
+    def _verify_streaming_status(self):
+        """Verifica lo stato effettivo dello streaming."""
+        try:
+            main_window = self.window()
+            if hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
+                streaming_widget = main_window.streaming_widget
+
+                # Metodo 1: controllo attributo _streaming_active
+                if hasattr(streaming_widget, '_streaming_active'):
+                    logger.info(f"Stato streaming (_streaming_active): {streaming_widget._streaming_active}")
+                    if streaming_widget._streaming_active:
+                        return True
+
+                # Metodo 2: controllo attributo stream_receiver
+                if hasattr(streaming_widget, 'stream_receiver') and streaming_widget.stream_receiver:
+                    logger.info("Stream receiver presente")
+                    receiver = streaming_widget.stream_receiver
+
+                    # Verifica se il receiver ha metodi di stato
+                    if hasattr(receiver, 'is_running') and receiver.is_running():
+                        logger.info("Stream receiver is running")
+                        return True
+
+                    # Controlla se ci sono connessioni attive
+                    if hasattr(receiver, '_connections') and len(receiver._connections) > 0:
+                        logger.info(f"Stream receiver ha {len(receiver._connections)} connessioni attive")
+                        return True
+
+                # Se arriviamo qui, significa che non abbiamo potuto confermare che lo streaming è attivo
+                logger.warning("Non è stato possibile confermare che lo streaming è attivo")
+                return False
+
+            else:
+                logger.error("StreamingWidget non trovato in MainWindow")
+                return False
+        except Exception as e:
+            logger.error(f"Errore nella verifica dello stato dello streaming: {e}")
+            return False
