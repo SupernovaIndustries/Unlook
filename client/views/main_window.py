@@ -72,8 +72,9 @@ class MainWindow(QMainWindow):
     class TabIndex(Enum):
         """Indici delle schede nella finestra principale."""
         SCANNER = 0
-        STREAMING = 1
-        SCANNING = 2
+        SCANNING = 1
+        CAMERA_CONFIG = 2
+
 
     def __init__(self, scanner_controller: ScannerController):
         super().__init__()

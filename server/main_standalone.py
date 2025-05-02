@@ -1153,6 +1153,29 @@ class UnLookServer:
                     response['message'] = 'Funzionalità di scansione 3D non disponibile'
                     response['scan_config'] = None
 
+            elif command_type == 'SYNC_PATTERN':
+                # Aggiorna timestamp di attività client
+                self._last_client_activity = time.time()
+                self.client_connected = True
+
+                # Verifica che lo scan manager sia disponibile
+                if not self.scan_manager:
+                    response['status'] = 'error'
+                    response['message'] = 'Scan manager non disponibile'
+                    return response
+
+                # Estrai indice pattern
+                pattern_index = command.get('pattern_index', -1)
+                if pattern_index < 0:
+                    response['status'] = 'error'
+                    response['message'] = 'Indice pattern non valido'
+                    return response
+
+                # Sincronizza la proiezione del pattern
+                sync_result = self.scan_manager.sync_pattern_projection(pattern_index)
+
+                # Incorpora risultato nella risposta
+                response.update(sync_result)
             else:
                 # Comando sconosciuto
                 response['status'] = 'error'

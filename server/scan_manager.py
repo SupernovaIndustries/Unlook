@@ -911,3 +911,79 @@ class ScanManager:
 
         except Exception as e:
             logger.error(f"Errore nella pulizia del gestore di scansione: {e}")
+    def sync_pattern_projection(self, pattern_index: int) -> Dict[str, Any]:
+        """
+        Sincronizza la proiezione di un pattern specifico.
+
+        Args:
+            pattern_index: Indice del pattern da proiettare
+
+        Returns:
+            Dizionario con risultato dell'operazione
+        """
+        try:
+            if not self._scan_controller:
+                return {
+                    'status': 'error',
+                    'message': 'Controller di scansione non inizializzato',
+                    'pattern_index': pattern_index
+                }
+
+            # Verifica che il controller sia disponibile
+            if not self._scan_controller.is_projector_initialized():
+                # Prova a inizializzare
+                if not self._scan_controller.initialize_projector():
+                    return {
+                        'status': 'error',
+                        'message': f'Inizializzazione proiettore fallita: {self._scan_controller.error_message}',
+                        'pattern_index': pattern_index
+                    }
+
+            # Pattern speciali: 0=white, 1=black
+            pattern_name = ""
+            if pattern_index == 0:
+                pattern_name = "white"
+                self._scan_controller.project_pattern(0, is_white=True)
+            elif pattern_index == 1:
+                pattern_name = "black"
+                self._scan_controller.project_pattern(0, is_white=False)
+            else:
+                # Calcola se è un pattern orizzontale o verticale
+                num_patterns = self._scan_config.get('num_patterns', 12)
+                is_horizontal = pattern_index >= (2 + num_patterns)
+
+                if is_horizontal:
+                    effective_idx = pattern_index - 2 - num_patterns
+                    pattern_name = f"horizontal_{effective_idx}"
+                else:
+                    effective_idx = pattern_index - 2
+                    pattern_name = f"vertical_{effective_idx}"
+
+                # Proietta pattern
+                self._scan_controller.project_pattern(
+                    effective_idx,
+                    is_horizontal=is_horizontal,
+                    is_inverted=False
+                )
+
+            # Attendi che il pattern sia effettivamente proiettato
+            time.sleep(0.05)  # 50ms di attesa per la stabilizzazione
+
+            return {
+                'status': 'success',
+                'message': f'Pattern {pattern_name} proiettato con successo',
+                'pattern_index': pattern_index,
+                'pattern_name': pattern_name,
+                'timestamp': time.time()
+            }
+
+        except Exception as e:
+            logger.error(f"Errore nella sincronizzazione del pattern {pattern_index}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+            return {
+                'status': 'error',
+                'message': f'Errore nella proiezione del pattern: {str(e)}',
+                'pattern_index': pattern_index
+            }

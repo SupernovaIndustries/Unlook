@@ -1826,72 +1826,26 @@ class ScanFrameProcessor:
     def process_frame(self, camera_index, frame, frame_info):
         """
         Elabora un frame di scansione in tempo reale.
-        Versione riprogettata per operare completamente in-memory con migliore gestione degli errori.
-
-        Args:
-            camera_index: Indice della camera (0=sinistra, 1=destra)
-            frame: Frame come array NumPy
-            frame_info: Informazioni sul frame (pattern_index, pattern_name, ecc.)
-
-        Returns:
-            True se il frame è stato elaborato correttamente, False altrimenti
+        Versione ottimizzata per prestazioni con meno controlli ridondanti.
         """
         try:
-            # Verifica più robusta dello stato di scansione
+            # Verifica essenziale dello stato di scansione
             if not self.is_scanning:
-                logger.warning(
-                    f"ScanFrameProcessor: chiamata a process_frame ma is_scanning=False, pattern_index={frame_info.get('pattern_index', 'N/A')}")
-
                 # Se non siamo in stato di scansione ma abbiamo un scan_id, proviamo a ripristinare lo stato
                 scan_id = frame_info.get("scan_id", self.current_scan_id)
                 if scan_id:
-                    logger.info(f"Tentativo di recupero scansione con ID: {scan_id}")
                     self.start_scan(scan_id)
                 else:
                     # Se non abbiamo un ID, non possiamo processare questo frame
                     return False
 
-                # Verifica che lo stato sia stato ripristinato
-                if not self.is_scanning:
-                    logger.error("Impossibile ripristinare lo stato di scansione, frame ignorato")
-                    return False
-
-            # Estrai informazioni dal frame con controlli di validità
+            # Estrai informazioni dal frame
             pattern_index = frame_info.get("pattern_index", -1)
             pattern_name = frame_info.get("pattern_name", "unknown")
-            scan_id = frame_info.get("scan_id", self.current_scan_id)
+            scan_id = frame_info.get("scan_id", self.current_scan_id or f"Scan_{int(time.time())}")
 
-            # Verifica e imposta scan_id con validazione robusta
-            if not self.current_scan_id and scan_id:
-                self.current_scan_id = scan_id
-                logger.info(f"Impostato scan_id: {scan_id}")
-            elif not scan_id and self.current_scan_id:
-                scan_id = self.current_scan_id
-                frame_info["scan_id"] = scan_id  # Aggiorna il frame_info per consistenza
-            elif not scan_id and not self.current_scan_id:
-                # Entrambi nulli, crea un nuovo ID
-                timestamp = int(time.time())
-                scan_id = f"Scan_{timestamp}"
-                self.current_scan_id = scan_id
-                frame_info["scan_id"] = scan_id  # Aggiorna il frame_info per consistenza
-                logger.warning(f"ScanFrameProcessor: creato nuovo scan_id: {scan_id}")
-
-            # Log di base (limitato per prestazioni)
-            if pattern_index % 10 == 0 or pattern_index < 5:
-                logger.info(
-                    f"ScanFrameProcessor: elaborazione frame {pattern_index} ({pattern_name}) della camera {camera_index}")
-
-            # Verifica integrità del frame con messaggi di errore specifici
-            if frame is None:
-                logger.error(f"Frame {pattern_index} nullo")
-                return False
-
-            if not isinstance(frame, np.ndarray):
-                logger.error(f"Frame {pattern_index} non è un array NumPy")
-                return False
-
-            if frame.size == 0:
-                logger.error(f"Frame {pattern_index} vuoto (size=0)")
+            # Verifica integrità del frame
+            if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
                 return False
 
             # Aggiorna contatori e strutture
@@ -1904,60 +1858,28 @@ class ScanFrameProcessor:
                     "timestamp": time.time()
                 }
 
-            # PRIORITÀ 1: Verifica che il buffer frame sia inizializzato
-            if not hasattr(self, '_frame_buffer') or self._frame_buffer is None:
-                logger.error("Frame buffer non inizializzato!")
-                # Inizializza il buffer come fallback
-                from client.processing.scan_frame_processor import CircularFrameBuffer
-                self._frame_buffer = CircularFrameBuffer(max_size=100)
-                logger.info("Frame buffer inizializzato come fallback")
+            # Salva in memoria senza controlli eccessivi
+            self._frame_buffer.add_frame(camera_index, pattern_index, frame, frame_info)
 
-            # PRIORITÀ 2: Salva in memoria con gestione errori
-            try:
-                success = self._frame_buffer.add_frame(camera_index, pattern_index, frame, frame_info)
-                if not success:
-                    logger.warning(f"Impossibile aggiungere frame {pattern_index} al buffer")
-            except Exception as e:
-                logger.error(f"Errore nell'aggiunta del frame al buffer: {e}")
-                # Continua comunque per permettere altre operazioni
+            # Segnala al thread di elaborazione che c'è un nuovo frame
+            self._new_frame_event.set()
 
-            # PRIORITÀ 3: Segnala al thread di elaborazione che c'è un nuovo frame
-            if hasattr(self, '_new_frame_event'):
-                self._new_frame_event.set()
-            else:
-                logger.warning("Evento _new_frame_event non disponibile")
+            # Salva su disco se abilitato - senza controlli ridondanti
+            if self._save_to_disk:
+                self._saver.queue_frame(camera_index, pattern_index, pattern_name, scan_id, frame)
 
-            # PRIORITÀ 4: Salva su disco (in background) solo se abilitato
-            if hasattr(self, '_save_to_disk') and self._save_to_disk and hasattr(self, '_saver'):
-                try:
-                    self._saver.queue_frame(camera_index, pattern_index, pattern_name, scan_id, frame)
-                except Exception as e:
-                    logger.error(f"Errore nel salvataggio del frame su disco: {e}")
-                    # Continua comunque, il salvataggio è secondario
-
-            # Notifica callback con gestione errori
+            # Notifica callback senza eccezioni innecessarie
             if self._frame_callback:
-                try:
-                    self._frame_callback(camera_index, pattern_index, frame)
-                except Exception as e:
-                    logger.error(f"Errore nella frame_callback: {e}")
-                    # Non propagare l'eccezione per evitare crash
+                self._frame_callback(camera_index, pattern_index, frame)
 
-            # Aggiorna progress con gestione errori
+            # Aggiorna progress
             if self._progress_callback:
-                try:
-                    progress = self.get_scan_progress()
-                    self._progress_callback(progress)
-                except Exception as e:
-                    logger.error(f"Errore nella progress_callback: {e}")
-                    # Non propagare l'eccezione per evitare crash
+                self._progress_callback(self.get_scan_progress())
 
             return True
 
         except Exception as e:
-            logger.error(f"ScanFrameProcessor: errore generale nell'elaborazione: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Errore nell'elaborazione: {e}")
             return False
 
     def stop_scan(self):

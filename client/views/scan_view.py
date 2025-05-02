@@ -22,8 +22,8 @@ from PySide6.QtWidgets import (
     QGroupBox, QFormLayout, QComboBox, QSlider, QProgressBar, QMessageBox,
     QApplication, QFileDialog
 )
-from PySide6.QtCore import Qt, Signal, Slot, QTimer
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QMetaObject, Q_ARG
+from PySide6.QtGui import QImage, QPixmap, QStatusTipEvent
 
 from client.models.scanner_model import Scanner, ScannerStatus
 from client.processing.scan_frame_processor import ScanFrameProcessor
@@ -473,7 +473,7 @@ class ScanView(QWidget):
         )
 
     def _connect_to_stream(self):
-        """Collega il widget agli stream delle camere."""
+        """Collega il widget agli stream delle camere direttamente da MainWindow."""
         if self._stream_connected:
             logger.debug("Stream già connesso, nessuna azione necessaria")
             return True
@@ -481,8 +481,9 @@ class ScanView(QWidget):
         try:
             # Cerca il main window
             main_window = self.window()
+            logger.info(f"MainWindow trovata: {main_window is not None}")
 
-            # Verifica se lo stream_receiver è presente in main_window
+            # Verifica se stream_receiver è presente direttamente in MainWindow
             if hasattr(main_window, 'stream_receiver') and main_window.stream_receiver is not None:
                 receiver = main_window.stream_receiver
 
@@ -510,20 +511,37 @@ class ScanView(QWidget):
 
                     self._stream_connected = True
                     return True
+                else:
+                    logger.error("Segnale frame_received non trovato nel receiver")
+            else:
+                logger.warning("Stream receiver non trovato in MainWindow")
 
-            # Tentativo alternativo di trovare il receiver dal controller
-            if hasattr(self, 'scanner_controller') and self.scanner_controller:
-                if hasattr(self.scanner_controller, 'get_stream_receiver'):
-                    receiver = self.scanner_controller.get_stream_receiver()
-                    if receiver:
-                        # Collega il segnale e configura come sopra...
-                        # (stesso codice di collegamento del segnale di prima)
+                # Tentativo alternativo di trovare il receiver dal controller
+                if hasattr(self, 'scanner_controller') and self.scanner_controller:
+                    if hasattr(self.scanner_controller, 'get_stream_receiver'):
+                        receiver = self.scanner_controller.get_stream_receiver()
+                        if receiver:
+                            logger.info("Receiver trovato direttamente dal controller")
 
-                        self._stream_connected = True
-                        return True
+                            # Collega il segnale e configura come sopra...
+                            try:
+                                receiver.frame_received.disconnect(self._on_frame_received)
+                            except:
+                                pass
 
-            logger.error("Stream receiver non trovato in MainWindow o nel controller")
-            return False
+                            receiver.frame_received.connect(self._on_frame_received)
+
+                            if hasattr(receiver, 'set_frame_processor'):
+                                receiver.set_frame_processor(self.scan_processor)
+
+                            if hasattr(receiver, 'enable_direct_routing'):
+                                receiver.enable_direct_routing(True)
+
+                            self._stream_connected = True
+                            return True
+
+                logger.error("Non è stato possibile trovare un stream receiver valido")
+                return False
 
         except Exception as e:
             logger.error(f"Errore nella connessione agli stream: {e}")
@@ -641,7 +659,7 @@ class ScanView(QWidget):
             logger.error(f"Errore nel callback frame_processed: {e}")
 
     def _start_scan(self):
-        """Avvia una nuova scansione con diagnostica avanzata."""
+        """Avvia una nuova scansione con sincronizzazione proiettore-scanner."""
         if self.is_scanning:
             logger.info("Scansione già in corso, nessuna azione necessaria")
             return
@@ -665,104 +683,17 @@ class ScanView(QWidget):
         logger.info(f"Connessione allo stream: {connection_status}")
 
         if not connection_status:
-            # Se entrambe le verifiche falliscono, mostra errore dettagliato
-            error_info = ""
-            main_window = self.window()
-            if hasattr(main_window, 'streaming_widget'):
-                error_info += "StreamingWidget è presente nel main_window.\n"
-                if hasattr(main_window.streaming_widget, 'stream_receiver'):
-                    error_info += "StreamReceiver è presente nello StreamingWidget.\n"
-                    if main_window.streaming_widget.stream_receiver:
-                        error_info += "StreamReceiver è inizializzato.\n"
-                    else:
-                        error_info += "StreamReceiver è NULL.\n"
-                else:
-                    error_info += "StreamReceiver non è presente nello StreamingWidget.\n"
-
-                # Verifica metodo is_streaming
-                if hasattr(main_window.streaming_widget, 'is_streaming'):
-                    is_streaming = main_window.streaming_widget.is_streaming()
-                    error_info += f"Stato streaming (is_streaming): {is_streaming}\n"
-            else:
-                error_info += "StreamingWidget non è presente nel main_window.\n"
-
-            logger.error(f"Dettagli diagnostici: {error_info}")
-
+            # Mostra errore dettagliato
             QMessageBox.warning(
                 self,
                 "Stream non disponibile",
-                f"Lo stream delle camere non è disponibile.\n"
-                f"Avvia lo streaming prima di iniziare la scansione.\n\n"
-                f"Dettagli tecnici:\n{error_info}"
+                "Lo stream delle camere non è disponibile.\n"
+                "Avvia lo streaming prima di iniziare la scansione."
             )
             return
 
-        # Registra il gestore dei frame
-        frame_handler_status = self._register_frame_handler()
-        logger.info(f"Registrazione frame handler: {frame_handler_status}")
-
-        # Genera ID scansione
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.scan_id = f"Scan_{timestamp}"
-
-        # Avvia la scansione
-        try:
-            # Prepara il processore
-            self.scan_processor.start_scan(
-                scan_id=self.scan_id,
-                num_patterns=24,  # Numero standard di pattern
-                pattern_type="PROGRESSIVE"  # Tipo di pattern standard
-            )
-
-            # Invia comando al server per avviare la proiezione dei pattern
-            success = self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "START_SCAN",
-                {
-                    "scan_id": self.scan_id,
-                    "pattern_type": "PROGRESSIVE",
-                    "num_patterns": 24,
-                    "quality": 3
-                }
-            )
-
-            logger.info(f"Comando START_SCAN inviato: {success}")
-
-            if not success:
-                QMessageBox.critical(
-                    self,
-                    "Errore",
-                    "Impossibile inviare il comando di avvio al server."
-                )
-                self.scan_processor.stop_scan()
-                return
-
-            # Imposta stato
-            self.is_scanning = True
-
-            # Aggiorna UI
-            self.status_label.setText("Scansione in corso...")
-            self.progress_bar.setValue(0)
-            self.start_scan_button.setEnabled(False)
-            self.stop_scan_button.setEnabled(True)
-
-            # Emetti segnale
-            self.scan_started.emit({
-                "scan_id": self.scan_id,
-                "timestamp": timestamp
-            })
-
-            logger.info(f"Scansione avviata: {self.scan_id}")
-
-        except Exception as e:
-            logger.error(f"Errore nell'avvio della scansione: {e}")
-            import traceback
-            logger.error(f"Traceback completo: {traceback.format_exc()}")
-            QMessageBox.critical(
-                self,
-                "Errore",
-                f"Si è verificato un errore nell'avvio della scansione:\n{str(e)}"
-            )
+        # Avvia la scansione sincronizzata
+        self._start_synchronized_scan()
 
     def _stop_scan(self):
         """Ferma la scansione in corso."""
@@ -973,3 +904,199 @@ class ScanView(QWidget):
         except Exception as e:
             logger.error(f"Errore nella verifica dello stato dello streaming: {e}")
             return False
+
+    def _sync_pattern_projection(self, pattern_index):
+        """
+        Sincronizza la proiezione di un pattern specifico con il server.
+
+        Args:
+            pattern_index: Indice del pattern da proiettare
+
+        Returns:
+            Dizionario con il risultato dell'operazione o None in caso di errore
+        """
+        if not self.selected_scanner or not self.scanner_controller:
+            logger.error("Scanner non selezionato o controller non disponibile")
+            return None
+
+        try:
+            logger.info(f"Richiesta sincronizzazione pattern {pattern_index}")
+
+            # Invia comando al server
+            command_success = self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "SYNC_PATTERN",
+                {
+                    "pattern_index": pattern_index,
+                    "timestamp": time.time()
+                }
+            )
+
+            if not command_success:
+                logger.error(f"Errore nell'invio del comando SYNC_PATTERN per pattern {pattern_index}")
+                return None
+
+            # Attendi risposta
+            response = self.scanner_controller.wait_for_response(
+                self.selected_scanner.device_id,
+                "SYNC_PATTERN",
+                timeout=1.0  # Timeout più breve per non rallentare la scansione
+            )
+
+            if not response or response.get("status") != "ok":
+                error_msg = "Errore risposta server" if not response else response.get("message", "Errore sconosciuto")
+                logger.error(f"Risposta SYNC_PATTERN non valida: {error_msg}")
+                return None
+
+            logger.info(f"Pattern {pattern_index} sincronizzato con successo")
+            return response
+
+        except Exception as e:
+            logger.error(f"Errore nella sincronizzazione del pattern {pattern_index}: {e}")
+            return None
+
+    def _start_synchronized_scan(self):
+        """
+        Avvia una scansione completamente sincronizzata con il proiettore.
+        Questa versione garantisce che ogni pattern sia proiettato prima dell'acquisizione.
+        """
+        if self.is_scanning:
+            logger.info("Scansione già in corso, nessuna azione necessaria")
+            return
+
+        # Verifica connessione al receiver
+        if not self._connect_to_stream():
+            QMessageBox.warning(
+                self,
+                "Stream non disponibile",
+                "Lo stream delle camere non è disponibile.\n"
+                "Impossibile avviare la scansione sincronizzata."
+            )
+            return
+
+        # Genera ID scansione
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.scan_id = f"SyncScan_{timestamp}"
+
+        # Prepara il processore
+        self.scan_processor.start_scan(
+            scan_id=self.scan_id,
+            num_patterns=24,  # Numero standard di pattern
+            pattern_type="PROGRESSIVE"  # Tipo di pattern standard
+        )
+
+        # Imposta stato
+        self.is_scanning = True
+
+        # Aggiorna UI
+        self.status_label.setText("Inizializzazione scansione sincronizzata...")
+        self.progress_bar.setValue(0)
+        self.start_scan_button.setEnabled(False)
+        self.stop_scan_button.setEnabled(True)
+
+        # Avvia thread di scansione
+        scan_thread = threading.Thread(target=self._synchronized_scan_loop)
+        scan_thread.daemon = True
+        scan_thread.start()
+
+        logger.info(f"Scansione sincronizzata avviata: {self.scan_id}")
+
+    def _synchronized_scan_loop(self):
+        """Loop principale per la scansione sincronizzata."""
+        try:
+            # Parametri scansione
+            num_patterns = 24  # Inclusi white/black
+            pattern_wait_time = 0.1  # 100ms di attesa dopo la conferma di proiezione
+
+            # Evita di usare classi non definite - usa Signals per comunicare con l'UI thread
+            self._update_ui_status("Scansione sincronizzata in corso...")
+
+            # Loop principale pattern
+            for pattern_index in range(num_patterns):
+                # Verifica se la scansione è stata interrotta
+                if not self.is_scanning:
+                    logger.info("Scansione sincronizzata interrotta")
+                    break
+
+                # Calcola progresso
+                progress = (pattern_index / num_patterns) * 100
+
+                # Aggiorna UI da thread principale usando il metodo sicuro
+                self._update_ui_progress(int(progress))
+
+                pattern_name = f"Pattern {pattern_index}"
+                if pattern_index == 0:
+                    pattern_name = "White"
+                elif pattern_index == 1:
+                    pattern_name = "Black"
+
+                self._update_ui_status(f"Acquisizione {pattern_name} ({pattern_index + 1}/{num_patterns})...")
+
+                # Sincronizza proiezione
+                sync_result = self._sync_pattern_projection(pattern_index)
+
+                if not sync_result:
+                    logger.error(f"Errore nella sincronizzazione del pattern {pattern_index}")
+                    continue
+
+                # Attesa per stabilizzazione pattern
+                time.sleep(pattern_wait_time)
+
+                # Acquisizione frame (i frame arriveranno automaticamente via callback)
+                logger.info(f"Attesa acquisizione frame per pattern {pattern_index}")
+
+                # Breve attesa per assicurarsi che i frame siano ricevuti
+                time.sleep(0.2)
+
+            # Scansione completata
+            if self.is_scanning:
+                # Aggiorna UI
+                self._update_ui_progress(100)
+                self._update_ui_status("Scansione sincronizzata completata")
+
+                # Ferma scansione
+                self._stop_scan()
+
+        except Exception as e:
+            logger.error(f"Errore nel loop di scansione sincronizzata: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+            # Ferma scansione in caso di errore
+            if self.is_scanning:
+                self._stop_scan()
+
+                # Mostra errore usando metodo thread-safe
+                self._show_error_message("Errore",
+                                         f"Si è verificato un errore durante la scansione sincronizzata:\n{str(e)}")
+
+    def _update_ui_progress(self, value):
+        """Aggiorna la barra di progresso in modo thread-safe."""
+        if not self.progress_bar:
+            return
+
+        # Aggiorna l'UI nel thread principale
+        QMetaObject.invokeMethod(
+            self.progress_bar,
+            "setValue",
+            Qt.QueuedConnection,
+            Q_ARG(int, value)
+        )
+
+    def _update_ui_status(self, message):
+        """Aggiorna l'etichetta di stato in modo thread-safe."""
+        if not self.status_label:
+            return
+
+        # Aggiorna l'UI nel thread principale
+        QMetaObject.invokeMethod(
+            self.status_label,
+            "setText",
+            Qt.QueuedConnection,
+            Q_ARG(str, message)
+        )
+
+    def _show_error_message(self, title, message):
+        """Mostra un messaggio di errore in modo thread-safe."""
+        # Usa QTimer.singleShot per eseguire nel thread UI
+        QTimer.singleShot(0, lambda: QMessageBox.critical(self, title, message))
