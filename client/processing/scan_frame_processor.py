@@ -11,6 +11,7 @@ import os
 import time
 import logging
 import cv2
+import threading
 import numpy as np
 from pathlib import Path
 from datetime import datetime
@@ -116,7 +117,7 @@ class ScanFrameProcessor:
     def process_frame(self, camera_index, frame, frame_info):
         """
         Elabora un frame di scansione in tempo reale.
-        Versione completamente riscritta per maggiore affidabilità.
+        Versione ottimizzata con salvataggio sia in memoria che su disco.
 
         Args:
             camera_index: Indice della camera (0=sinistra, 1=destra)
@@ -177,7 +178,7 @@ class ScanFrameProcessor:
             if pattern_index not in self.pattern_frames:
                 self.pattern_frames[pattern_index] = {}
 
-            # Memorizza frame in RAM
+            # PRIORITÀ 1: Salva in memoria (per elaborazione in tempo reale)
             self.pattern_frames[pattern_index][camera_index] = frame.copy()
 
             # Gestisci frame di riferimento
@@ -188,58 +189,46 @@ class ScanFrameProcessor:
                 self.black_frames[camera_index] = frame.copy()
                 logger.info(f"Memorizzato frame di riferimento BLACK per camera {camera_index}")
 
-            # Prepara percorso di salvataggio ASSOLUTO
-            scan_dir = Path(self.output_dir) / self.current_scan_id
-            scan_dir.mkdir(parents=True, exist_ok=True)
-
-            # In questa versione, salviamo SEMPRE i frame, non solo periodicamente
-            # Salvataggio SINCRONO per garantire che i file siano scritti
+            # PRIORITÀ 2: Salva su disco per backup e analisi successiva
             try:
                 # Prepara percorso
+                scan_dir = Path(self.output_dir) / self.current_scan_id
+                scan_dir.mkdir(parents=True, exist_ok=True)
+
                 camera_dir = scan_dir / ("left" if camera_index == 0 else "right")
                 camera_dir.mkdir(parents=True, exist_ok=True)
 
                 # Componi percorso file
                 output_path = camera_dir / f"{pattern_index:04d}_{pattern_name}.png"
 
-                # Salva con OpenCV
-                success = cv2.imwrite(str(output_path), frame)
+                # Avvia un thread separato per il salvataggio su disco
+                # così da non bloccare l'elaborazione in tempo reale
+                def save_frame_thread(frame, path):
+                    try:
+                        # Salva con OpenCV
+                        success = cv2.imwrite(str(path), frame)
+                        if not success:
+                            logger.error(f"ScanFrameProcessor: cv2.imwrite ha fallito per {path}")
+                            # Fallback a PIL
+                            try:
+                                from PIL import Image
+                                img = Image.fromarray(frame)
+                                img.save(str(path))
+                                logger.info(f"ScanFrameProcessor: salvataggio con PIL riuscito: {path}")
+                            except Exception as e2:
+                                logger.error(f"ScanFrameProcessor: anche PIL ha fallito: {e2}")
+                    except Exception as e:
+                        logger.error(f"ScanFrameProcessor: errore nel salvataggio del frame: {e}")
 
-                if not success:
-                    logger.error(f"ScanFrameProcessor: cv2.imwrite ha fallito per {output_path}")
-                    raise RuntimeError("cv2.imwrite ha restituito False")
-
-                # Verifica esistenza file
-                if not os.path.exists(str(output_path)):
-                    logger.error(f"ScanFrameProcessor: file {output_path} non esiste dopo cv2.imwrite!")
-                    raise FileNotFoundError(f"File {output_path} non trovato dopo il salvataggio")
-
-                file_size = os.path.getsize(str(output_path))
-                logger.info(f"ScanFrameProcessor: frame {pattern_index} salvato: {output_path} ({file_size} bytes)")
-
-                # Salvataggio riuscito, aggiorna stato
-                self._last_saved_pattern_index = pattern_index
+                # Avvia thread di salvataggio (asincrono)
+                import threading
+                save_thread = threading.Thread(target=save_frame_thread, args=(frame.copy(), output_path))
+                save_thread.daemon = True
+                save_thread.start()
 
             except Exception as e:
-                logger.error(f"ScanFrameProcessor: errore nel salvataggio primario: {e}")
-
-                # Fallback 1: PIL
-                try:
-                    from PIL import Image
-                    img = Image.fromarray(frame)
-                    img.save(str(output_path))
-                    logger.info(f"ScanFrameProcessor: salvataggio con PIL riuscito: {output_path}")
-                except Exception as e2:
-                    logger.error(f"ScanFrameProcessor: anche PIL ha fallito: {e2}")
-
-                    # Fallback 2: NumPy binario
-                    try:
-                        npy_path = str(output_path).replace('.png', '.npy')
-                        np.save(npy_path, frame)
-                        logger.info(f"ScanFrameProcessor: salvataggio numpy riuscito: {npy_path}")
-                    except Exception as e3:
-                        logger.error(f"ScanFrameProcessor: tutti i metodi di salvataggio hanno fallito: {e3}")
-                        # Non solleviamo l'eccezione per non interrompere il flusso
+                logger.error(f"ScanFrameProcessor: errore nella preparazione del salvataggio su disco: {e}")
+                # Non bloccare il flusso per errori di salvataggio
 
             # Notifica callback
             if self._frame_callback:
@@ -256,8 +245,17 @@ class ScanFrameProcessor:
                 except Exception as e:
                     logger.error(f"Errore nella progress_callback: {e}")
 
-            # Log di completamento
-            logger.info(f"ScanFrameProcessor: frame {pattern_index} elaborato completamente")
+            # IMPORTANTE: Segnala al thread di elaborazione che è disponibile un nuovo frame
+            # Verifica se abbiamo una coppia completa (camera 0 e 1) per questo pattern
+            is_pair_complete = (pattern_index in self.pattern_frames and
+                                0 in self.pattern_frames[pattern_index] and
+                                1 in self.pattern_frames[pattern_index])
+
+            # Se la coppia è completa, segnala al thread di elaborazione
+            if is_pair_complete and hasattr(self, '_processing_event'):
+                self._processing_event.set()
+                logger.debug(f"Coppia completa per pattern {pattern_index}, segnalato al thread di elaborazione")
+
             return True
 
         except Exception as e:
@@ -266,162 +264,266 @@ class ScanFrameProcessor:
             logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
+    def _ensure_calibration(self):
+        """
+        Assicura che i dati di calibrazione siano disponibili per la triangolazione.
+        Usa il ScanProcessor per caricare o creare i dati necessari.
+
+        Returns:
+            Tuple (calib_data, P1, P2, Q, map_x_l, map_y_l, map_x_r, map_y_r) o None in caso di errore
+        """
+        try:
+            # Importa il processore di triangolazione
+            from client.processing.triangulation import ScanProcessor, PatternType
+
+            # Se abbiamo già i dati di calibrazione in memoria, li riutilizziamo
+            if hasattr(self, '_calibration_data') and self._calibration_data is not None:
+                return self._calibration_data
+
+            # Altrimenti, crea un processore temporaneo per caricare la calibrazione
+            processor = ScanProcessor(self.output_dir)
+
+            # Carica la calibrazione da file o crea una calibrazione di default
+            calib_file = Path(self.output_dir) / "calibration.npz"
+
+            if calib_file.exists():
+                # Carica da file
+                processor.calib_data = np.load(calib_file)
+                logger.info("Dati di calibrazione caricati da file locale")
+            else:
+                # Tenta di caricare dal server se possibile
+                try:
+                    # Se l'applicazione ha un scanner_controller attivo, usa quello
+                    # Questa è una supposizione, potrebbe essere necessario passarlo come parametro
+                    from client.controllers.scanner_controller import ScannerController
+                    scanner_controller = ScannerController()
+
+                    if scanner_controller and scanner_controller.selected_scanner:
+                        logger.info("Tentativo di caricamento calibrazione dal server")
+                        device_id = scanner_controller.selected_scanner.device_id
+                        connection_manager = scanner_controller._connection_manager
+
+                        success = processor._load_or_download_calibration(connection_manager, device_id)
+                        if success:
+                            logger.info("Calibrazione scaricata dal server con successo")
+                        else:
+                            logger.warning("Impossibile scaricare calibrazione, uso valori di default")
+                            processor._create_default_calibration()
+                    else:
+                        logger.warning("Scanner non selezionato, creazione calibrazione di default")
+                        processor._create_default_calibration()
+                except Exception as e:
+                    logger.error(f"Errore nel caricamento della calibrazione: {e}")
+                    logger.warning("Creazione calibrazione di default")
+                    processor._create_default_calibration()
+
+            # Genera le mappe di rettificazione se necessario
+            if processor.map_x_l is None:
+                processor._generate_rectification_maps()
+                logger.info("Mappe di rettificazione generate")
+
+            # Memorizza i dati per uso futuro
+            self._calibration_data = (
+                processor.calib_data,
+                processor.Q,
+                processor.map_x_l,
+                processor.map_y_l,
+                processor.map_x_r,
+                processor.map_y_r
+            )
+
+            return self._calibration_data
+
+        except Exception as e:
+            logger.error(f"Errore nell'inizializzazione della calibrazione: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
     def _start_realtime_processing(self):
         """
         Avvia l'elaborazione in tempo reale dei frame ricevuti.
-        Esegue la triangolazione progressiva man mano che i frame vengono ricevuti.
+        Versione ottimizzata con elaborazione diretta in memoria.
         """
         try:
-            logger.info("Avvio elaborazione in tempo reale")
+            logger.info("Avvio elaborazione in tempo reale ottimizzata")
+
+            # Importazione delle librerie necessarie
+            import threading
+            import queue
+            from client.processing.triangulation import ScanProcessor, PatternType
 
             # Inizializza le strutture dati per l'elaborazione
             self._realtime_pointcloud = None
-            self._realtime_processing_thread = None
             self._pointcloud_lock = threading.Lock()
+            self._frame_queue = queue.Queue(maxsize=100)  # Coda per comunicazione tra thread
+            self._processing_event = threading.Event()  # Per segnalare che è disponibile un set completo
 
             # Flag per tracciare lo stato di elaborazione realtime
             self._realtime_processing_active = True
 
-            # Avvia un thread per l'elaborazione in background
-            import threading
+            # Variabili per tenere traccia dello stato dell'elaborazione
+            self._last_processed_pattern = -1
+            self._min_patterns_for_update = 4  # Richiede almeno 4 pattern per un aggiornamento (2 white/black + 2 pattern)
 
-            def realtime_processing_thread():
+            # Crea un oggetto ScanProcessor già configurato
+            processor = ScanProcessor(self.output_dir)
+
+            # Configura le callback
+            def progress_callback(progress, message):
+                logger.debug(f"Elaborazione in tempo reale: {progress}%, {message}")
+                if self._progress_callback:
+                    self._progress_callback({
+                        "progress": progress,
+                        "message": message,
+                        "state": "TRIANGULATING",
+                        "frames_total": sum(self.frame_counters.values())
+                    })
+
+            def completion_callback(success, message, result):
+                if not success:
+                    logger.error(f"Errore nella triangolazione: {message}")
+                    return
+
+                logger.info(f"Aggiornamento nuvola di punti: {len(result) if result is not None else 0} punti")
+                if success and result is not None:
+                    with self._pointcloud_lock:
+                        self._realtime_pointcloud = result
+                        # Notifica nuova nuvola disponibile
+                        if hasattr(self, "_frame_callback") and self._frame_callback:
+                            try:
+                                self._frame_callback(-1, -1, {
+                                    "type": "pointcloud_update",
+                                    "pointcloud": result,
+                                    "num_points": len(result),
+                                    "timestamp": time.time()
+                                })
+                            except Exception as e:
+                                logger.error(f"Errore nella callback pointcloud: {e}")
+
+            processor.set_callbacks(progress_callback, completion_callback)
+
+            # Thread per l'elaborazione che consuma dalla coda
+            def processing_thread():
+                logger.info("Thread di elaborazione avviato")
+
                 try:
-                    # Importa il processore di triangolazione
-                    from client.processing.triangulation import ScanProcessor, PatternType
-
-                    # Inizializza il processore
-                    processor = ScanProcessor(self.output_dir)
-
-                    # Configura le callback
-                    def progress_callback(progress, message):
-                        logger.debug(f"Elaborazione in tempo reale: {progress}%, {message}")
-                        if self._progress_callback:
-                            self._progress_callback({
-                                "progress": progress,
-                                "message": message,
-                                "state": "TRIANGULATING",
-                                "frames_total": sum(self.frame_counters.values())
-                            })
-
-                    def completion_callback(success, message, result):
-                        logger.info(f"Aggiornamento nuvola di punti: {message}")
-                        if success and result is not None:
-                            with self._pointcloud_lock:
-                                self._realtime_pointcloud = result
-                                # Notifica nuova nuvola disponibile
-                                if hasattr(self, "_frame_callback") and self._frame_callback:
-                                    try:
-                                        self._frame_callback(-1, -1, {
-                                            "type": "pointcloud_update",
-                                            "pointcloud": result,
-                                            "num_points": len(result),
-                                            "timestamp": time.time()
-                                        })
-                                    except Exception as e:
-                                        logger.error(f"Errore nella callback pointcloud: {e}")
-
-                    processor.set_callbacks(progress_callback, completion_callback)
-
-                    # Crea una directory temporanea per l'elaborazione
-                    import tempfile
-                    temp_dir = tempfile.mkdtemp(prefix="unlook_realtime_")
-                    temp_path = Path(temp_dir)
-
-                    # Loop di elaborazione con controllo più frequente
-                    last_processed_pattern = -1
-                    min_patterns_for_update = 4  # Richiede almeno 4 pattern per un aggiornamento (2 white/black + 2 pattern)
-
-                    update_interval = 2  # Aggiorna ogni 2 nuovi pattern
-
                     while self.is_scanning and self._realtime_processing_active:
                         try:
-                            # Ottieni tutti i pattern disponibili
+                            # Attende l'evento che segnala disponibilità di un set completo
+                            if not self._processing_event.wait(timeout=1.0):
+                                continue
+
+                            # Reset dell'evento
+                            self._processing_event.clear()
+
+                            # Controllo delle condizioni per l'elaborazione
                             pattern_indices = sorted(self.pattern_frames.keys())
 
-                            # Verifica se abbiamo white+black+almeno 2 pattern
-                            white_black_present = False
-                            if 0 in pattern_indices and 1 in pattern_indices:
-                                white_black_present = (0 in self.pattern_frames and
-                                                       0 in self.pattern_frames[0] and
-                                                       1 in self.pattern_frames[0] and
-                                                       1 in self.pattern_frames and
-                                                       0 in self.pattern_frames[1] and
-                                                       1 in self.pattern_frames[1])
+                            # Verifica se abbiamo i frame di riferimento (white e black)
+                            white_black_present = (
+                                    0 in pattern_indices and 1 in pattern_indices and
+                                    0 in self.pattern_frames and 1 in self.pattern_frames and
+                                    0 in self.pattern_frames[0] and 1 in self.pattern_frames[0] and
+                                    0 in self.pattern_frames[1] and 1 in self.pattern_frames[1]
+                            )
 
-                            # Se abbiamo un numero sufficiente di nuovi pattern e i frame di riferimento
-                            if (pattern_indices and
-                                    max(pattern_indices) >= min_patterns_for_update and
-                                    white_black_present and
-                                    max(pattern_indices) > last_processed_pattern and
-                                    (max(pattern_indices) - last_processed_pattern >= update_interval or
-                                     last_processed_pattern < min_patterns_for_update)):
+                            # Verifica se abbiamo abbastanza nuovi pattern
+                            enough_new_patterns = (
+                                    len(pattern_indices) >= self._min_patterns_for_update and
+                                    max(pattern_indices) > self._last_processed_pattern and
+                                    (max(pattern_indices) - self._last_processed_pattern >= 2 or
+                                     self._last_processed_pattern < self._min_patterns_for_update)
+                            )
 
+                            if white_black_present and enough_new_patterns:
                                 logger.info(f"Avvio elaborazione incrementale con {len(pattern_indices)} pattern")
 
-                                # Prepara i dati per l'elaborazione
-                                # Prima elimina eventuali file precedenti dalla directory temporanea
-                                for f in os.listdir(temp_dir):
-                                    try:
-                                        os.remove(os.path.join(temp_dir, f))
-                                    except:
-                                        pass
+                                # Utilizzo diretto dei frame in memoria
+                                # Estrazione white e black frames
+                                white_left = self.pattern_frames[0][0].copy()
+                                white_right = self.pattern_frames[0][1].copy()
+                                black_left = self.pattern_frames[1][0].copy()
+                                black_right = self.pattern_frames[1][1].copy()
 
-                                # Ricrea le sottodirectory
-                                left_dir = temp_path / "left"
-                                right_dir = temp_path / "right"
-                                left_dir.mkdir(exist_ok=True)
-                                right_dir.mkdir(exist_ok=True)
+                                # Calcolo maschere di ombra
+                                shadow_mask_left = np.zeros_like(black_left, dtype=np.uint8)
+                                shadow_mask_right = np.zeros_like(black_right, dtype=np.uint8)
+                                threshold = 40  # Soglia per rilevazione ombre
+                                shadow_mask_left[white_left > black_left + threshold] = 1
+                                shadow_mask_right[white_right > black_right + threshold] = 1
 
-                                # Salva i frame di riferimento
-                                if 0 in self.pattern_frames and 1 in self.pattern_frames:
-                                    # Salva white frames (pattern 0)
-                                    if 0 in self.pattern_frames[0] and 1 in self.pattern_frames[0]:
-                                        cv2.imwrite(str(left_dir / "0000_white.png"), self.pattern_frames[0][0])
-                                        cv2.imwrite(str(right_dir / "0000_white.png"), self.pattern_frames[0][1])
-
-                                    # Salva black frames (pattern 1)
-                                    if 0 in self.pattern_frames[1] and 1 in self.pattern_frames[1]:
-                                        cv2.imwrite(str(left_dir / "0001_black.png"), self.pattern_frames[1][0])
-                                        cv2.imwrite(str(right_dir / "0001_black.png"), self.pattern_frames[1][1])
-
-                                # Salva pattern frames (da pattern 2 in poi)
-                                num_patterns_saved = 0
+                                # Raccolta dei pattern per l'elaborazione (escludendo white/black)
+                                pattern_pairs = []
                                 for idx in pattern_indices:
-                                    if idx < 2:  # Salta white e black che abbiamo già salvato
+                                    if idx < 2:  # Salta white e black
                                         continue
 
                                     if idx in self.pattern_frames and 0 in self.pattern_frames[idx] and 1 in \
                                             self.pattern_frames[idx]:
-                                        # Ottieni i frame
-                                        left_frame = self.pattern_frames[idx][0]
-                                        right_frame = self.pattern_frames[idx][1]
+                                        left_frame = self.pattern_frames[idx][0].copy()
+                                        right_frame = self.pattern_frames[idx][1].copy()
+                                        pattern_pairs.append((idx, left_frame, right_frame))
 
-                                        # Determina il nome del pattern
-                                        pattern_name = self.pattern_info.get(idx, {}).get("name", f"pattern_{idx}")
+                                # Ordina per indice pattern
+                                pattern_pairs.sort(key=lambda x: x[0])
 
-                                        # Salva i frame temporaneamente
-                                        cv2.imwrite(str(left_dir / f"{idx:04d}_{pattern_name}.png"), left_frame)
-                                        cv2.imwrite(str(right_dir / f"{idx:04d}_{pattern_name}.png"), right_frame)
-                                        num_patterns_saved += 1
+                                # Elabora direttamente in memoria
+                                if len(pattern_pairs) >= 2:  # Almeno 2 pattern oltre a white/black
+                                    # Crea mappe di disparità incrementali
+                                    height, width = white_left.shape[:2]
+                                    disparity_map = np.zeros((height, width), dtype=np.float32)
+                                    confidence_map = np.zeros((height, width), dtype=np.float32)
 
-                                # Aggiorna l'ultimo pattern elaborato
-                                last_processed_pattern = max(pattern_indices)
+                                    # Elabora direttamente i pattern
+                                    for i, (pattern_idx, left, right) in enumerate(pattern_pairs):
+                                        pattern_weight = 2 ** (i // 2)  # Peso basato sulla posizione
 
-                                # Se abbiamo salvato abbastanza pattern, elabora
-                                if num_patterns_saved >= 2:  # Almeno 2 pattern oltre a white/black
-                                    logger.info(f"Elaborazione di {num_patterns_saved} pattern...")
+                                        # Aggiorna la mappa di disparità con questo pattern
+                                        self._update_disparity_from_pattern(
+                                            left, right,
+                                            shadow_mask_left, shadow_mask_right,
+                                            disparity_map, confidence_map,
+                                            pattern_weight
+                                        )
 
-                                    # Carica e elabora i dati
-                                    processor.load_local_scan(temp_dir)
+                                    # Calcola la mappa di disparità finale
+                                    valid_indices = confidence_map > 0
+                                    disparity_map_final = np.zeros_like(disparity_map)
+                                    disparity_map_final[valid_indices] = disparity_map[valid_indices] / confidence_map[
+                                        valid_indices]
 
-                                    # Avvia elaborazione con flag per elaborazione incrementale
-                                    processor.process_scan(use_threading=False, incremental=True)
+                                    # Filtro mediano per ridurre il rumore
+                                    kernel_size = 3
+                                    disparity_map_final = cv2.medianBlur(disparity_map_final.astype(np.float32),
+                                                                         kernel_size)
 
-                                    logger.info(f"Elaborazione incrementale completata")
+                                    # Riproiezione in 3D (se available)
+                                    if hasattr(processor, '_reproject_to_3d_incremental'):
+                                        # Utilizza il metodo diretto di triangolazione
+                                        if processor.calib_data is None:
+                                            # Tenta di caricare la calibrazione dal server o da file
+                                            try:
+                                                processor._load_or_download_calibration(None, None)
+                                            except:
+                                                # Usa calibrazione di default
+                                                processor._create_default_calibration()
+                                                processor._generate_rectification_maps()
 
-                            # Pausa per ridurre carico CPU
-                            time.sleep(0.5)
+                                        # Esegue la riproiezione 3D
+                                        pointcloud = processor._reproject_to_3d_incremental(disparity_map_final,
+                                                                                            shadow_mask_left)
+
+                                        # Aggiorna la nuvola di punti
+                                        if pointcloud is not None and len(pointcloud) > 100:
+                                            completion_callback(True, f"Nuvola aggiornata con {len(pointcloud)} punti",
+                                                                pointcloud)
+
+                                    self._last_processed_pattern = max(pattern_indices)
+                                    logger.info(
+                                        f"Elaborazione incrementale completata, ultimo pattern: {self._last_processed_pattern}")
+
+                            # Ritardo per non sovraccaricare la CPU
+                            time.sleep(0.2)
 
                         except Exception as e:
                             logger.error(f"Errore nell'elaborazione in tempo reale: {e}")
@@ -429,31 +531,86 @@ class ScanFrameProcessor:
                             logger.error(f"Traceback: {traceback.format_exc()}")
                             time.sleep(1.0)  # Pausa più lunga in caso di errore
 
-                    # Pulizia
-                    try:
-                        import shutil
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                    except:
-                        pass
-
-                    logger.info("Thread di elaborazione in tempo reale terminato")
+                    logger.info("Thread di elaborazione in tempo reale terminato normalmente")
 
                 except Exception as e:
                     logger.error(f"Errore fatale nel thread di elaborazione in tempo reale: {e}")
                     import traceback
                     logger.error(f"Traceback: {traceback.format_exc()}")
 
-            # Avvia il thread
-            self._realtime_processing_thread = threading.Thread(target=realtime_processing_thread)
+            # Avvia il thread di elaborazione
+            self._realtime_processing_thread = threading.Thread(target=processing_thread)
             self._realtime_processing_thread.daemon = True
             self._realtime_processing_thread.start()
 
-            logger.info("Elaborazione in tempo reale avviata")
+            logger.info("Elaborazione in tempo reale ottimizzata avviata")
 
         except Exception as e:
             logger.error(f"Errore nell'avvio dell'elaborazione in tempo reale: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
+
+    def _update_disparity_from_pattern(self, pattern_l, pattern_r, shadow_mask_l, shadow_mask_r,
+                                       disparity_map, confidence_map, pattern_weight=1.0):
+        """
+        Aggiorna la mappa di disparità basandosi su una coppia di pattern.
+        Versione ottimizzata per l'elaborazione in-memory con NumPy.
+
+        Args:
+            pattern_l: Pattern della camera sinistra (array NumPy)
+            pattern_r: Pattern della camera destra (array NumPy)
+            shadow_mask_l: Maschera di ombra per la camera sinistra
+            shadow_mask_r: Maschera di ombra per la camera destra
+            disparity_map: Mappa di disparità da aggiornare
+            confidence_map: Mappa di confidenza da aggiornare
+            pattern_weight: Peso del pattern corrente
+        """
+        height, width = pattern_l.shape[:2]
+
+        # Ottimizzazione: pre-calcola le aree valide per ridurre il numero di cicli
+        valid_mask_l = shadow_mask_l > 0
+        valid_rows, valid_cols = np.where(valid_mask_l)
+
+        # Per ogni pixel valido nella maschera di ombra sinistra
+        for idx in range(len(valid_rows)):
+            y, x = valid_rows[idx], valid_cols[idx]
+
+            # Valore del pixel nel pattern sinistro
+            val_l = pattern_l[y, x]
+
+            # Range di ricerca (cerca solo a sinistra, con range limitato)
+            min_x = max(0, x - 200)  # Limita ricerca a 200 pixel a sinistra
+
+            best_match_x = -1
+            best_match_diff = 255  # Differenza massima possibile
+
+            # Ottimizzazione: utilizza vettorizzazione NumPy per la ricerca
+            # Estrai il segmento di riga da confrontare
+            row_segment = pattern_r[y, min_x:x]
+            row_mask = shadow_mask_r[y, min_x:x] > 0
+
+            if np.any(row_mask):  # Verifica se ci sono pixel validi nella maschera
+                # Calcola la differenza assoluta vettorizzata
+                diffs = np.abs(row_segment - val_l).astype(np.float32)
+
+                # Applica la maschera (invalida i pixel in ombra assegnando un valore alto)
+                diffs[~row_mask] = 255
+
+                # Trova il minimo
+                min_diff_idx = np.argmin(diffs)
+                best_match_diff = diffs[min_diff_idx]
+
+                # Calcola l'indice nel sistema di coordinate originale
+                if best_match_diff < 50:  # Soglia per una buona corrispondenza
+                    best_match_x = min_x + min_diff_idx
+
+            # Se abbiamo trovato una buona corrispondenza, aggiorna la mappa di disparità
+            if best_match_x >= 0:
+                disparity = x - best_match_x
+
+                # Aggiorna disparity e confidence maps con la contribuzione pesata
+                disparity_map[y, x] += disparity * pattern_weight
+                confidence_map[y, x] += pattern_weight
 
     def compute_shadow_mask(self, camera_index):
         """
@@ -484,6 +641,72 @@ class ScanFrameProcessor:
             logger.error(f"Errore nel calcolo della maschera di ombra: {e}")
             return None
 
+    def _reproject_3d_pointcloud(self, disparity_map, mask):
+        """
+        Riproietta una mappa di disparità in una nuvola di punti 3D.
+        Versione ottimizzata che opera direttamente in memoria.
+
+        Args:
+            disparity_map: Mappa di disparità come array NumPy
+            mask: Maschera di validità (1 per pixel validi, 0 per pixel invalidi)
+
+        Returns:
+            Array NumPy di punti 3D o None in caso di errore
+        """
+        try:
+            # Assicura che la calibrazione sia disponibile
+            calibration = self._ensure_calibration()
+            if calibration is None:
+                logger.error("Impossibile ottenere i dati di calibrazione per la riproiezione")
+                return None
+
+            _, Q, _, _, _, _ = calibration
+
+            # Applica la maschera alla mappa di disparità
+            masked_disparity = disparity_map.copy()
+            masked_disparity[mask == 0] = 0
+
+            # Riproietta in 3D
+            points_3d = cv2.reprojectImageTo3D(masked_disparity, Q)
+
+            # Filtra punti non validi
+            valid_mask = (
+                    ~np.isnan(points_3d).any(axis=2) &
+                    ~np.isinf(points_3d).any(axis=2) &
+                    (mask > 0)
+            )
+
+            # Estrai punti validi
+            valid_points = points_3d[valid_mask]
+
+            # Limita i punti a un range ragionevole
+            max_range = 500  # mm
+            range_mask = (
+                    (np.abs(valid_points[:, 0]) < max_range) &
+                    (np.abs(valid_points[:, 1]) < max_range) &
+                    (np.abs(valid_points[:, 2]) < max_range)
+            )
+
+            filtered_points = valid_points[range_mask]
+
+            # Se abbiamo troppi punti, campiona per migliorare le prestazioni
+            if len(filtered_points) > 50000:
+                # Campionamento casuale
+                indices = np.random.choice(len(filtered_points), 50000, replace=False)
+                filtered_points = filtered_points[indices]
+            elif len(filtered_points) < 10:
+                # Troppo pochi punti, probabilmente un errore
+                logger.warning("Troppo pochi punti validi nella riproiezione")
+                return None
+
+            logger.info(f"Riproiezione completata: {len(filtered_points)} punti generati")
+            return filtered_points
+
+        except Exception as e:
+            logger.error(f"Errore nella riproiezione 3D: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
     def stop_scan(self):
         """
         Ferma la sessione di scansione corrente.
