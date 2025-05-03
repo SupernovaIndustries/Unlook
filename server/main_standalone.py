@@ -361,6 +361,11 @@ class UnLookServer:
                 logger.error("Nessuna camera trovata!")
                 return
 
+            # Assicurati che _jpeg_quality esista, altrimenti usa un valore predefinito
+            if not hasattr(self, '_jpeg_quality'):
+                self._jpeg_quality = 75  # Valore predefinito ragionevole
+                logger.info(f"Attributo _jpeg_quality non trovato, impostato a {self._jpeg_quality}")
+
             # Inizializza la camera sinistra
             if self.config["camera"]["left"]["enabled"] and len(cam_list) > 0:
                 left_camera = Picamera2(0)  # Camera 0
@@ -379,9 +384,11 @@ class UnLookServer:
                     logger.info("Camera left in modalità colore")
 
                 try:
+                    # Importa l'encoder
+                    from picamera2.encoders import JpegEncoder
+
                     # Configura encoder JPEG per streaming
                     encoder = JpegEncoder(q=self._jpeg_quality)
-
                     camera_config = left_camera.create_video_configuration(
                         main={"size": tuple(left_config["resolution"]),
                               "format": format_str},
@@ -390,10 +397,41 @@ class UnLookServer:
                     )
                     left_camera.configure(camera_config)
                     left_camera.start()
-
                     logger.info(f"Camera left inizializzata con encoder JPEG (qualità={self._jpeg_quality})")
+
+                    # Aggiunge la camera alla lista solo se l'inizializzazione ha successo
+                    self.cameras.append({
+                        "index": 0,
+                        "camera": left_camera,
+                        "name": "left",
+                        "mode": left_config.get("mode", "color")
+                    })
+                    logger.info(
+                        f"Camera left inizializzata: {left_config['resolution'][0]}x{left_config['resolution'][1]}@{left_config['framerate']}fps, formato={format_str}")
                 except Exception as e:
                     logger.error(f"Errore nell'inizializzazione della camera left: {e}")
+
+                    # Tentativo di fallback a configurazione senza encoder
+                    try:
+                        logger.info("Tentativo di inizializzazione camera left senza encoder JPEG")
+                        camera_config = left_camera.create_video_configuration(
+                            main={"size": tuple(left_config["resolution"]),
+                                  "format": format_str},
+                            controls={"FrameRate": left_config["framerate"]}
+                        )
+                        left_camera.configure(camera_config)
+                        left_camera.start()
+
+                        # Aggiunge la camera alla lista
+                        self.cameras.append({
+                            "index": 0,
+                            "camera": left_camera,
+                            "name": "left",
+                            "mode": left_config.get("mode", "color")
+                        })
+                        logger.info(f"Camera left inizializzata senza encoder JPEG (fallback)")
+                    except Exception as e2:
+                        logger.error(f"Fallback camera left fallito: {e2}")
 
             # Inizializza la camera destra
             if self.config["camera"]["right"]["enabled"] and len(cam_list) > 1:
@@ -413,13 +451,20 @@ class UnLookServer:
                     logger.info("Camera right in modalità colore")
 
                 try:
+                    # Importa l'encoder
+                    from picamera2.encoders import JpegEncoder
+
+                    # Configura encoder JPEG per streaming
+                    encoder = JpegEncoder(q=self._jpeg_quality)
                     camera_config = right_camera.create_video_configuration(
                         main={"size": tuple(right_config["resolution"]),
                               "format": format_str},
+                        encode={"output": encoder},
                         controls={"FrameRate": right_config["framerate"]}
                     )
                     right_camera.configure(camera_config)
                     right_camera.start()
+                    logger.info(f"Camera right inizializzata con encoder JPEG (qualità={self._jpeg_quality})")
 
                     # Aggiunge la camera alla lista solo se l'inizializzazione ha successo
                     self.cameras.append({
@@ -432,6 +477,28 @@ class UnLookServer:
                         f"Camera right inizializzata: {right_config['resolution'][0]}x{right_config['resolution'][1]}@{right_config['framerate']}fps, formato={format_str}")
                 except Exception as e:
                     logger.error(f"Errore nell'inizializzazione della camera right: {e}")
+
+                    # Tentativo di fallback a configurazione senza encoder
+                    try:
+                        logger.info("Tentativo di inizializzazione camera right senza encoder JPEG")
+                        camera_config = right_camera.create_video_configuration(
+                            main={"size": tuple(right_config["resolution"]),
+                                  "format": format_str},
+                            controls={"FrameRate": right_config["framerate"]}
+                        )
+                        right_camera.configure(camera_config)
+                        right_camera.start()
+
+                        # Aggiunge la camera alla lista
+                        self.cameras.append({
+                            "index": 1,
+                            "camera": right_camera,
+                            "name": "right",
+                            "mode": right_config.get("mode", "color")
+                        })
+                        logger.info(f"Camera right inizializzata senza encoder JPEG (fallback)")
+                    except Exception as e2:
+                        logger.error(f"Fallback camera right fallito: {e2}")
 
             logger.info(f"Camere inizializzate: {len(self.cameras)}/{len(cam_list)}")
 
