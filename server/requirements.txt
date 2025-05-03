@@ -4,6 +4,7 @@ numpy>=1.19.0
 picamera2>=0.3.9
 pillow>=8.0.0
 smbus2>=0.4
+libcamera>=0.0.5
 
 # Per l'elaborazione immagini
 opencv-python>=4.5.0

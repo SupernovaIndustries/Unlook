@@ -65,6 +65,10 @@ try:
     import zmq
     from picamera2 import Picamera2
 
+    # Importa anche il modulo encoders
+    import picamera2.encoders
+    from picamera2.encoders import JpegEncoder, Quality
+
     # Importazione di ScanManager per scansione 3D
     try:
         from server.scan_manager import ScanManager
@@ -78,9 +82,8 @@ try:
             ScanManager = None
 except ImportError as e:
     logger.error(f"Dipendenza mancante: {e}")
-    logger.error("Installa le dipendenze necessarie con: pip install pyzmq numpy picamera2 opencv-python")
+    logger.error("Installa le dipendenze necessarie con: pip install pyzmq numpy picamera2 opencv-python simplejpeg")
     sys.exit(1)
-
 
 def set_realtime_priority():
     """Imposta priorità real-time per il processo."""
@@ -376,24 +379,19 @@ class UnLookServer:
                     logger.info("Camera left in modalità colore")
 
                 try:
+                    # Configura encoder JPEG per streaming
+                    encoder = JpegEncoder(q=self._jpeg_quality)
+
                     camera_config = left_camera.create_video_configuration(
                         main={"size": tuple(left_config["resolution"]),
                               "format": format_str},
-                        encode={"output": picamera2.encoders.JpegEncoder(q=self._jpeg_quality, hardware=True)},
+                        encode={"output": encoder},
                         controls={"FrameRate": left_config["framerate"]}
                     )
                     left_camera.configure(camera_config)
                     left_camera.start()
 
-                    # Aggiunge la camera alla lista solo se l'inizializzazione ha successo
-                    self.cameras.append({
-                        "index": 0,
-                        "camera": left_camera,
-                        "name": "left",
-                        "mode": left_config.get("mode", "color")
-                    })
-                    logger.info(
-                        f"Camera left inizializzata: {left_config['resolution'][0]}x{left_config['resolution'][1]}@{left_config['framerate']}fps, formato={format_str}")
+                    logger.info(f"Camera left inizializzata con encoder JPEG (qualità={self._jpeg_quality})")
                 except Exception as e:
                     logger.error(f"Errore nell'inizializzazione della camera left: {e}")
 
@@ -1687,11 +1685,12 @@ class UnLookServer:
         # Usa encoder hardware se disponibile
         picamera2_encoder = None
         try:
-            from picamera2.encoders import JpegEncoder, Quality
-            # Crea encoder hardware
-            picamera2_encoder = JpegEncoder(q=quality)
+            # Crea encoder con configurazione ottimizzata per bassa latenza
+            picamera2_encoder = JpegEncoder(num_threads=2, q=quality)
             picamera2_encoder.start()
-        except:
+            logger.info(f"Encoder JPEG inizializzato con qualità={quality}")
+        except Exception as e:
+            logger.error(f"Errore nell'inizializzazione dell'encoder JPEG: {e}")
             picamera2_encoder = None
 
         # Loop ottimizzato per bassa latenza
