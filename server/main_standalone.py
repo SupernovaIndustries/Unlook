@@ -1561,189 +1561,335 @@ class UnLookServer:
 
     def _stream_camera(self, camera: "Picamera2", camera_index: int, mode: str = "color"):
         """
-        Funzione ottimizzata che gestisce lo streaming di una camera.
+        Funzione robusta che gestisce lo streaming di una camera con diagnostica avanzata
+        e recupero automatico dagli errori.
         """
         logger.info(f"Thread di streaming camera {camera_index} avviato, modalità={mode}")
 
+        # Verifica preliminare della camera
+        camera_healthy = False
+        retry_count = 0
+        max_retries = 5
+        camera_started = camera.started
+
+        # Statistiche e contatori
+        frame_count = 0
+        error_count = 0
+        skipped_frames = 0
+
+        # Diagnostica avanzata all'avvio
         try:
-            # Aumenta la priorità per rendere questo thread più reattivo
-            try:
-                import os
-                os.nice(-15)  # Priorità più alta (-20 è max, 19 è min)
-                logger.info(f"Priorità aumentata per thread di streaming camera {camera_index}")
-            except Exception as e:
-                logger.debug(f"Impossibile impostare priorità thread: {e}")
-
-            # Configurazioni ottimizzate per bassa latenza
-            quality = self._jpeg_quality
-            current_interval = self._frame_interval
-            min_interval = 1.0 / self.config["stream"].get("max_fps", 60)
-
-            # Configurazione avanzata del socket per ridurre latenza
-            try:
-                # Imposta un HWM molto basso per evitare accumulo di messaggi nel buffer
-                self.stream_socket.setsockopt(zmq.SNDHWM, 1)
-                # Modalità immediata (non blocca mai)
-                self.stream_socket.setsockopt(zmq.IMMEDIATE, 1)
-                logger.info(f"Socket di streaming configurato per bassa latenza")
-            except Exception as e:
-                logger.warning(f"Impossibile configurare socket per bassa latenza: {e}")
-
-            # Parametri di compressione JPEG ottimizzati
-            encode_params = [cv2.IMWRITE_JPEG_QUALITY, quality,
-                             cv2.IMWRITE_JPEG_OPTIMIZE, 1,
-                             cv2.IMWRITE_JPEG_PROGRESSIVE, 0]  # Disabilita JPEG progressivo per ridurre latenza
-
-            # Ottimizzazione per il controllo di flusso
-            last_stats_time = time.time()
-            frame_count = 0
-            next_frame_time = time.time()
-            skipped_frames = 0
-
-            # Loop principale ottimizzato
-            while self.state["streaming"] and self.running:
+            # Verifica che la camera sia effettivamente avviata
+            if not camera_started:
+                logger.warning(f"Camera {camera_index} non risulta avviata, tentativo di avvio")
                 try:
-                    # Controllo di flusso intelligente
-                    current_time = time.time()
+                    camera.start()
+                    time.sleep(0.2)  # Attesa stabilizzazione
+                    logger.info(f"Camera {camera_index} avviata con successo")
+                except Exception as start_err:
+                    logger.error(f"ERRORE CRITICO: Impossibile avviare camera {camera_index}: {start_err}")
+                    # Log dettagliato per diagnostica
+                    import traceback
+                    logger.error(f"Traceback avvio camera {camera_index}: {traceback.format_exc()}")
+                    return  # Terminazione immediata se impossibile avviare
 
-                    # Se siamo in ritardo più di 2 frame, saltiamo questo frame
-                    if current_time > next_frame_time + 2 * current_interval:
-                        skipped_frames += 1
-                        # Riallinea il next_frame_time
-                        next_frame_time = current_time + current_interval
-                        continue
+            # Verifica capacità di cattura preliminare
+            logger.info(f"Test preliminare acquisizione frame camera {camera_index}")
+            for i in range(max_retries):
+                try:
+                    # Tenta una cattura di prova con timeout breve usando thread separato
+                    test_frame = self._safe_capture_with_timeout(camera, timeout=0.5)
+                    if test_frame is not None and test_frame.size > 0:
+                        logger.info(f"Camera {camera_index} produce frame validi, dimensione={test_frame.shape}")
+                        camera_healthy = True
+                        break
+                    else:
+                        logger.warning(f"Camera {camera_index}: test cattura #{i + 1} ha prodotto frame vuoto")
+                        time.sleep(0.1 * (i + 1))  # Backoff esponenziale
+                except Exception as test_err:
+                    logger.warning(f"Camera {camera_index}: errore test #{i + 1}: {test_err}")
+                    time.sleep(0.1 * (i + 1))  # Backoff esponenziale
 
-                    # Attendi fino al prossimo frame programmato
-                    if current_time < next_frame_time:
-                        wait_time = next_frame_time - current_time
-                        if wait_time > 0.001:
-                            time.sleep(wait_time)
-                        continue
+            # Se dopo i test la camera non produce frame, tentativo di reset hardware
+            if not camera_healthy:
+                logger.error(
+                    f"PROBLEMA HARDWARE RILEVATO: Camera {camera_index} non produce frame dopo {max_retries} tentativi")
 
-                    # Calcola il prossimo tempo di acquisizione
-                    next_frame_time = current_time + current_interval
+                # Ultima spiaggia: riavvia completamente la camera
+                try:
+                    logger.info(f"Tentativo di reset totale camera {camera_index}")
+                    if camera.started:
+                        camera.stop()
+                        time.sleep(0.3)
 
-                    # Cattura il frame - CORRETTO: senza timeout che non è supportato
+                    # Ottieni configurazione attuale
+                    if camera_index == 0:
+                        cam_config = self.config["camera"]["left"]
+                    else:
+                        cam_config = self.config["camera"]["right"]
+
+                    # Riprova con risoluzione più bassa come fallback
+                    fallback_resolution = [640, 480]
+
+                    # Crea configurazione di fallback
+                    logger.info(f"Camera {camera_index}: tentativo fallback a risoluzione {fallback_resolution}")
+                    format_str = cam_config.get("format", "RGB888")
+                    if format_str == "GREY":
+                        format_str = "RGB888"  # Correggi formato non supportato
+
                     try:
-                        frame = camera.capture_array()  # Rimosso il parametro timeout
-                    except Exception as capture_err:
-                        logger.error(f"Errore nella cattura: {capture_err}")
-                        time.sleep(0.01)
-                        continue
+                        camera_config = camera.create_video_configuration(
+                            main={"size": tuple(fallback_resolution),
+                                  "format": format_str},
+                            controls={"FrameRate": cam_config.get("framerate", 30)}
+                        )
+                        camera.configure(camera_config)
+                        camera.start()
+                        time.sleep(0.5)  # Attesa più lunga per stabilizzazione
 
-                    if frame is None or frame.size == 0:
-                        logger.error(f"Frame vuoto dalla camera {camera_index}")
-                        time.sleep(0.005)
-                        continue
-
-                    # Conversione ottimizzata in base alla modalità
-                    try:
-                        if mode == "grayscale" and len(frame.shape) == 3:
-                            # Conversione più veloce a grayscale
-                            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-                        elif len(frame.shape) == 3 and frame.shape[2] == 4:  # RGBA
-                            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
-                        elif len(frame.shape) == 2 and mode == "color":
-                            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                    except Exception as conv_err:
-                        logger.error(f"Errore nella conversione del formato: {conv_err}")
-                        continue
-
-                    # Compressione JPEG ottimizzata
-                    try:
-                        success, encoded_data = cv2.imencode('.jpg', frame, encode_params)
-                    except Exception as enc_err:
-                        logger.error(f"Errore nell'encoding JPEG: {enc_err}")
-                        continue
-
-                    if not success or encoded_data is None:
-                        logger.error(f"Errore nella codifica JPEG, camera {camera_index}")
-                        continue
-
-                    # Header e invio ottimizzati per evitare copie superflue
-                    timestamp = time.time()  # Timestamp preciso
-                    header = {
-                        "camera": camera_index,
-                        "frame": frame_count,
-                        "timestamp": timestamp,
-                        "format": "jpeg",
-                        "resolution": [frame.shape[1], frame.shape[0]],
-                        "mode": mode,
-                        "seq": frame_count  # Aggiunto numero sequenziale per tracciare pacchetti persi
-                    }
-
-                    # Modalità di invio non bloccante per latenza ridotta
-                    try:
-                        # Usa NOBLOCK per non attendere che il client processi
-                        self.stream_socket.send_json(header, zmq.SNDMORE | zmq.NOBLOCK)
-                        self.stream_socket.send(encoded_data.tobytes(), copy=False, flags=zmq.NOBLOCK)
-                        frame_count += 1
-                        self._frame_count += 1
-                    except zmq.ZMQError as e:
-                        if e.errno == zmq.EAGAIN:
-                            # Socket pieno, salta questo frame
-                            skipped_frames += 1
-                            logger.debug(f"Frame saltato (socket pieno) - camera {camera_index}")
-                            continue
-                        logger.error(f"Errore ZMQ: {e}")
-                        continue
-
-                    # Reporting delle statistiche ottimizzato
-                    if frame_count % 100 == 0:
-                        current_time = time.time()
-                        elapsed = current_time - last_stats_time
-                        if elapsed > 0:
-                            current_fps = 100 / elapsed
-                            encode_size = len(encoded_data.tobytes()) / 1024
-                            logger.info(f"Camera {camera_index}: {current_fps:.1f} FPS, "
-                                        f"{encode_size:.1f} KB/frame, modalità: {mode}, "
-                                        f"frame saltati: {skipped_frames}")
-
-                            # Reset per il prossimo intervallo
-                            last_stats_time = current_time
-                            skipped_frames = 0
-
-                            # Regolazione dinamica dell'intervallo
-                            if self._dynamic_interval:
-                                # Aggiustamenti più aggressivi per mantenere bassa latenza
-                                if current_fps < self.config["stream"].get("min_fps", 15) * 0.8:
-                                    # FPS troppo basso, riduci intervallo
-                                    current_interval = max(min_interval, current_interval * 0.85)
-                                    logger.info(
-                                        f"Camera {camera_index}: FPS troppo basso, intervallo ridotto a {current_interval * 1000:.1f}ms")
-                                elif current_fps > self.config["stream"].get("max_fps", 30) * 1.2:
-                                    # FPS troppo alto, aumenta intervallo
-                                    current_interval = current_interval * 1.15
-                                    logger.info(
-                                        f"Camera {camera_index}: FPS troppo alto, intervallo aumentato a {current_interval * 1000:.1f}ms")
-
+                        # Test post-reset
+                        test_frame = self._safe_capture_with_timeout(camera, timeout=1.0)
+                        if test_frame is not None and test_frame.size > 0:
+                            logger.info(f"Camera {camera_index} recuperata con configurazione di fallback!")
+                            camera_healthy = True
+                        else:
+                            logger.error(f"Camera {camera_index}: reset fallito, impossibile acquisire frame")
+                            return  # Termina il thread se impossibile recuperare
+                    except Exception as reset_err:
+                        logger.error(f"Camera {camera_index}: reset fallito con errore: {reset_err}")
+                        return  # Termina il thread se impossibile recuperare
                 except Exception as e:
-                    logger.error(f"Errore nello streaming camera {camera_index}: {e}")
-                    time.sleep(0.1)  # Pausa più lunga in caso di errore
-                    next_frame_time = time.time() + current_interval
+                    logger.error(f"Camera {camera_index}: errore durante il tentativo di reset: {e}")
+                    return  # Termina il thread se impossibile recuperare
 
-        except Exception as e:
-            logger.error(f"Errore fatale nello streaming camera {camera_index}: {e}")
+            try:
+                # Aumenta la priorità per rendere questo thread più reattivo
+                try:
+                    import os
+                    os.nice(-15)  # Priorità più alta (-20 è max, 19 è min)
+                    logger.info(f"Priorità aumentata per thread di streaming camera {camera_index}")
+                except Exception as e:
+                    logger.debug(f"Impossibile impostare priorità thread: {e}")
+
+                # Configurazioni ottimizzate per bassa latenza
+                quality = self._jpeg_quality
+                current_interval = self._frame_interval
+                min_interval = 1.0 / self.config["stream"].get("max_fps", 60)
+
+                # Configurazione avanzata del socket per ridurre latenza
+                try:
+                    # Imposta un HWM molto basso per evitare accumulo di messaggi nel buffer
+                    self.stream_socket.setsockopt(zmq.SNDHWM, 1)
+                    # Modalità immediata (non blocca mai)
+                    self.stream_socket.setsockopt(zmq.IMMEDIATE, 1)
+                    logger.info(f"Socket di streaming configurato per bassa latenza")
+                except Exception as e:
+                    logger.warning(f"Impossibile configurare socket per bassa latenza: {e}")
+
+                # Parametri di compressione JPEG ottimizzati
+                encode_params = [cv2.IMWRITE_JPEG_QUALITY, quality,
+                                 cv2.IMWRITE_JPEG_OPTIMIZE, 1,
+                                 cv2.IMWRITE_JPEG_PROGRESSIVE, 0]  # Disabilita JPEG progressivo per ridurre latenza
+
+                # Ottimizzazione per il controllo di flusso
+                last_stats_time = time.time()
+                next_frame_time = time.time()
+
+                # Log iniziale prima del loop
+                logger.info(f"Camera {camera_index}: inizio loop acquisizione frame, modalità={mode}")
+
+                # Loop principale ottimizzato
+                while self.state["streaming"] and self.running:
+                    try:
+                        # Controllo di flusso intelligente
+                        current_time = time.time()
+
+                        # Se siamo in ritardo più di 2 frame, saltiamo questo frame
+                        if current_time > next_frame_time + 2 * current_interval:
+                            skipped_frames += 1
+                            # Riallinea il next_frame_time
+                            next_frame_time = current_time + current_interval
+                            continue
+
+                        # Attendi fino al prossimo frame programmato
+                        if current_time < next_frame_time:
+                            wait_time = next_frame_time - current_time
+                            if wait_time > 0.001:
+                                time.sleep(wait_time)
+                            continue
+
+                        # Calcola il prossimo tempo di acquisizione
+                        next_frame_time = current_time + current_interval
+
+                        # Cattura il frame con gestione errori avanzata
+                        frame = None
+                        try:
+                            # Sistema di tentativi con backoff
+                            for retry in range(3):  # Max 3 tentativi per frame
+                                try:
+                                    frame = camera.capture_array()
+                                    if frame is not None and frame.size > 0:
+                                        break  # Frame acquisito con successo
+                                except Exception as capture_err:
+                                    # Gestione specifica degli errori comuni
+                                    if "timeout" in str(capture_err).lower():
+                                        logger.warning(
+                                            f"Camera {camera_index}: timeout in acquisizione, tentativo {retry + 1}/3")
+                                    elif "buffer" in str(capture_err).lower():
+                                        logger.warning(f"Camera {camera_index}: buffer error, tentativo {retry + 1}/3")
+                                    else:
+                                        logger.warning(
+                                            f"Camera {camera_index}: errore in acquisizione: {capture_err}, tentativo {retry + 1}/3")
+
+                                    # Backoff esponenziale tra tentativi
+                                    time.sleep(0.01 * (2 ** retry))
+                        except Exception as multi_err:
+                            logger.error(f"Camera {camera_index}: errore multiplo in acquisizione: {multi_err}")
+                            error_count += 1
+                            time.sleep(0.05)  # Pausa più lunga in caso di errore
+                            continue
+
+                        if frame is None or frame.size == 0:
+                            logger.error(f"Frame vuoto dalla camera {camera_index} dopo tutti i tentativi")
+                            error_count += 1
+                            time.sleep(0.05)
+                            continue
+
+                        # Conversione ottimizzata in base alla modalità
+                        try:
+                            if mode == "grayscale" and len(frame.shape) == 3:
+                                # Conversione più veloce a grayscale
+                                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                            elif len(frame.shape) == 3 and frame.shape[2] == 4:  # RGBA
+                                frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                            elif len(frame.shape) == 2 and mode == "color":
+                                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                        except Exception as conv_err:
+                            logger.error(f"Errore nella conversione del formato: {conv_err}")
+                            error_count += 1
+                            continue
+
+                        # Compressione JPEG ottimizzata con gestione errori
+                        try:
+                            success, encoded_data = cv2.imencode('.jpg', frame, encode_params)
+                        except Exception as enc_err:
+                            logger.error(f"Errore nell'encoding JPEG: {enc_err}")
+                            error_count += 1
+                            continue
+
+                        if not success or encoded_data is None:
+                            logger.error(f"Errore nella codifica JPEG, camera {camera_index}")
+                            error_count += 1
+                            continue
+
+                        # Header e invio ottimizzati per evitare copie superflue
+                        timestamp = time.time()  # Timestamp preciso
+                        header = {
+                            "camera": camera_index,
+                            "frame": frame_count,
+                            "timestamp": timestamp,
+                            "format": "jpeg",
+                            "resolution": [frame.shape[1], frame.shape[0]],
+                            "mode": mode,
+                            "seq": frame_count  # Aggiunto numero sequenziale per tracciare pacchetti persi
+                        }
+
+                        # Modalità di invio non bloccante per latenza ridotta
+                        try:
+                            # Usa NOBLOCK per non attendere che il client processi
+                            self.stream_socket.send_json(header, zmq.SNDMORE | zmq.NOBLOCK)
+                            self.stream_socket.send(encoded_data.tobytes(), copy=False, flags=zmq.NOBLOCK)
+                            frame_count += 1
+                            self._frame_count += 1
+
+                            # Log del primo frame riuscito
+                            if frame_count == 1:
+                                logger.info(f"Camera {camera_index}: primo frame acquisito e inviato con successo!")
+
+                        except zmq.ZMQError as e:
+                            if e.errno == zmq.EAGAIN:
+                                # Socket pieno, salta questo frame
+                                skipped_frames += 1
+                                logger.debug(f"Frame saltato (socket pieno) - camera {camera_index}")
+                                continue
+                            logger.error(f"Errore ZMQ: {e}")
+                            error_count += 1
+                            continue
+
+                        # Reporting delle statistiche ottimizzato
+                        if frame_count % 100 == 0:
+                            current_time = time.time()
+                            elapsed = current_time - last_stats_time
+                            if elapsed > 0:
+                                current_fps = 100 / elapsed
+                                encode_size = len(encoded_data.tobytes()) / 1024
+                                logger.info(f"Camera {camera_index}: {current_fps:.1f} FPS, "
+                                            f"{encode_size:.1f} KB/frame, modalità: {mode}, "
+                                            f"frame saltati: {skipped_frames}, errori: {error_count}")
+
+                                # Reset per il prossimo intervallo
+                                last_stats_time = current_time
+                                skipped_frames = 0
+                                error_count = 0
+
+                                # Regolazione dinamica dell'intervallo
+                                if self._dynamic_interval:
+                                    # Aggiustamenti più aggressivi per mantenere bassa latenza
+                                    if current_fps < self.config["stream"].get("min_fps", 15) * 0.8:
+                                        # FPS troppo basso, riduci intervallo
+                                        current_interval = max(min_interval, current_interval * 0.85)
+                                        logger.info(
+                                            f"Camera {camera_index}: FPS troppo basso, intervallo ridotto a {current_interval * 1000:.1f}ms")
+                                    elif current_fps > self.config["stream"].get("max_fps", 30) * 1.2:
+                                        # FPS troppo alto, aumenta intervallo
+                                        current_interval = current_interval * 1.15
+                                        logger.info(
+                                            f"Camera {camera_index}: FPS troppo alto, intervallo aumentato a {current_interval * 1000:.1f}ms")
+
+                    except Exception as e:
+                        logger.error(f"Errore nello streaming camera {camera_index}: {e}")
+                        error_count += 1
+                        time.sleep(0.1)  # Pausa più lunga in caso di errore
+                        next_frame_time = time.time() + current_interval
+
+            except Exception as e:
+                logger.error(f"Errore fatale nello streaming camera {camera_index}: {e}")
+                # Log dettagliato per diagnostica
+                import traceback
+                logger.error(f"Traceback errore fatale camera {camera_index}: {traceback.format_exc()}")
         finally:
             logger.info(f"Thread di streaming camera {camera_index} terminato dopo {frame_count} frame")
+            # Diagnostica finale
+            if frame_count == 0:
+                logger.error(f"ERRORE CRITICO: Camera {camera_index} non ha prodotto alcun frame!")
+                # Aggiungi dettagli hardware se possibile
+                try:
+                    import subprocess
+                    vcgencmd_output = subprocess.check_output(["vcgencmd", "get_camera"]).decode('utf-8')
+                    logger.error(f"Stato hardware camere: {vcgencmd_output.strip()}")
+                except Exception as hw_err:
+                    logger.error(f"Impossibile ottenere informazioni hardware: {hw_err}")
 
-    def _safe_capture_with_timeout(self, camera, timeout=0.1):
+    def _safe_capture_with_timeout(self, camera, timeout=0.5):
         """
         Cattura un frame con timeout usando un thread separato.
+        Versione robusta con gestione errori migliorata.
 
         Args:
             camera: Oggetto Picamera2
             timeout: Timeout in secondi
 
         Returns:
-            Frame acquisito o None in caso di timeout
+            Frame acquisito o None in caso di timeout/errore
         """
         result = [None]
+        error_info = [None]
 
         def capture_thread():
             try:
                 result[0] = camera.capture_array()
             except Exception as e:
+                error_info[0] = str(e)
                 logger.error(f"Errore nella cattura: {e}")
                 result[0] = None
 
@@ -1757,8 +1903,18 @@ class UnLookServer:
 
         # Se il thread è ancora vivo, la cattura è in timeout
         if t.is_alive():
-            logger.warning("Timeout nella cattura del frame")
+            logger.warning(f"Timeout ({timeout}s) nella cattura del frame")
             return None
+
+        # Se c'è stato un errore, logga dettagli
+        if error_info[0]:
+            logger.warning(f"Errore cattura: {error_info[0]}")
+
+        # Verifica che il frame sia valido
+        if result[0] is not None:
+            if result[0].size == 0 or not isinstance(result[0], np.ndarray):
+                logger.warning("Frame non valido (vuoto o tipo errato)")
+                return None
 
         return result[0]
 
