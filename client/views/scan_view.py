@@ -85,81 +85,75 @@ class CameraPreviewWidget(QWidget):
         layout.addWidget(self.display_label)
         layout.addLayout(info_layout)
 
-    @Slot(np.ndarray, float)
     def update_frame(self, frame: np.ndarray, timestamp: float = None):
         """Aggiorna il frame visualizzato con calcolo lag ottimizzato."""
         try:
             if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
                 return
 
-            # Solo memorizza il frame senza elaborazioni costose
-            self._frame = frame  # Non usiamo .copy() per evitare copie superflue
+            # Memorizza il frame senza copia per calcolare lag
+            self._frame = frame  # Non usiamo .copy() per evitare overhead
             self._frame_count += 1
 
-            # Conversione ottimizzata del frame in QImage
+            # OTTIMIZZAZIONE: Aggiorna UI solo ogni N frame
+            if self._frame_count % 3 != 0:  # Aggiorna solo 1 frame su 3
+                # Calcola lag anche se non aggiorniamo il display
+                if timestamp is not None:
+                    self._lag_ms = int((time.time() - timestamp) * 1000)
+                return  # Salta aggiornamento display
+
+            # Conversione ottimizzata a QImage
             height, width = frame.shape[:2]
             bytes_per_line = frame.strides[0]
 
-            # Evita conversioni di colore superflue
+            # Minimizza conversioni di colore
             try:
                 if len(frame.shape) == 3 and frame.shape[2] == 3:
-                    # Frame a colori BGR -> RGB
-                    # Usiamo una visualizzazione invece di una copia dove possibile
-                    # Questo è un compromesso tra velocità e correttezza
-                    if self._frame_count % 2 == 0:  # Solo 1 frame su 2 fa la conversione completa
-                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        qt_image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
-                    else:
-                        # Approssimazione BGR->RGB scambiando solo i canali nella QImage
-                        qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_BGR888)
+                    # Approccio rapido: usa BGR direttamente
+                    qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_BGR888)
                 else:
                     # Frame in scala di grigi (più veloce)
                     qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
             except Exception as e:
-                logger.warning(f"Errore conversione QImage: {e}")
                 return
 
-            # Visualizza il frame - no scaling durante acquisizione pattern
+            # Aggiorna display senza scaling se possibile
             pixmap = QPixmap.fromImage(qt_image)
-            # Scaling ottimizzato solo se necessario
+
+            # Scaling solo se necessario, usando FastTransformation
             if self.display_label.width() < width or self.display_label.height() < height:
                 pixmap = pixmap.scaled(
                     self.display_label.width(), self.display_label.height(),
                     Qt.KeepAspectRatio, Qt.FastTransformation  # Usa FastTransformation per velocità
                 )
+
             self.display_label.setPixmap(pixmap)
 
-            # Calcola FPS con media esponenziale più stabile
-            current_time = time.time()
-            if self._last_update_time > 0:
-                time_diff = current_time - self._last_update_time
-                if time_diff > 0:
-                    fps = 1.0 / time_diff
-                    # Media mobile con peso maggiore sui valori recenti
-                    self._fps = (0.8 * self._fps) + (0.2 * fps)
-
-            self._last_update_time = current_time
-
-            # Calcola lag se è stato fornito un timestamp
+            # Calcola lag solo se timestamp è fornito
             if timestamp is not None:
                 self._lag_ms = int((time.time() - timestamp) * 1000)
 
-                # Aggiorna etichetta lag solo se è cambiato significativamente
-                # Ora funzionerà perché abbiamo inizializzato _last_lag_ms
-                if abs(self._lag_ms - self._last_lag_ms) > 20 or self._frame_count % 10 == 0:
+                # Aggiorna etichetta lag solo se cambiato significativamente
+                if abs(self._lag_ms - self._last_lag_ms) > 50 or self._frame_count % 15 == 0:
                     self._update_lag_label()
                     self._last_lag_ms = self._lag_ms
 
-            # Aggiorna etichetta informativa solo saltuariamente per ridurre carico UI
-            if self._frame_count % 15 == 0:
-                camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
-                fps_text = f"{self._fps:.1f} FPS" if self._fps > 0 else ""
-                self.info_label.setText(f"Camera {camera_name} | {width}x{height} | {fps_text}")
+            # Aggiorna FPS solo occasionalmente
+            if self._frame_count % 30 == 0 and self._last_update_time > 0:
+                current_time = time.time()
+                elapsed = current_time - self._last_update_time
+                if elapsed > 0:
+                    self._fps = 30 / elapsed
+                    # Aggiorna info solo se c'è un cambiamento significativo
+                    if self._frame_count % 90 == 0:
+                        camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
+                        self.info_label.setText(f"Camera {camera_name} | {width}x{height} | {self._fps:.1f} FPS")
+
+                self._last_update_time = current_time
+
         except Exception as e:
-            # Aggiunta gestione errori globale per debug
-            logger.error(f"Errore in update_frame per camera {self.camera_index}: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Ignora errori minori per non bloccare il flusso
+            return
 
     def _update_lag_label(self):
         """Aggiorna l'etichetta del lag e imposta il colore appropriato."""
@@ -1355,74 +1349,70 @@ class ScanView(QWidget):
     def _sync_pattern_projection(self, pattern_index):
         """
         Sincronizza la proiezione di un pattern specifico con il server.
-
-        Args:
-            pattern_index: Indice del pattern da proiettare
-
-        Returns:
-            Dizionario con il risultato dell'operazione o None in caso di errore
+        Versione ottimizzata per bassa latenza e alta precisione.
         """
         if not self.selected_scanner or not self.scanner_controller:
-            logger.error("Scanner non selezionato o controller non disponibile")
             return None
 
         try:
-            logger.info(f"Richiesta sincronizzazione pattern {pattern_index}")
+            # Timestamp preciso pre-richiesta (alta risoluzione)
+            request_time = time.time()
 
-            # Invia comando al server
-            request_time = time.time()  # Aggiungiamo il timestamp della richiesta
+            # Invia comando con timestamp preciso e priorità alta
             command_success = self.scanner_controller.send_command(
                 self.selected_scanner.device_id,
                 "SYNC_PATTERN",
                 {
                     "pattern_index": pattern_index,
-                    "timestamp": request_time
-                }
+                    "timestamp": request_time,
+                    "priority": "high"  # Comunica al server priorità alta
+                },
+                timeout=0.2  # Timeout breve
             )
 
             if not command_success:
                 logger.error(f"Errore nell'invio del comando SYNC_PATTERN per pattern {pattern_index}")
                 return None
 
-            # Attendi risposta
+            # Attendi risposta con timeout breve
             response = self.scanner_controller.wait_for_response(
                 self.selected_scanner.device_id,
                 "SYNC_PATTERN",
-                timeout=1.0  # Timeout più breve per non rallentare la scansione
+                timeout=0.3  # Solo 300ms di attesa max
             )
 
-            # Migliorato il controllo della risposta per supportare 'ok' e 'success'
             if not response:
                 logger.error("Nessuna risposta ricevuta per SYNC_PATTERN")
                 return None
 
-            # Log dettagliato della risposta completa per debug
-            logger.debug(f"Risposta SYNC_PATTERN ricevuta: {response}")
+            # Timestamp di risposta ad alta precisione
+            response_time = time.time()
 
-            # Controlla tutti i possibili stati di successo
-            status = response.get("status", "")
-            if status not in ["ok", "success"]:
-                error_msg = response.get("message", "Errore sconosciuto")
-                logger.error(f"Risposta SYNC_PATTERN non valida. Stato: '{status}', Messaggio: '{error_msg}'")
-                return None
+            # Calcola RTT (Round Trip Time)
+            rtt = response_time - request_time
 
-            # Verifica che i campi attesi siano presenti
-            if "pattern_index" not in response or "timestamp" not in response:
-                logger.warning("Risposta SYNC_PATTERN mancante di dati essenziali")
-                # Continua comunque, potrebbe essere un problema di versione
+            # Aggiungi informazioni di sincronizzazione
+            response["client_request_time"] = request_time
+            response["client_response_time"] = response_time
+            response["rtt"] = rtt
 
-            # Monitora i tempi di sincronizzazione
+            # Calcola offset di clock stimato
             server_timestamp = response.get("timestamp", 0)
             if server_timestamp > 0:
-                self._monitor_synchronization_timing(pattern_index, server_timestamp)
+                # Stima offset clock = timestamp server - (tempo client + RTT/2)
+                clock_offset = server_timestamp - (request_time + rtt / 2)
+                response["clock_offset"] = clock_offset
 
-            logger.info(f"Pattern {pattern_index} sincronizzato con successo")
+                if abs(clock_offset) > 0.5:  # Offset >500ms
+                    logger.warning(f"Offset di clock elevato: {clock_offset * 1000:.1f}ms")
+
+            # Log latenza comando per debug
+            logger.info(f"Pattern {pattern_index} sincronizzato: RTT={rtt * 1000:.1f}ms")
+
             return response
 
         except Exception as e:
             logger.error(f"Errore nella sincronizzazione del pattern {pattern_index}: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
 
     def _monitor_synchronization_timing(self, pattern_index, server_timestamp, capture_timestamp=None):

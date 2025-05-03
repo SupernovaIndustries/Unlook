@@ -889,6 +889,50 @@ class ScanManager:
             logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
+    def sync_pattern_with_capture(self, pattern_index):
+        """Sincronizzazione completa: proietta pattern e cattura direttamente."""
+        # 1. Proietta pattern
+        self._scan_controller.project_pattern(pattern_index)
+
+        # 2. Attendi stabilizzazione con tempo ottimale
+        stabilization_time = self._scan_controller.get_recommended_stabilization_time(pattern_index)
+        time.sleep(stabilization_time)
+
+        # 3. Cattura direttamente
+        frames = self._capture_frames_direct()
+
+        return {
+            "status": "ok",
+            "frames": frames,
+            "pattern_index": pattern_index,
+            "timestamp": time.time()
+        }
+
+    def _capture_frames_direct(self):
+        """Cattura diretta da entrambe le camere senza ritornare al client."""
+        results = {}
+        # Cattura da tutte le camere disponibili
+        for cam_info in self.server.cameras:
+            camera_index = cam_info["index"]
+            try:
+                frame = cam_info["camera"].capture_array()
+                # Converti in base alla modalità
+                if cam_info.get("mode") == "grayscale" and len(frame.shape) == 3:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+
+                # Compress for storage
+                _, jpeg_data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+                # Store in results
+                results[camera_index] = {
+                    "data": jpeg_data.tobytes(),
+                    "timestamp": time.time()
+                }
+            except Exception as e:
+                logger.error(f"Errore cattura diretta camera {camera_index}: {e}")
+
+        return results
+
     def check_scan_capability(self) -> Dict[str, Any]:
         """
         Verifica la capacità di scansione 3D del sistema.
