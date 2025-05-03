@@ -82,8 +82,20 @@ class StreamReceiver(QObject):
 
             # Passa il processore di frame al thread per routing diretto
             if self._frame_processor:
-                self._receiver_thread.set_frame_processor(self._frame_processor)
+                try:
+                    self._receiver_thread.set_frame_processor(self._frame_processor)
+                    logger.info("Frame processor impostato nel thread")
+                except Exception as e:
+                    logger.error(f"Errore nell'impostazione del frame processor: {e}")
+                    # Non propagare l'errore, continua con l'avvio
+
+            # Imposta direct routing
+            try:
                 self._receiver_thread.set_direct_routing(self._direct_routing)
+                logger.info(f"Direct routing {'abilitato' if self._direct_routing else 'disabilitato'} nel thread")
+            except Exception as e:
+                logger.error(f"Errore nell'impostazione del direct routing: {e}")
+                # Non propagare l'errore, continua con l'avvio
 
             # Collega i segnali
             self._receiver_thread.frame_decoded.connect(self._on_frame_decoded)
@@ -297,10 +309,10 @@ class StreamReceiverThread(QThread):
         self._socket = None
         self._last_activity = 0
         self._connected = False
-        self._received_cameras = set()
+        self.cameras_active = set()
         self._frame_counters = {0: 0, 1: 0}
         self._reconnect_attempts = 0
-        self._max_reconnect_attempts = 5
+        self._max_reconnect_attempts = 10  # Aumentato il numero di tentativi
         self._mutex = QMutex()
         self._max_queue_size = 2  # Buffer minimo per evitare blocchi
 
@@ -322,6 +334,13 @@ class StreamReceiverThread(QThread):
         self._frame_drop_threshold = 50  # ms
         self._low_latency_mode = True
 
+        # Parametri di riconnessione migliorati
+        self._inactivity_timeout = 15.0  # Aumentato il timeout per inattività
+        self._reconnect_delay_base = 0.5  # Ritardo base per riconnessione
+        self._reconnect_delay_max = 5.0  # Ritardo massimo per riconnessione
+
+    # Miglioramenti al metodo run() della classe StreamReceiverThread
+
     def run(self):
         """Loop principale ottimizzato del thread con priorità alla bassa latenza."""
         # Aumenta priorità thread
@@ -338,17 +357,22 @@ class StreamReceiverThread(QThread):
         self._start_time = time.time()
         self._processing_times = []
 
+        # Attributi per tracciare il primo frame per ogni fotocamera
+        self._first_frame_received = {0: False, 1: False}
+
+        logger.info(f"Avvio thread di ricezione ZMQ per {self.host}:{self.port}")
+
         while self._reconnect_attempts <= self._max_reconnect_attempts:
             try:
                 # Inizializza ZeroMQ
                 self._context = zmq.Context()
                 self._socket = self._context.socket(zmq.SUB)
 
-                # Configurazione aggressiva per bassa latenza
+                # Configurazione per bassa latenza
                 self._socket.setsockopt(zmq.LINGER, 0)  # Non attendere alla chiusura
-                self._socket.setsockopt(zmq.RCVHWM, self._max_queue_size)  # Buffer minimo!
+                self._socket.setsockopt(zmq.RCVHWM, 10)  # Buffer maggiore di prima (era 2)
                 self._socket.setsockopt(zmq.SUBSCRIBE, b"")  # Sottoscrivi a tutto
-                self._socket.setsockopt(zmq.RCVTIMEO, 100)  # 100ms timeout (più aggressivo)
+                self._socket.setsockopt(zmq.RCVTIMEO, 1000)  # Aumentato da 100ms a 1000ms
 
                 # Opzioni avanzate TCP
                 try:
@@ -358,7 +382,7 @@ class StreamReceiverThread(QThread):
 
                 # Connetti all'endpoint
                 endpoint = f"tcp://{self.host}:{self.port}"
-                logger.info(f"Connessione a {endpoint} con buffer={self._max_queue_size}...")
+                logger.info(f"Connessione a {endpoint} con buffer=10...")
                 self._socket.connect(endpoint)
 
                 # Inizializza stato
@@ -369,32 +393,48 @@ class StreamReceiverThread(QThread):
                     self._reconnect_attempts = 0
 
                 self.connection_state_changed.emit(True)
+                logger.info("Connessione ZMQ stabilita, inizio ricezione frame")
 
-                # Loop principale con controllo di flusso aggressivo
+                # Loop principale con controllo di flusso meno aggressivo
+                frame_count_by_camera = {0: 0, 1: 0}
+                last_stats_time = time.time()
+
+                # Debug: stampa dettagli iniziali
+                logger.debug(f"Socket options: RCVTIMEO={self._socket.getsockopt(zmq.RCVTIMEO)}ms, "
+                             f"RCVHWM={self._socket.getsockopt(zmq.RCVHWM)}")
+
+                logger.info("Entrando nel loop principale di ricezione ZMQ")
                 while self._running:
                     try:
-                        # Misuriamo il tempo di inizio elaborazione
+                        # Timestamp preciso di inizio elaborazione
                         process_start_time = time.time()
 
-                        # Controllo di flusso aggressivo: salta frame se in ritardo
-                        if self._adaptive_mode and self._processing_lag > self._frame_drop_threshold:
+                        # Controllo di flusso meno aggressivo
+                        if self._adaptive_mode and self._processing_lag > 200:  # Più tollerante (prima era 50ms)
                             try:
                                 # Consumiamo il messaggio ma lo scartiamo
                                 msg = self._socket.recv(zmq.NOBLOCK)
                                 if self._socket.getsockopt(zmq.RCVMORE):
                                     self._socket.recv(zmq.NOBLOCK)
+                                logger.debug("Frame scartato per lag eccessivo")
                                 continue  # Passa al frame successivo
                             except zmq.ZMQError as e:
                                 if e.errno != zmq.EAGAIN:
                                     logger.error(f"Errore ZMQ: {e}")
                                 # Continua il loop normale se non ci sono messaggi
 
-                        # Attendi l'header con timeout breve
+                        # Attendi l'header con timeout maggiore
                         try:
                             header_data = self._socket.recv()
+                            logger.debug(f"Header ricevuto: {len(header_data)} bytes")
                         except zmq.Again:
                             # Timeout normale, controlla inattività
                             self._check_inactivity()
+                            logger.debug("Timeout ricezione header - attesa nuovi dati")
+                            continue
+                        except zmq.ZMQError as e:
+                            logger.error(f"Errore ZMQ nella ricezione header: {e}")
+                            time.sleep(0.1)  # Pausa breve
                             continue
 
                         # Aggiorna timestamp di attività
@@ -410,16 +450,26 @@ class StreamReceiverThread(QThread):
                             continue
 
                         # Ricevi i dati del frame senza copie non necessarie
-                        frame_data = self._socket.recv(copy=False)
-
-                        # Decodifica header usando approccio veloce
                         try:
-                            header = json.loads(header_data.decode('utf-8', errors='ignore'))
+                            frame_data = self._socket.recv(copy=False)
+                            logger.debug(f"Frame data ricevuto: {len(frame_data.buffer)} bytes")
+                        except zmq.ZMQError as e:
+                            logger.error(f"Errore nella ricezione del frame: {e}")
+                            continue
+
+                        # Decodifica header usando approccio più robusto
+                        try:
+                            header_str = header_data.decode('utf-8', errors='ignore')
+                            header = json.loads(header_str)
                             camera_index = header.get("camera")
                             timestamp = header.get("timestamp")
                             format_str = header.get("format", "jpeg")
                             is_scan_frame = header.get("is_scan_frame", False)
-                        except:
+
+                            logger.debug(f"Header decodificato: camera={camera_index}, timestamp={timestamp}, "
+                                         f"format={format_str}, is_scan={is_scan_frame}")
+                        except Exception as e:
+                            logger.error(f"Errore nella decodifica header: {e}, raw={header_data[:100]}")
                             continue
 
                         # Aggiorna statistiche della camera
@@ -427,41 +477,56 @@ class StreamReceiverThread(QThread):
                             if camera_index not in self._received_cameras:
                                 self._received_cameras.add(camera_index)
                             self._frame_counters[camera_index] = self._frame_counters.get(camera_index, 0) + 1
+                            frame_count_by_camera[camera_index] = frame_count_by_camera.get(camera_index, 0) + 1
 
-                        # Decodifica il frame solo se necessario
-                        # In molti casi possiamo passare direttamente i dati JPEG
-                        if self._direct_routing and self._frame_processor and is_scan_frame:
-                            # Per scan frame, decodifichiamo sempre il frame
-                            try:
-                                # Decodifica efficiente
-                                buffer = np.frombuffer(frame_data.buffer, dtype=np.uint8)
-                                frame = cv2.imdecode(buffer, cv2.IMREAD_UNCHANGED)
+                        # Decodifica il frame con gestione errori migliorata
+                        try:
+                            # Decodifica efficiente con verifica
+                            buffer = np.frombuffer(frame_data.buffer, dtype=np.uint8)
+                            frame = cv2.imdecode(buffer, cv2.IMREAD_UNCHANGED)
 
-                                # Routing diretto al processor
+                            if frame is None or frame.size == 0:
+                                logger.warning(f"Decodifica frame fallita: frame vuoto o None")
+                                continue
+
+                            # Incrementa contatore
+                            self._frames_processed += 1
+
+                            # Log per il primo frame di ogni fotocamera
+                            if not self._first_frame_received.get(camera_index, False):
+                                self._first_frame_received[camera_index] = True
+                                logger.info(
+                                    f"PRIMO FRAME RICEVUTO da fotocamera {camera_index}: dimensione={frame.shape}")
+
+                            # Routing diretto o segnale Qt in base alla configurazione
+                            if self._direct_routing and self._frame_processor and is_scan_frame:
+                                # Per scan frame, routing diretto
                                 if hasattr(self._frame_processor, 'process_frame'):
                                     self._frame_processor.process_frame(camera_index, frame, header)
-                                    # Non emettiamo segnali QT per risparmiare overhead
                                 else:
                                     # Fallback a segnali
                                     self.scan_frame_received.emit(camera_index, frame, header)
-                            except Exception as e:
-                                logger.error(f"Errore nel processing diretto: {e}")
-                                continue
-                        else:
-                            # Frame normale di streaming
-                            try:
-                                # Decodifica efficiente
-                                buffer = np.frombuffer(frame_data.buffer, dtype=np.uint8)
-                                frame = cv2.imdecode(buffer, cv2.IMREAD_UNCHANGED)
-
-                                # Incrementa contatore
-                                self._frames_processed += 1
-
-                                # Emetti segnale
+                            else:
+                                # Frame normale di streaming
                                 self.frame_decoded.emit(camera_index, frame, timestamp)
-                            except Exception as e:
-                                logger.error(f"Errore nella decodifica: {e}")
-                                continue
+
+                        except Exception as e:
+                            logger.error(f"Errore nella decodifica: {e}")
+                            import traceback
+                            logger.error(f"Traceback decodifica: {traceback.format_exc()}")
+                            continue
+
+                        # Statistiche periodiche ogni 5 secondi
+                        now = time.time()
+                        if now - last_stats_time > 5.0:
+                            elapsed = now - last_stats_time
+                            total_frames = sum(frame_count_by_camera.values())
+                            fps = total_frames / elapsed if elapsed > 0 else 0
+                            logger.info(f"Statistiche ricezione: {total_frames} frame in {elapsed:.1f}s, "
+                                        f"{fps:.1f} FPS, distribuzione={frame_count_by_camera}")
+                            # Reset statistiche
+                            last_stats_time = now
+                            frame_count_by_camera = {0: 0, 1: 0}
 
                         # Misurazione del tempo di elaborazione per il controllo di flusso
                         process_end_time = time.time()
@@ -472,25 +537,20 @@ class StreamReceiverThread(QThread):
                         alpha = 0.3  # Fattore di smorzamento
                         self._processing_lag = (1 - alpha) * self._processing_lag + alpha * process_time_ms
 
-                        # Adatta soglia di scarto
-                        if self._adaptive_mode:
-                            if self._processing_lag > self._frame_drop_threshold * 2:
-                                self._frame_drop_threshold = min(150, self._frame_drop_threshold * 1.2)
-                            elif self._processing_lag < self._frame_drop_threshold / 2:
-                                self._frame_drop_threshold = max(20, self._frame_drop_threshold * 0.9)
-
                     except zmq.ZMQError as e:
                         if e.errno == zmq.EAGAIN:
                             continue
                         logger.error(f"Errore ZMQ: {e}")
-                        break  # Usciamo per riconnessione
+                        # Non fare break ma continua per maggiore resilienza
+                        time.sleep(0.1)
                     except Exception as e:
                         logger.error(f"Errore nella ricezione: {e}")
+                        import traceback
+                        logger.error(f"Traceback: {traceback.format_exc()}")
                         time.sleep(0.01)  # Pausa minima
 
                 # Se usciti dal loop in modo pulito
-                if not self._running:
-                    break
+                logger.info("Uscita pulita dal loop di ricezione")
 
             except Exception as e:
                 logger.error(f"Errore nella connessione: {e}")
@@ -507,14 +567,45 @@ class StreamReceiverThread(QThread):
         logger.info("Thread di ricezione terminato")
 
     def _check_inactivity(self):
-        """Verifica l'inattività della connessione."""
+        """Verifica l'inattività della connessione con tolleranza migliorata."""
         current_time = time.time()
         with QMutexLocker(self._mutex):
             inactivity_time = current_time - self._last_activity
-            if inactivity_time > 5.0 and self._connected:
-                if inactivity_time > 10.0:
-                    self._connected = False
-                    self.connection_state_changed.emit(False)
+            if inactivity_time > self._inactivity_timeout and self._connected:
+                logger.warning(f"Inattività rilevata dopo {inactivity_time:.1f}s, considerato disconnesso")
+                self._connected = False
+                self.connection_state_changed.emit(False)
+                # Non terminare il thread, permettiamo tentativi di riconnessione
+
+    def _cleanup_socket(self):
+        """Pulisce il socket e il contesto ZMQ in modo sicuro."""
+        try:
+            if self._socket:
+                self._socket.close()
+                self._socket = None
+        except Exception as e:
+            logger.debug(f"Errore nella chiusura del socket: {e}")
+
+        # Non chiudiamo il contesto, ma solo in caso di shutdown finale
+        if not self._running and self._context:
+            try:
+                self._context.term()
+                self._context = None
+            except Exception as e:
+                logger.debug(f"Errore nella chiusura del contesto: {e}")
+
+    # Aggiungi questi metodi alla classe StreamReceiverThread
+
+    def set_direct_routing(self, enabled):
+        """
+        Abilita o disabilita il routing diretto dei frame.
+
+        Args:
+            enabled: True per abilitare, False per disabilitare
+        """
+        with QMutexLocker(self._mutex):
+            self._direct_routing = enabled
+            logger.info(f"Direct routing {'abilitato' if enabled else 'disabilitato'} in StreamReceiverThread")
 
     def set_frame_processor(self, processor):
         """
@@ -524,33 +615,4 @@ class StreamReceiverThread(QThread):
             processor: Istanza di ScanFrameProcessor
         """
         self._frame_processor = processor
-
-    def set_direct_routing(self, enabled: bool):
-        """
-        Abilita o disabilita il routing diretto dei frame.
-
-        Args:
-            enabled: True per abilitare, False per disabilitare
-        """
-        with QMutexLocker(self._mutex):
-            self._direct_routing = enabled
-
-    def _cleanup_socket(self):
-        """Pulisce il socket e il contesto ZMQ in modo sicuro."""
-        try:
-            if self._socket:
-                self._socket.close()
-                self._socket = None
-            if self._context:
-                self._context.term()
-                self._context = None
-        except:
-            pass
-
-    def stop(self):
-        """Ferma il thread di ricezione in modo sicuro."""
-        with QMutexLocker(self._mutex):
-            self._running = False
-
-        # Termina e pulisci risorse
-        self._cleanup_socket()
+        logger.info(f"Frame processor impostato in StreamReceiverThread: {processor is not None}")

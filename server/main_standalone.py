@@ -1378,8 +1378,7 @@ class UnLookServer:
 
     def _check_client_activity(self):
         """
-        Verifica se il client è ancora attivo e, in caso contrario, rilascia le risorse.
-        CORREZIONE: Aumentato timeout e migliorata identificazione client durante le scansioni.
+        Verifica se il client è ancora attivo ma non disconnette automaticamente.
         """
         if not self.client_connected:
             return
@@ -1387,52 +1386,17 @@ class UnLookServer:
         current_time = time.time()
         time_since_last_activity = current_time - self._last_client_activity
 
-        # MIGLIORAMENTO: Controlla se c'è una scansione in corso
-        scanning_active = self.state.get("scanning", False)
+        # MIGLIORAMENTO: Disattivato il timeout di disconnessione automatica
+        # Sostituito con un semplice log di avviso ogni 60 secondi
 
-        # Aumenta il timeout durante la scansione attiva
-        timeout_threshold = 60.0 if scanning_active else 30.0  # 60 secondi durante la scansione, 30 normalmente
-
-        if time_since_last_activity > timeout_threshold:
+        if time_since_last_activity > 60.0 and (time_since_last_activity % 60.0) < 1.0:
             client_id = self.client_ip if self.client_ip else "sconosciuto"
             logger.info(
-                f"Il client {client_id} risulta inattivo da {time_since_last_activity:.1f} secondi, considerato disconnesso."
+                f"Il client {client_id} risulta inattivo da {time_since_last_activity:.1f} secondi, "
+                f"ma mantengo la connessione attiva."
             )
 
-            # Ferma lo streaming se attivo e non c'è una scansione in corso
-            if self.state["streaming"] and not scanning_active:
-                logger.info("Arresto automatico dello streaming per client inattivo")
-                self.stop_streaming()
-
-            # Interrompi la scansione se attiva
-            if scanning_active and self.scan_manager:
-                # MIGLIORAMENTO: Se c'è una scansione, invia prima un ping finale
-                try:
-                    # Prova a verificare se il client è ancora raggiungibile
-                    if self.client_ip:
-                        # Aspetta un po' più a lungo prima di interrompere la scansione
-                        logger.info(f"Attendere altri 10 secondi prima di interrompere la scansione per {client_id}")
-                        time.sleep(10)  # Attesa aggiuntiva
-
-                        # Ricontrolla l'attività dopo l'attesa
-                        new_time_since_last_activity = time.time() - self._last_client_activity
-                        if new_time_since_last_activity < 15.0:
-                            logger.info("Client nuovamente attivo, scansione non interrotta")
-                            return
-                except Exception as e:
-                    logger.error(f"Errore nella verifica finale del client: {e}")
-
-                logger.info("Arresto automatico della scansione per client inattivo")
-                self.scan_manager.stop_scan()
-                self.state["scanning"] = False
-
-            # Aggiorna lo stato
-            self.client_connected = False
-            self.client_ip = None
-            self.state["clients_connected"] = 0
-
-            # Log per facilitare il debug
-            logger.info("Risorse rilasciate per client inattivo")
+        # Non fermiamo più lo streaming né la scansione automaticamente
 
     def _check_client_activity_loop(self):
         """

@@ -86,74 +86,70 @@ class CameraPreviewWidget(QWidget):
         layout.addLayout(info_layout)
 
     def update_frame(self, frame: np.ndarray, timestamp: float = None):
-        """Aggiorna il frame visualizzato con calcolo lag ottimizzato."""
+        """Aggiorna il frame visualizzato con diagnostica migliorata."""
         try:
             if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+                logger.warning(f"CameraPreviewWidget: frame non valido ricevuto per camera {self.camera_index}")
                 return
 
-            # Memorizza il frame senza copia per calcolare lag
-            self._frame = frame  # Non usiamo .copy() per evitare overhead
+            # Memorizza il frame
+            self._frame = frame.copy()  # Facciamo una copia per sicurezza
             self._frame_count += 1
 
-            # OTTIMIZZAZIONE: Aggiorna UI solo ogni N frame
-            if self._frame_count % 3 != 0:  # Aggiorna solo 1 frame su 3
-                # Calcola lag anche se non aggiorniamo il display
-                if timestamp is not None:
-                    self._lag_ms = int((time.time() - timestamp) * 1000)
-                return  # Salta aggiornamento display
+            # Traccia il primo frame per questa camera
+            if self._frame_count == 1:
+                logger.info(
+                    f"CameraPreviewWidget: primo frame visualizzato per camera {self.camera_index}: dimensione={frame.shape}")
 
-            # Conversione ottimizzata a QImage
-            height, width = frame.shape[:2]
-            bytes_per_line = frame.strides[0]
-
-            # Minimizza conversioni di colore
+            # Conversione a QImage con gestione errori migliorata
             try:
+                height, width = frame.shape[:2]
+                bytes_per_line = frame.strides[0]
+
                 if len(frame.shape) == 3 and frame.shape[2] == 3:
-                    # Approccio rapido: usa BGR direttamente
+                    # RGB/BGR
                     qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_BGR888)
-                else:
-                    # Frame in scala di grigi (più veloce)
+                    format_str = "BGR"
+                elif len(frame.shape) == 3 and frame.shape[2] == 4:
+                    # RGBA/BGRA
+                    qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_ARGB32)
+                    format_str = "BGRA"
+                elif len(frame.shape) == 2:
+                    # Grayscale
                     qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+                    format_str = "Grayscale"
+                else:
+                    logger.warning(f"CameraPreviewWidget: formato frame non supportato: {frame.shape}")
+                    return
+
+                # Log dettagliato ogni 100 frame o al primo frame
+                if self._frame_count == 1 or self._frame_count % 100 == 0:
+                    logger.debug(f"CameraPreviewWidget: frame {self._frame_count} per camera {self.camera_index}: "
+                                 f"formato={format_str}, dimensione={width}x{height}")
+
+                # Aggiorna display
+                pixmap = QPixmap.fromImage(qt_image)
+                self.display_label.setPixmap(pixmap)
+
+                # Aggiorna etichetta info se passano almeno 3 secondi
+                if time.time() - self._last_update_time > 3.0:
+                    self._last_update_time = time.time()
+                    camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
+                    self.info_label.setText(f"Camera {camera_name} | {width}x{height} | Attiva")
+
             except Exception as e:
+                logger.error(f"CameraPreviewWidget: errore nella conversione del frame: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 return
-
-            # Aggiorna display senza scaling se possibile
-            pixmap = QPixmap.fromImage(qt_image)
-
-            # Scaling solo se necessario, usando FastTransformation
-            if self.display_label.width() < width or self.display_label.height() < height:
-                pixmap = pixmap.scaled(
-                    self.display_label.width(), self.display_label.height(),
-                    Qt.KeepAspectRatio, Qt.FastTransformation  # Usa FastTransformation per velocità
-                )
-
-            self.display_label.setPixmap(pixmap)
 
             # Calcola lag solo se timestamp è fornito
             if timestamp is not None:
                 self._lag_ms = int((time.time() - timestamp) * 1000)
-
-                # Aggiorna etichetta lag solo se cambiato significativamente
-                if abs(self._lag_ms - self._last_lag_ms) > 50 or self._frame_count % 15 == 0:
-                    self._update_lag_label()
-                    self._last_lag_ms = self._lag_ms
-
-            # Aggiorna FPS solo occasionalmente
-            if self._frame_count % 30 == 0 and self._last_update_time > 0:
-                current_time = time.time()
-                elapsed = current_time - self._last_update_time
-                if elapsed > 0:
-                    self._fps = 30 / elapsed
-                    # Aggiorna info solo se c'è un cambiamento significativo
-                    if self._frame_count % 90 == 0:
-                        camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
-                        self.info_label.setText(f"Camera {camera_name} | {width}x{height} | {self._fps:.1f} FPS")
-
-                self._last_update_time = current_time
+                self._update_lag_label()
 
         except Exception as e:
-            # Ignora errori minori per non bloccare il flusso
-            return
+            logger.error(f"CameraPreviewWidget: errore generale in update_frame: {e}")
 
     def _update_lag_label(self):
         """Aggiorna l'etichetta del lag e imposta il colore appropriato."""
@@ -819,42 +815,63 @@ class ScanView(QWidget):
         return False
 
     def _on_frame_received(self, camera_index: int, frame: np.ndarray, timestamp: float):
-        """Gestisce la ricezione di un frame dallo stream."""
+        """Gestisce la ricezione di un frame dallo stream con diagnostica migliorata."""
         try:
             # Log migliorato per tracciamento frame
             if not hasattr(self, '_frame_count_by_camera'):
                 self._frame_count_by_camera = {0: 0, 1: 0}
                 self._last_frame_log_time = time.time()
+                self._frames_displayed = {0: 0, 1: 0}  # Nuova metrica: frame effettivamente visualizzati
+                logger.info("Inizializzazione contatori di frame")
 
             # Incrementa contatore per questa camera
             self._frame_count_by_camera[camera_index] = self._frame_count_by_camera.get(camera_index, 0) + 1
+
+            # Traccia primo frame ricevuto per ogni camera
+            if not hasattr(self, f'_first_frame_{camera_index}'):
+                logger.info(f"ScanView: primo frame ricevuto per fotocamera {camera_index}: dimensione={frame.shape}")
+                setattr(self, f'_first_frame_{camera_index}', True)
 
             # Log periodico (ogni 5 secondi) per verificare ricezione frame per camera
             now = time.time()
             if now - getattr(self, '_last_frame_log_time', 0) > 5.0:
                 self._last_frame_log_time = now
                 total_frames = sum(self._frame_count_by_camera.values())
-                logger.info(f"Statistiche frame ricevuti negli ultimi 5s: " +
-                            f"totale={total_frames}, " +
+                fps_calc = total_frames / 5.0  # FPS negli ultimi 5 secondi
+
+                logger.info(f"ScanView: statistiche frame ricevuti negli ultimi 5s: " +
+                            f"totale={total_frames}, FPS={fps_calc:.1f}, " +
                             ", ".join([f"camera{idx}={count}" for idx, count in self._frame_count_by_camera.items()]))
-                self._frame_count_by_camera = {0: 0, 1: 0}  # Reset contatori
+
+                # Statistiche display (se disponibili)
+                if hasattr(self, '_frames_displayed'):
+                    total_displayed = sum(self._frames_displayed.values())
+                    logger.info(f"ScanView: frame visualizzati: totale={total_displayed}, " +
+                                ", ".join([f"camera{idx}={count}" for idx, count in self._frames_displayed.items()]))
+                    self._frames_displayed = {0: 0, 1: 0}  # Reset contatori display
+
+                self._frame_count_by_camera = {0: 0, 1: 0}  # Reset contatori ricezione
 
             # Verifica validità frame
             if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
-                logger.warning(f"Frame non valido ricevuto per camera {camera_index}")
+                logger.warning(f"ScanView: frame non valido ricevuto per camera {camera_index}")
                 return
 
-            # Aggiorna il preview corrispondente
+            # Aggiorna il preview corrispondente e traccia visualizzazione
             if camera_index == 0:
                 self.left_preview.update_frame(frame, timestamp)
+                if hasattr(self, '_frames_displayed'):
+                    self._frames_displayed[0] += 1
             elif camera_index == 1:
                 self.right_preview.update_frame(frame, timestamp)
+                if hasattr(self, '_frames_displayed'):
+                    self._frames_displayed[1] += 1
             else:
-                logger.warning(f"Indice camera non riconosciuto: {camera_index}")
+                logger.warning(f"ScanView: indice camera non riconosciuto: {camera_index}")
 
         except Exception as e:
             # Log esplicito degli errori per debug
-            logger.error(f"Errore in _on_frame_received per camera {camera_index}: {e}")
+            logger.error(f"ScanView: errore in _on_frame_received per camera {camera_index}: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
 
