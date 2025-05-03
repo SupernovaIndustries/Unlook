@@ -312,7 +312,7 @@ class StreamReceiverThread(QThread):
         self.cameras_active = set()
         self._frame_counters = {0: 0, 1: 0}
         self._reconnect_attempts = 0
-        self._max_reconnect_attempts = 10  # Aumentato il numero di tentativi
+        self._max_reconnect_attempts = 99999  # Aumentato il numero di tentativi
         self._mutex = QMutex()
         self._max_queue_size = 2  # Buffer minimo per evitare blocchi
 
@@ -335,11 +335,9 @@ class StreamReceiverThread(QThread):
         self._low_latency_mode = True
 
         # Parametri di riconnessione migliorati
-        self._inactivity_timeout = 15.0  # Aumentato il timeout per inattività
+        self._inactivity_timeout = 3600.0  # Aumentato il timeout per inattività
         self._reconnect_delay_base = 0.5  # Ritardo base per riconnessione
         self._reconnect_delay_max = 5.0  # Ritardo massimo per riconnessione
-
-    # Miglioramenti al metodo run() della classe StreamReceiverThread
 
     def run(self):
         """Loop principale ottimizzato del thread con diagnostica migliorata."""
@@ -360,7 +358,7 @@ class StreamReceiverThread(QThread):
         logger.info(f"Avvio thread di ricezione ZMQ per {self.host}:{self.port}")
 
         reconnect_delay = 1.0
-        while self._reconnect_attempts <= self._max_reconnect_attempts:
+        while True:
             try:
                 # Inizializza ZeroMQ
                 self._context = zmq.Context()
@@ -368,9 +366,9 @@ class StreamReceiverThread(QThread):
 
                 # Configurazione per bassa latenza
                 self._socket.setsockopt(zmq.LINGER, 0)  # Non attendere alla chiusura
-                self._socket.setsockopt(zmq.RCVHWM, 10)  # Buffer maggiore (era 2)
+                self._socket.setsockopt(zmq.RCVHWM, 100)  # Buffer maggiore
                 self._socket.setsockopt(zmq.SUBSCRIBE, b"")  # Sottoscrivi a tutto
-                self._socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1000ms timeout (era 100ms)
+                self._socket.setsockopt(zmq.RCVTIMEO, 120000)  # 120s timeout
 
                 # Opzioni TCP avanzate
                 try:
@@ -594,6 +592,13 @@ class StreamReceiverThread(QThread):
                 self._cleanup_socket()
                 self._reconnect_attempts += 1
                 reconnect_delay = min(reconnect_delay * 1.5, 10.0)  # Crescita più lenta
+
+                # Resetta il delay dopo molti tentativi per evitare attese troppo lunghe
+                if self._reconnect_attempts % 10 == 0:
+                    reconnect_delay = self._reconnect_delay_base
+                    logger.info("Reset del ritardo di riconnessione")
+
+                logger.info(f"Tentativo di riconnessione {self._reconnect_attempts} tra {reconnect_delay:.1f}s")
                 time.sleep(reconnect_delay)
 
         # Pulizia finale
@@ -605,30 +610,19 @@ class StreamReceiverThread(QThread):
 
     def _check_inactivity(self):
         """
-        Verifica l'inattività della connessione senza disconnettere.
-        Ora solo registra l'inattività senza cambiare lo stato.
+        Verifica l'inattività della connessione senza mai disconnettere.
+        Solo per scopi di logging.
         """
         current_time = time.time()
         with QMutexLocker(self._mutex):
             inactivity_time = current_time - self._last_activity
 
-            # Log periodico invece di disconnessione
-            if inactivity_time > self._inactivity_timeout:
-                # Log solo ogni 30 secondi per evitare spam
-                if not hasattr(self, '_last_inactivity_log') or \
-                        current_time - getattr(self, '_last_inactivity_log', 0) > 30.0:
-                    logger.info(f"Inattività di {inactivity_time:.1f}s rilevata, mantengo connessione")
-                    self._last_inactivity_log = current_time
+            # Log periodico (ogni 60 secondi) senza mai disconnettere
+            if inactivity_time > 60.0 and (inactivity_time % 60.0) < 1.0:
+                logger.info(f"Inattività di {inactivity_time:.1f}s rilevata, mantengo connessione attiva")
 
-                # Opzionalmente, possiamo implementare una riconnessione soft senza disconnessione
-                if inactivity_time > 60.0:  # Se inattivo per più di un minuto
-                    if not hasattr(self, '_last_ping_attempt') or \
-                            current_time - getattr(self, '_last_ping_attempt', 0) > 30.0:
-                        logger.info("Lunga inattività: tentativo di ping ZMQ senza disconnessione")
-                        self._last_ping_attempt = current_time
-
-                        # Possiamo inviare un messaggio di ping ZMQ o tentare una riconnessione "morbida"
-                        # Ma mai impostare self._connected = False!
+            # MAI impostare self._connected = False!
+            # MAI chiudere o ricreare socket qui!
 
     def _cleanup_socket(self):
         """Pulisce il socket e il contesto ZMQ in modo sicuro."""
