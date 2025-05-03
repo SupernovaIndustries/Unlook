@@ -553,25 +553,44 @@ class ScanView(QWidget):
             # CORREZIONE: Try-except per gestire correttamente la disconnessione
             try:
                 # Verifica se il segnale è connesso prima di disconnetterlo
-                if receiver.frame_received.receivers(receiver.frame_received) > 0:
-                    receiver.frame_received.disconnect(self._on_frame_received)
-                    logger.info("Precedente connessione frame_received disconnessa")
-                else:
-                    logger.info("Nessuna connessione precedente da disconnettere")
+                # Utilizziamo un approccio più sicuro per verificare la connessione
+                disconnect_success = False
+                try:
+                    if hasattr(receiver.frame_received, 'disconnect'):
+                        try:
+                            receiver.frame_received.disconnect(self._on_frame_received)
+                            disconnect_success = True
+                            logger.info("Precedente connessione frame_received disconnessa")
+                        except (TypeError, RuntimeError) as e:
+                            # Questo è normale se il segnale non era connesso
+                            logger.info(f"Nessuna connessione precedente da disconnettere: {e}")
+                except Exception as e:
+                    logger.info(f"Gestita eccezione durante disconnessione: {e}")
             except Exception as e:
-                logger.info(f"Gestita eccezione durante disconnessione: {e}")
+                logger.warning(f"Errore nella disconnessione: {e}")
+                # Non bloccare la connessione se c'è un errore nella disconnessione
 
             # Connetti il segnale e configura
-            receiver.frame_received.connect(self._on_frame_received)
-            logger.info("Segnale frame_received collegato con successo")
+            try:
+                receiver.frame_received.connect(self._on_frame_received)
+                logger.info("Segnale frame_received collegato con successo")
+            except Exception as e:
+                logger.error(f"Errore nella connessione del segnale: {e}")
+                return False
 
             if hasattr(receiver, 'set_frame_processor'):
-                receiver.set_frame_processor(self.scan_processor)
-                logger.info("Processore di frame impostato con successo")
+                try:
+                    receiver.set_frame_processor(self.scan_processor)
+                    logger.info("Processore di frame impostato con successo")
+                except Exception as e:
+                    logger.error(f"Errore nell'impostazione del processore di frame: {e}")
 
             if hasattr(receiver, 'enable_direct_routing'):
-                receiver.enable_direct_routing(True)
-                logger.info("Direct routing abilitato con successo")
+                try:
+                    receiver.enable_direct_routing(True)
+                    logger.info("Direct routing abilitato con successo")
+                except Exception as e:
+                    logger.error(f"Errore nell'abilitazione del direct routing: {e}")
 
             # IMPORTANTE: configura il timer di verifica
             if not hasattr(self, '_camera_check_timer') or not self._camera_check_timer.is_alive():
@@ -1908,6 +1927,7 @@ class ScanView(QWidget):
                 # Mostra errore usando metodo thread-safe
                 self._show_error_message("Errore",
                                          f"Si è verificato un errore durante la scansione sincronizzata:\n{str(e)}")
+
     def _verify_camera_streams(self):
         """
         Verifica che entrambe le camere stiano ricevendo frame e tenta di recuperare
@@ -1940,9 +1960,31 @@ class ScanView(QWidget):
             camera_str = " e ".join(camera_names)
             logger.warning(f"Camera {camera_str} non riceve frame. Tentativo di recupero...")
 
+            # Monitora il tempo di inattività
+            if not hasattr(self, '_camera_inactive_since'):
+                self._camera_inactive_since = time.time()
+
+            inactivity_time = time.time() - self._camera_inactive_since
+            logger.info(f"Le camere {camera_str} sono inattive da {inactivity_time:.1f}s")
+
             # STRATEGIA 1: Riavvia lo streaming lato server
             if self.selected_scanner and self.scanner_controller:
                 try:
+                    # Prima verifica la connessione con un PING
+                    ping_success = self.scanner_controller.send_command(
+                        self.selected_scanner.device_id,
+                        "PING",
+                        {"timestamp": time.time()}
+                    )
+
+                    if not ping_success:
+                        logger.warning("Ping fallito, tentativo di riconnessione...")
+                        reconnect_success = self.scanner_controller.connect_to_scanner(self.selected_scanner.device_id)
+                        if reconnect_success:
+                            logger.info("Riconnessione al server riuscita")
+                        else:
+                            logger.error("Riconnessione al server fallita")
+
                     # Prima ferma lo streaming
                     logger.info("Fermata temporanea dello streaming...")
                     self.scanner_controller.send_command(
@@ -1965,37 +2007,38 @@ class ScanView(QWidget):
 
                     # Reset contatori per prossima verifica
                     self._frame_count_by_camera = {0: 0, 1: 0}
+                    # Reset del timer di inattività se abbiamo eseguito un'azione
+                    self._camera_inactive_since = time.time()
                 except Exception as e:
                     logger.error(f"Errore nel riavvio dello streaming: {e}")
 
-            # STRATEGIA 2: Reinizializza il receiver lato client
-            main_window = self.window()
-            if hasattr(main_window, 'stream_receiver') and main_window.stream_receiver:
-                receiver = main_window.stream_receiver
+            # STRATEGIA 2: Se l'inattività persiste per molto tempo, tenta una riconnessione completa
+            if inactivity_time > 30.0:  # 30 secondi di inattività
+                logger.warning("Inattività prolungata, tentativo di riconnessione completa...")
 
-                # Verifica se esiste un metodo restart o reinit
-                if hasattr(receiver, 'restart') and callable(receiver.restart):
-                    logger.info("Riavvio del receiver...")
-                    try:
-                        receiver.restart()
-                    except Exception as e:
-                        logger.error(f"Errore nel restart del receiver: {e}")
-                elif hasattr(receiver, 'reconnect') and callable(receiver.reconnect):
-                    logger.info("Riconnessione del receiver...")
-                    try:
-                        receiver.reconnect()
-                    except Exception as e:
-                        logger.error(f"Errore nella riconnessione del receiver: {e}")
+                try:
+                    # Disconnetti completamente
+                    if self.selected_scanner and self.scanner_controller:
+                        logger.info("Disconnessione forzata...")
+                        self.scanner_controller.disconnect_from_scanner(self.selected_scanner.device_id)
+                        time.sleep(1.0)
 
-            # STRATEGIA 3: Forza aggiornamento via refresh di _connect_to_stream
-            logger.info("Forzatura reinizializzazione della connessione...")
-            self._stream_connected = False
-            self._connect_to_stream()
+                        # Riconnetti
+                        logger.info("Tentativo di riconnessione...")
+                        reconnect_success = self.scanner_controller.connect_to_scanner(self.selected_scanner.device_id)
+                        if reconnect_success:
+                            logger.info("Riconnessione completata con successo")
+                            # Reset del timer
+                            self._camera_inactive_since = time.time()
+                        else:
+                            logger.error("Riconnessione fallita")
+                except Exception as e:
+                    logger.error(f"Errore nella riconnessione completa: {e}")
 
-            # Pianifica prossima verifica
+            # Pianifica prossima verifica con intervallo più breve se ci sono problemi
+            check_interval = 3.0 if missing_cameras else 5.0
             if not hasattr(self, '_camera_check_timer') or not self._camera_check_timer.is_alive():
-                # Se ci sono problemi, controlla più frequentemente
-                self._camera_check_timer = threading.Timer(3.0, self._verify_camera_streams)
+                self._camera_check_timer = threading.Timer(check_interval, self._verify_camera_streams)
                 self._camera_check_timer.daemon = True
                 self._camera_check_timer.start()
 
