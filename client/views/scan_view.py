@@ -93,23 +93,35 @@ class CameraPreviewWidget(QWidget):
                 return
 
             # Memorizza il frame
-            self._frame = frame.copy()  # Facciamo una copia per sicurezza
+            self._frame = frame.copy()
             self._frame_count += 1
 
-            # Traccia il primo frame per questa camera
+            # Traccia il primo frame per diagnostica
             if self._frame_count == 1:
-                logger.info(
-                    f"CameraPreviewWidget: primo frame visualizzato per camera {self.camera_index}: dimensione={frame.shape}")
+                logger.info(f"CameraPreviewWidget: primo frame visualizzato per camera {self.camera_index}: "
+                            f"shape={frame.shape}, dtype={frame.dtype}")
 
-            # Conversione a QImage con gestione errori migliorata
+                # Verifica che l'immagine abbia valori validi
+                min_val = np.min(frame)
+                max_val = np.max(frame)
+                logger.info(f"Range valori: min={min_val}, max={max_val}")
+
+            # Conversione a QImage con gestione robusta
             try:
                 height, width = frame.shape[:2]
                 bytes_per_line = frame.strides[0]
 
                 if len(frame.shape) == 3 and frame.shape[2] == 3:
-                    # RGB/BGR
-                    qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_BGR888)
-                    format_str = "BGR"
+                    # RGB/BGR - verifica se è nel range corretto
+                    if frame.dtype == np.uint8:
+                        qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_BGR888)
+                        format_str = "BGR"
+                    else:
+                        # Converte se necessario
+                        frame_8bit = (frame * 255).astype(np.uint8) if frame.dtype == np.float32 else frame.astype(
+                            np.uint8)
+                        qt_image = QImage(frame_8bit.data, width, height, frame_8bit.strides[0], QImage.Format_BGR888)
+                        format_str = f"BGR (convertito da {frame.dtype})"
                 elif len(frame.shape) == 3 and frame.shape[2] == 4:
                     # RGBA/BGRA
                     qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_ARGB32)
@@ -119,10 +131,10 @@ class CameraPreviewWidget(QWidget):
                     qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
                     format_str = "Grayscale"
                 else:
-                    logger.warning(f"CameraPreviewWidget: formato frame non supportato: {frame.shape}")
+                    logger.warning(f"Formato frame non supportato: {frame.shape}")
                     return
 
-                # Log dettagliato ogni 100 frame o al primo frame
+                # Log dettagliato periodico
                 if self._frame_count == 1 or self._frame_count % 100 == 0:
                     logger.debug(f"CameraPreviewWidget: frame {self._frame_count} per camera {self.camera_index}: "
                                  f"formato={format_str}, dimensione={width}x{height}")
@@ -131,7 +143,12 @@ class CameraPreviewWidget(QWidget):
                 pixmap = QPixmap.fromImage(qt_image)
                 self.display_label.setPixmap(pixmap)
 
-                # Aggiorna etichetta info se passano almeno 3 secondi
+                # Traccia frame visualizzati
+                if hasattr(self.parent(), '_frames_displayed') and isinstance(self.parent()._frames_displayed, dict):
+                    self.parent()._frames_displayed[self.camera_index] = self.parent()._frames_displayed.get(
+                        self.camera_index, 0) + 1
+
+                # Aggiorna etichetta info
                 if time.time() - self._last_update_time > 3.0:
                     self._last_update_time = time.time()
                     camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
@@ -143,13 +160,15 @@ class CameraPreviewWidget(QWidget):
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 return
 
-            # Calcola lag solo se timestamp è fornito
+            # Calcola lag se timestamp fornito
             if timestamp is not None:
                 self._lag_ms = int((time.time() - timestamp) * 1000)
                 self._update_lag_label()
 
         except Exception as e:
             logger.error(f"CameraPreviewWidget: errore generale in update_frame: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def _update_lag_label(self):
         """Aggiorna l'etichetta del lag e imposta il colore appropriato."""
@@ -492,26 +511,26 @@ class ScanView(QWidget):
     def _connect_to_stream(self):
         """
         Versione completamente riprogettata per connettere il widget agli stream.
-        Implementa una logica chiara e robusta con diagnostica estesa per risolvere
-        il problema della camera mancante.
+        Implementa una logica chiara e robusta con diagnostica estesa.
         """
         # --- FASE 1: Verifica dello stato attuale ---
         if self._stream_connected:
             logger.debug("Stream già connesso, verifico stato delle camere")
-
-            # Verifica che entrambe le camere stiano effettivamente ricevendo frame
+            # Verifica ricezione frame per ogni camera
             if hasattr(self, '_frame_count_by_camera'):
-                if 0 not in self._frame_count_by_camera or self._frame_count_by_camera.get(0, 0) == 0:
-                    logger.warning("Camera sinistra non sta ricevendo frame, tentativo di reinizializzazione")
-                    self._stream_connected = False  # Forza reinizializzazione
-                elif 1 not in self._frame_count_by_camera or self._frame_count_by_camera.get(1, 0) == 0:
-                    logger.warning("Camera destra non sta ricevendo frame, tentativo di reinizializzazione")
-                    self._stream_connected = False  # Forza reinizializzazione
+                camera_issues = []
+                for cam_idx in [0, 1]:
+                    if cam_idx not in self._frame_count_by_camera or self._frame_count_by_camera.get(cam_idx, 0) == 0:
+                        camera_issues.append(f"Camera {cam_idx} non riceve frame")
+
+                if camera_issues:
+                    logger.warning(f"Problemi rilevati: {', '.join(camera_issues)}")
+                    # Non forzare la riconnessione qui, ma segnalare il problema
+                    # La riconnessione è gestita dal timer di verifica
                 else:
-                    # Entrambe le camere ricevono frame, tutto ok
                     return True
             else:
-                # Primo controllo, inizializza contatori
+                # Inizializza contatori alla prima verifica
                 self._frame_count_by_camera = {0: 0, 1: 0}
                 self._last_frame_log_time = time.time()
                 return True
@@ -523,6 +542,46 @@ class ScanView(QWidget):
         if main_window is None:
             logger.error("Impossibile ottenere riferimento alla MainWindow")
             return False
+
+        has_stream_receiver = hasattr(main_window, 'stream_receiver')
+        logger.info(f"MainWindow ha stream_receiver: {has_stream_receiver}")
+
+        if has_stream_receiver and main_window.stream_receiver:
+            receiver = main_window.stream_receiver
+            logger.info("Stream receiver trovato in MainWindow")
+
+            # CORREZIONE: Try-except per gestire correttamente la disconnessione
+            try:
+                # Verifica se il segnale è connesso prima di disconnetterlo
+                if receiver.frame_received.receivers(receiver.frame_received) > 0:
+                    receiver.frame_received.disconnect(self._on_frame_received)
+                    logger.info("Precedente connessione frame_received disconnessa")
+                else:
+                    logger.info("Nessuna connessione precedente da disconnettere")
+            except Exception as e:
+                logger.info(f"Gestita eccezione durante disconnessione: {e}")
+
+            # Connetti il segnale e configura
+            receiver.frame_received.connect(self._on_frame_received)
+            logger.info("Segnale frame_received collegato con successo")
+
+            if hasattr(receiver, 'set_frame_processor'):
+                receiver.set_frame_processor(self.scan_processor)
+                logger.info("Processore di frame impostato con successo")
+
+            if hasattr(receiver, 'enable_direct_routing'):
+                receiver.enable_direct_routing(True)
+                logger.info("Direct routing abilitato con successo")
+
+            # IMPORTANTE: configura il timer di verifica
+            if not hasattr(self, '_camera_check_timer') or not self._camera_check_timer.is_alive():
+                self._camera_check_timer = threading.Timer(3.0, self._verify_camera_streams)
+                self._camera_check_timer.daemon = True
+                self._camera_check_timer.start()
+                logger.info("Timer di verifica camere avviato")
+
+            self._stream_connected = True
+            return True
 
         # --- FASE 3: Diagnostica dettagliata della struttura MainWindow ---
         logger.debug(f"Tipo di main_window: {type(main_window).__name__}")
@@ -550,21 +609,32 @@ class ScanView(QWidget):
             self._last_frame_log_time = time.time()
 
             # Verifica stato del receiver
-            if hasattr(receiver, 'is_running'):
-                is_running = receiver.is_running()
-                logger.info(f"Stream receiver is_running: {is_running}")
-                if not is_running and hasattr(receiver, 'start'):
+            if hasattr(receiver, 'is_active'):
+                is_active = receiver.is_active()
+                logger.info(f"Stream receiver is_active: {is_active}")
+                if not is_active and hasattr(receiver, 'start'):
                     logger.info("Avvio automatico stream_receiver")
                     receiver.start()
                     # Breve pausa per consentire l'inizializzazione completa
                     time.sleep(0.5)
 
-            # Disconnetti eventuali connessioni esistenti
+            # CORREZIONE: Gestione robusta della disconnessione del segnale
             try:
-                receiver.frame_received.disconnect(self._on_frame_received)
-                logger.info("Connessione precedente disconnessa")
-            except Exception:
-                logger.debug("Nessuna connessione precedente da disconnettere")
+                # Verifica se il segnale è connesso prima di disconnetterlo
+                if hasattr(receiver.frame_received, 'receivers'):
+                    if receiver.frame_received.receivers(receiver.frame_received.signal) > 0:
+                        receiver.frame_received.disconnect(self._on_frame_received)
+                        logger.info("Connessione precedente disconnessa")
+                else:
+                    # In caso non esista il metodo receivers, usa try-except
+                    try:
+                        receiver.frame_received.disconnect(self._on_frame_received)
+                        logger.info("Connessione precedente disconnessa")
+                    except (TypeError, RuntimeError):
+                        logger.debug("Nessuna connessione precedente da disconnettere")
+            except Exception as e:
+                # In caso di errore, logga e continua (non bloccare il processo)
+                logger.warning(f"Gestita eccezione durante disconnessione: {e}")
 
             # Connetti segnali
             receiver.frame_received.connect(self._on_frame_received)
@@ -634,11 +704,15 @@ class ScanView(QWidget):
                 logger.info("Stream receiver trovato in streaming_widget")
                 receiver = streaming_widget.stream_receiver
 
-                # Disconnetti eventuali connessioni esistenti
+                # Disconnetti eventuali connessioni esistenti in modo robusto
                 try:
-                    receiver.frame_received.disconnect(self._on_frame_received)
-                except:
-                    pass
+                    try:
+                        receiver.frame_received.disconnect(self._on_frame_received)
+                        logger.info("Precedente connessione disconnessa")
+                    except (TypeError, RuntimeError):
+                        logger.debug("Nessuna precedente connessione da disconnettere")
+                except Exception as e:
+                    logger.warning(f"Errore gestito durante disconnessione: {e}")
 
                 # Connetti segnali e configura
                 receiver.frame_received.connect(self._on_frame_received)
@@ -666,11 +740,15 @@ class ScanView(QWidget):
                 if receiver:
                     logger.info("Stream receiver ottenuto da scanner_controller")
 
-                    # Disconnetti eventuali connessioni esistenti
+                    # Disconnetti eventuali connessioni esistenti in modo robusto
                     try:
-                        receiver.frame_received.disconnect(self._on_frame_received)
-                    except:
-                        pass
+                        try:
+                            receiver.frame_received.disconnect(self._on_frame_received)
+                            logger.info("Precedente connessione disconnessa")
+                        except (TypeError, RuntimeError):
+                            logger.debug("Nessuna precedente connessione da disconnettere")
+                    except Exception as e:
+                        logger.warning(f"Errore gestito durante disconnessione: {e}")
 
                     # Connetti segnali e configura
                     receiver.frame_received.connect(self._on_frame_received)
@@ -694,11 +772,15 @@ class ScanView(QWidget):
                 if receiver:
                     logger.info("Usando scanner_controller.stream_receiver")
 
-                    # Configura come sopra
+                    # Configura come sopra con gestione errori robusta
                     try:
-                        receiver.frame_received.disconnect(self._on_frame_received)
-                    except:
-                        pass
+                        try:
+                            receiver.frame_received.disconnect(self._on_frame_received)
+                            logger.info("Precedente connessione disconnessa")
+                        except (TypeError, RuntimeError):
+                            logger.debug("Nessuna precedente connessione da disconnettere")
+                    except Exception as e:
+                        logger.warning(f"Errore gestito durante disconnessione: {e}")
 
                     receiver.frame_received.connect(self._on_frame_received)
 
@@ -765,6 +847,8 @@ class ScanView(QWidget):
                     logger.error("Impossibile importare StreamReceiver")
                 except Exception as e:
                     logger.error(f"Errore nella creazione StreamReceiver: {e}")
+            else:
+                logger.warning("Nessuno scanner selezionato, impossibile creare StreamReceiver")
         except Exception as e:
             logger.error(f"Errore nel tentativo finale: {e}")
 
