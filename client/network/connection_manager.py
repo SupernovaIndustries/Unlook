@@ -652,42 +652,48 @@ class ConnectionManager(QObject):
         except Exception as e:
             logger.error(f"Errore generale nella disconnessione dei segnali: {e}")
 
-    def send_message(self, device_id: str, message_type: str, payload: Dict = None) -> bool:
+    def send_message(self, device_id: str, message: Dict[str, Any], timeout: float = 5.0) -> bool:
         """
-        Invia un messaggio a uno scanner.
+        Invia un messaggio a un dispositivo con supporto timeout.
 
         Args:
-            device_id: ID univoco dello scanner
-            message_type: Tipo di messaggio
-            payload: Dati da inviare
+            device_id: ID del dispositivo
+            message: Messaggio da inviare
+            timeout: Timeout in secondi per l'invio del messaggio
 
         Returns:
-            True se il messaggio è stato inviato, False altrimenti
+            True se il messaggio è stato inviato con successo, False altrimenti
         """
-        with QMutexLocker(self._connections_mutex):
-            if device_id not in self._connections:
-                logger.error(f"Nessuna connessione attiva per {device_id}")
-                return False
+        if device_id not in self._connections:
+            logger.error(f"Nessuna connessione attiva per {device_id}")
+            return False
 
-            worker = self._connections[device_id]
-            if not worker.isRunning():
-                logger.error(f"Connessione non attiva per {device_id}")
-                return False
+        try:
+            # Imposta timeout sul socket
+            connection = self._connections[device_id]
+            socket = connection.get("socket")
+            if socket:
+                # Salva il timeout originale
+                original_timeout = socket.getsockopt(zmq.RCVTIMEO)
+                # Imposta il nuovo timeout (in millisecondi)
+                socket.setsockopt(zmq.RCVTIMEO, int(timeout * 1000))
 
-            # Prepara il messaggio
-            message = {
-                "type": message_type,
-                "timestamp": time.time(),
-                "id": str(time.time()),  # Aggiungiamo un ID univoco per tracciare i messaggi
-            }
+                # Invia il messaggio
+                json_message = json.dumps(message).encode('utf-8')
+                socket.send(json_message)
 
-            # Aggiungi il payload se presente
-            if payload:
-                message.update(payload)
+                # Ripristina il timeout originale
+                socket.setsockopt(zmq.RCVTIMEO, original_timeout)
 
-            # Serializza e invia
-            data = json.dumps(message).encode('utf-8')
-            return worker.send_data(data)
+                # Memorizza la risposta attesa
+                self._expected_responses[device_id] = message.get("type")
+                return True
+        except zmq.ZMQError as e:
+            logger.error(f"Errore ZMQ nell'invio del messaggio: {e}")
+        except Exception as e:
+            logger.error(f"Errore nell'invio del messaggio: {e}")
+
+        return False
 
     def register_message_handler(self, message_type: str, handler: Callable):
         """

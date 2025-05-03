@@ -218,24 +218,39 @@ class ScannerController(QObject):
         # ma diamo priorità allo stato dello scanner se è in streaming
         return scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
 
-    def send_command(self, device_id: str, command_type: str, payload: Dict[str, Any] = None) -> bool:
+    def send_command(self, device_id: str, command_type: str, params: dict = None, timeout: float = None) -> bool:
         """
-        Invia un comando allo scanner specificato.
+        Invia un comando a uno scanner.
 
         Args:
-            device_id: ID univoco dello scanner
+            device_id: ID del dispositivo destinatario
             command_type: Tipo di comando da inviare
-            payload: Dati aggiuntivi per il comando (opzionale)
+            params: Parametri del comando (opzionale)
+            timeout: Timeout in secondi per l'invio del comando (opzionale)
 
         Returns:
-            True se il comando è stato inviato, False altrimenti
+            True se il comando è stato inviato con successo, False altrimenti
         """
-        if not self.is_connected(device_id):
-            logger.error(f"Impossibile inviare comando: scanner {device_id} non connesso")
-            return False
+        if not params:
+            params = {}
+
+        command = {
+            "type": command_type,
+            "id": str(time.time()),
+            "timestamp": time.time()
+        }
+        command.update(params)
 
         try:
-            return self._connection_manager.send_message(device_id, command_type, payload)
+            # Usa il timeout se specificato, altrimenti usa il valore predefinito
+            if timeout is not None:
+                result = self.connection_manager.send_message(device_id, command, timeout=timeout)
+            else:
+                result = self.connection_manager.send_message(device_id, command)
+
+            if not result:
+                logger.error(f"Errore nell'invio del comando {command_type} a {device_id}")
+            return result
         except Exception as e:
             logger.error(f"Errore nell'invio del comando {command_type}: {e}")
             return False

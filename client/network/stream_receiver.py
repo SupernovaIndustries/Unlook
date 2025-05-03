@@ -316,6 +316,24 @@ class StreamReceiverThread(QThread):
         self._mutex = QMutex()
         self._max_queue_size = 2  # Buffer minimo per evitare blocchi
 
+        # Configurazione ZMQ avanzata per migliorare stabilità
+        try:
+            # Timeout più brevi per rilevare disconnessioni più rapidamente
+            self._socket.setsockopt(zmq.RCVTIMEO, 2000)  # 2s invece di 120s
+
+            # Riconnessione più aggressiva
+            self._socket.setsockopt(zmq.RECONNECT_IVL, 100)  # 100ms invece del default 1s
+            self._socket.setsockopt(zmq.RECONNECT_IVL_MAX, 5000)  # Max 5s invece di 30s
+
+            # Buffer di ricezione più ampio ma con controllo di flusso
+            self._socket.setsockopt(zmq.RCVBUF, 1024 * 1024)  # 1MB buffer di ricezione
+            self._socket.setsockopt(zmq.RCVHWM, 100)  # HWM più alto ma non troppo
+
+            # TCP NoDelay per ridurre latenza
+            self._socket.setsockopt(zmq.TCP_NODELAY, 1)
+        except:
+            pass  # Ignora se non supportato
+
         # Proprietà per il routing diretto
         self._frame_processor = None
         self._direct_routing = False

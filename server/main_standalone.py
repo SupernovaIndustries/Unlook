@@ -172,6 +172,20 @@ class UnLookServer:
         except:
             pass  # Ignora se non supportato
 
+        # Configurazione aggiuntiva per migliorare la stabilità
+        try:
+            # Imposta timeout di riconnessione più breve per recupero più veloce
+            self.stream_socket.setsockopt(zmq.RECONNECT_IVL, 100)  # 100ms invece del default 1s
+            self.stream_socket.setsockopt(zmq.RECONNECT_IVL_MAX, 5000)  # Max 5s invece del default 30s
+
+            # Timeout più breve per operazioni di rete
+            self.stream_socket.setsockopt(zmq.SNDTIMEO, 1000)  # 1s timeout per invio
+
+            # Aumenta il buffer TCP per ridurre problemi di congestione
+            self.stream_socket.setsockopt(zmq.SNDBUF, 1024 * 1024)  # 1MB buffer di invio
+        except:
+            pass  # Ignora se non supportato
+
         # Inizializza i thread
         self.broadcast_thread = None
         self.command_thread = None
@@ -1793,9 +1807,70 @@ class UnLookServer:
                         f"Impossibile catturare frame dalla camera {camera_index} dopo {max_retries} tentativi")
                     continue
 
-                # Processamento frame e invio
-                # [resto del codice per processare e inviare il frame, invariato]
-                # ...
+                # Ora dobbiamo aggiungere il codice per processare e inviare il frame
+                try:
+                    # Converti il frame in base alla modalità
+                    if mode == "grayscale" and len(frame.shape) == 3:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+
+                    # Compressione JPEG hardware se disponibile, altrimenti usa OpenCV
+                    frame_data = None
+                    if picamera2_encoder:
+                        try:
+                            # Usa l'encoder hardware per comprimere l'immagine
+                            if mode == "grayscale" and len(frame.shape) == 2:
+                                # Converte in RGB per l'encoder hardware
+                                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+                                frame_data = picamera2_encoder.encode(rgb_frame)
+                            else:
+                                frame_data = picamera2_encoder.encode(frame)
+                        except Exception as e:
+                            logger.warning(f"Errore encoder hardware, fallback a OpenCV: {e}")
+                            picamera2_encoder = None
+
+                    # Fallback a OpenCV se necessario
+                    if frame_data is None:
+                        # Codifica con OpenCV
+                        _, frame_data = cv2.imencode('.jpg', frame, encode_params)
+                        frame_data = frame_data.tobytes()
+
+                    # Prepara header compatto in formato binario per bassa latenza
+                    # Formato: |camera_idx:1B|is_scan_flag:1B|timestamp:8B|sequence:4B|
+                    import struct
+                    is_scan_frame = 0  # Flag per identificare frames di scansione
+                    sequence = frame_count
+                    header = struct.pack('!BBdI', camera_index, is_scan_frame, timestamp, sequence)
+
+                    # Invia header e frame con flag SNDMORE per messaggio in due parti
+                    try:
+                        self.stream_socket.send(header, zmq.SNDMORE)
+                        self.stream_socket.send(frame_data, copy=False)  # Zero-copy per grande efficienza
+
+                        # Aggiorna contatori
+                        frame_count += 1
+                        self._frame_count += 1  # Contatore globale
+                    except zmq.ZMQError as e:
+                        logger.warning(f"Errore nell'invio del frame: {e}")
+                        continue
+
+                    # Log periodico statistiche
+                    current_time = time.time()
+                    if current_time - last_stats_time > 10.0:  # Log ogni 10 secondi
+                        elapsed = current_time - last_stats_time
+                        fps = frame_count / elapsed
+
+                        logger.info(f"Camera {camera_index}: {frame_count} frames in {elapsed:.1f}s "
+                                    f"({fps:.1f} FPS, {skipped_frames} skipped)")
+
+                        # Reset contatori
+                        frame_count = 0
+                        skipped_frames = 0
+                        last_stats_time = current_time
+
+                except Exception as e:
+                    logger.error(f"Errore nel processing del frame: {e}")
+                    consecutive_errors += 1
+                    continue
 
             except Exception as e:
                 # Cattura errori minori e continua
