@@ -813,39 +813,72 @@ class UnLookServer:
                     response['scan_status'] = self.scan_manager.get_scan_status()
 
             elif command_type == 'START_STREAM':
+
                 # Aggiorna timestamp di attività client
+
                 self._last_client_activity = time.time()
+
                 self.client_connected = True
 
                 # Avvia lo streaming con supporto parametri avanzati
+
                 if not self.state["streaming"]:
+
                     # Opzioni opzionali per lo streaming
+
                     if 'quality' in command and isinstance(command['quality'], int):
                         # Limita qualità a un intervallo sicuro
+
                         self._jpeg_quality = max(70, min(95, command['quality']))
+
                         logger.info(f"Qualità JPEG impostata a {self._jpeg_quality}")
 
                     if 'target_fps' in command and isinstance(command['target_fps'], int):
                         # Calcola intervallo target FPS e limita a un intervallo sicuro
+
                         fps = max(5, min(60, command['target_fps']))
+
                         self._frame_interval = 1.0 / fps
+
                         logger.info(f"Target FPS impostato a {fps} (intervallo={self._frame_interval * 1000:.1f}ms)")
 
                     # Flag per uso di dual camera
+
                     dual_camera = command.get('dual_camera', True)
 
+                    # NOVITÀ: Log esplicito per la modalità dual camera
+
+                    logger.info(f"Streaming richiesto in modalità {'dual' if dual_camera else 'single'} camera")
+
+                    # NOVITÀ: Verifica esplicitamente che entrambe le camere siano disponibili
+
+                    available_cameras = len(self.cameras)
+
+                    if dual_camera and available_cameras >= 2:
+
+                        logger.info(
+                            f"Entrambe le camere disponibili ({available_cameras}). Modalità dual camera confermata.")
+
+                    elif dual_camera and available_cameras < 2:
+
+                        logger.warning(
+                            f"Modalità dual camera richiesta ma solo {available_cameras} camera disponibile.")
+
                     # Avvia lo streaming
+
                     self.start_streaming()
 
                     # Informazioni per il client
+
                     response['streaming'] = True
+
                     response['cameras'] = len(self.cameras)
+
                     response['quality'] = self._jpeg_quality
+
                     response['target_fps'] = int(1.0 / self._frame_interval)
+
                     response['dual_camera'] = dual_camera and len(self.cameras) > 1
-                else:
-                    response['streaming'] = True
-                    response['message'] = "Streaming già attivo"
 
             elif command_type == 'STOP_STREAM':
                 # Aggiorna timestamp di attività client
@@ -1728,7 +1761,7 @@ class UnLookServer:
             return None
 
         return result[0]
-    
+
     def _capture_frames(self) -> bool:
         """
         Cattura un singolo frame da tutte le camere attive.

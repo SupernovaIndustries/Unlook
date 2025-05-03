@@ -52,6 +52,7 @@ class CameraPreviewWidget(QWidget):
         self._fps = 0
         self._frame_count = 0
         self._lag_ms = 0
+        self._last_lag_ms = 0  # Aggiungi questa inizializzazione
         self._max_lag_warning = 200  # ms, soglia per avviso lag
 
         # Setup UI
@@ -87,71 +88,78 @@ class CameraPreviewWidget(QWidget):
     @Slot(np.ndarray, float)
     def update_frame(self, frame: np.ndarray, timestamp: float = None):
         """Aggiorna il frame visualizzato con calcolo lag ottimizzato."""
-        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
-            return
-
-        # Solo memorizza il frame senza elaborazioni costose
-        self._frame = frame  # Non usiamo .copy() per evitare copie superflue
-        self._frame_count += 1
-
-        # Conversione ottimizzata del frame in QImage
-        height, width = frame.shape[:2]
-        bytes_per_line = frame.strides[0]
-
-        # Evita conversioni di colore superflue
         try:
-            if len(frame.shape) == 3 and frame.shape[2] == 3:
-                # Frame a colori BGR -> RGB
-                # Usiamo una visualizzazione invece di una copia dove possibile
-                # Questo è un compromesso tra velocità e correttezza
-                if self._frame_count % 2 == 0:  # Solo 1 frame su 2 fa la conversione completa
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    qt_image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+                return
+
+            # Solo memorizza il frame senza elaborazioni costose
+            self._frame = frame  # Non usiamo .copy() per evitare copie superflue
+            self._frame_count += 1
+
+            # Conversione ottimizzata del frame in QImage
+            height, width = frame.shape[:2]
+            bytes_per_line = frame.strides[0]
+
+            # Evita conversioni di colore superflue
+            try:
+                if len(frame.shape) == 3 and frame.shape[2] == 3:
+                    # Frame a colori BGR -> RGB
+                    # Usiamo una visualizzazione invece di una copia dove possibile
+                    # Questo è un compromesso tra velocità e correttezza
+                    if self._frame_count % 2 == 0:  # Solo 1 frame su 2 fa la conversione completa
+                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        qt_image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                    else:
+                        # Approssimazione BGR->RGB scambiando solo i canali nella QImage
+                        qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_BGR888)
                 else:
-                    # Approssimazione BGR->RGB scambiando solo i canali nella QImage
-                    qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_BGR888)
-            else:
-                # Frame in scala di grigi (più veloce)
-                qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+                    # Frame in scala di grigi (più veloce)
+                    qt_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+            except Exception as e:
+                logger.warning(f"Errore conversione QImage: {e}")
+                return
+
+            # Visualizza il frame - no scaling durante acquisizione pattern
+            pixmap = QPixmap.fromImage(qt_image)
+            # Scaling ottimizzato solo se necessario
+            if self.display_label.width() < width or self.display_label.height() < height:
+                pixmap = pixmap.scaled(
+                    self.display_label.width(), self.display_label.height(),
+                    Qt.KeepAspectRatio, Qt.FastTransformation  # Usa FastTransformation per velocità
+                )
+            self.display_label.setPixmap(pixmap)
+
+            # Calcola FPS con media esponenziale più stabile
+            current_time = time.time()
+            if self._last_update_time > 0:
+                time_diff = current_time - self._last_update_time
+                if time_diff > 0:
+                    fps = 1.0 / time_diff
+                    # Media mobile con peso maggiore sui valori recenti
+                    self._fps = (0.8 * self._fps) + (0.2 * fps)
+
+            self._last_update_time = current_time
+
+            # Calcola lag se è stato fornito un timestamp
+            if timestamp is not None:
+                self._lag_ms = int((time.time() - timestamp) * 1000)
+
+                # Aggiorna etichetta lag solo se è cambiato significativamente
+                # Ora funzionerà perché abbiamo inizializzato _last_lag_ms
+                if abs(self._lag_ms - self._last_lag_ms) > 20 or self._frame_count % 10 == 0:
+                    self._update_lag_label()
+                    self._last_lag_ms = self._lag_ms
+
+            # Aggiorna etichetta informativa solo saltuariamente per ridurre carico UI
+            if self._frame_count % 15 == 0:
+                camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
+                fps_text = f"{self._fps:.1f} FPS" if self._fps > 0 else ""
+                self.info_label.setText(f"Camera {camera_name} | {width}x{height} | {fps_text}")
         except Exception as e:
-            logger.warning(f"Errore conversione QImage: {e}")
-            return
-
-        # Visualizza il frame - no scaling durante acquisizione pattern
-        pixmap = QPixmap.fromImage(qt_image)
-        # Scaling ottimizzato solo se necessario
-        if self.display_label.width() < width or self.display_label.height() < height:
-            pixmap = pixmap.scaled(
-                self.display_label.width(), self.display_label.height(),
-                Qt.KeepAspectRatio, Qt.FastTransformation  # Usa FastTransformation per velocità
-            )
-        self.display_label.setPixmap(pixmap)
-
-        # Calcola FPS con media esponenziale più stabile
-        current_time = time.time()
-        if self._last_update_time > 0:
-            time_diff = current_time - self._last_update_time
-            if time_diff > 0:
-                fps = 1.0 / time_diff
-                # Media mobile con peso maggiore sui valori recenti
-                self._fps = (0.8 * self._fps) + (0.2 * fps)
-
-        self._last_update_time = current_time
-
-        # Calcola lag se è stato fornito un timestamp
-        if timestamp is not None:
-            self._lag_ms = int((time.time() - timestamp) * 1000)
-
-            # Aggiorna etichetta lag solo se è cambiato significativamente
-            if abs(self._lag_ms - self._last_lag_ms) > 20 or self._frame_count % 10 == 0:
-                self._update_lag_label()
-                self._last_lag_ms = self._lag_ms
-
-        # Aggiorna etichetta informativa solo saltuariamente per ridurre carico UI
-        if self._frame_count % 15 == 0:
-            camera_name = "Sinistra" if self.camera_index == 0 else "Destra"
-            fps_text = f"{self._fps:.1f} FPS" if self._fps > 0 else ""
-            self.info_label.setText(f"Camera {camera_name} | {width}x{height} | {fps_text}")
+            # Aggiunta gestione errori globale per debug
+            logger.error(f"Errore in update_frame per camera {self.camera_index}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def _update_lag_label(self):
         """Aggiorna l'etichetta del lag e imposta il colore appropriato."""
@@ -492,99 +500,286 @@ class ScanView(QWidget):
         )
 
     def _connect_to_stream(self):
-        """Collega il widget agli stream delle camere con approccio robusto."""
+        """
+        Versione completamente riprogettata per connettere il widget agli stream.
+        Implementa una logica chiara e robusta con diagnostica estesa per risolvere
+        il problema della camera mancante.
+        """
+        # --- FASE 1: Verifica dello stato attuale ---
         if self._stream_connected:
-            logger.debug("Stream già connesso, nessuna azione necessaria")
+            logger.debug("Stream già connesso, verifico stato delle camere")
+
+            # Verifica che entrambe le camere stiano effettivamente ricevendo frame
+            if hasattr(self, '_frame_count_by_camera'):
+                if 0 not in self._frame_count_by_camera or self._frame_count_by_camera.get(0, 0) == 0:
+                    logger.warning("Camera sinistra non sta ricevendo frame, tentativo di reinizializzazione")
+                    self._stream_connected = False  # Forza reinizializzazione
+                elif 1 not in self._frame_count_by_camera or self._frame_count_by_camera.get(1, 0) == 0:
+                    logger.warning("Camera destra non sta ricevendo frame, tentativo di reinizializzazione")
+                    self._stream_connected = False  # Forza reinizializzazione
+                else:
+                    # Entrambe le camere ricevono frame, tutto ok
+                    return True
+            else:
+                # Primo controllo, inizializza contatori
+                self._frame_count_by_camera = {0: 0, 1: 0}
+                self._last_frame_log_time = time.time()
+                return True
+
+        # --- FASE 2: Cerca MainWindow e stream_receiver ---
+        main_window = self.window()
+        logger.info(f"MainWindow trovata: {main_window is not None}")
+
+        if main_window is None:
+            logger.error("Impossibile ottenere riferimento alla MainWindow")
+            return False
+
+        # --- FASE 3: Diagnostica dettagliata della struttura MainWindow ---
+        logger.debug(f"Tipo di main_window: {type(main_window).__name__}")
+
+        # Elenca attributi rilevanti per diagnostica
+        important_attrs = ['stream_receiver', 'streaming_widget', 'scanner_controller']
+        found_attrs = []
+        for attr in important_attrs:
+            if hasattr(main_window, attr):
+                found_attrs.append(attr)
+        logger.debug(f"Attributi rilevanti trovati: {found_attrs}")
+
+        # --- FASE 4: Tentativo di connessione tramite stream_receiver diretto ---
+        if hasattr(main_window, 'stream_receiver') and main_window.stream_receiver:
+            logger.info("Stream receiver trovato in MainWindow")
+            receiver = main_window.stream_receiver
+
+            # Verifica funzionalità fondamentali
+            if not hasattr(receiver, 'frame_received'):
+                logger.error("Stream receiver non ha il segnale frame_received, impossibile connettersi")
+                return False
+
+            # Reinizializza statistiche
+            self._frame_count_by_camera = {0: 0, 1: 0}
+            self._last_frame_log_time = time.time()
+
+            # Verifica stato del receiver
+            if hasattr(receiver, 'is_running'):
+                is_running = receiver.is_running()
+                logger.info(f"Stream receiver is_running: {is_running}")
+                if not is_running and hasattr(receiver, 'start'):
+                    logger.info("Avvio automatico stream_receiver")
+                    receiver.start()
+                    # Breve pausa per consentire l'inizializzazione completa
+                    time.sleep(0.5)
+
+            # Disconnetti eventuali connessioni esistenti
+            try:
+                receiver.frame_received.disconnect(self._on_frame_received)
+                logger.info("Connessione precedente disconnessa")
+            except Exception:
+                logger.debug("Nessuna connessione precedente da disconnettere")
+
+            # Connetti segnali
+            receiver.frame_received.connect(self._on_frame_received)
+            logger.info("Segnale frame_received collegato con successo")
+
+            # Configura il processore di frame
+            if hasattr(receiver, 'set_frame_processor'):
+                receiver.set_frame_processor(self.scan_processor)
+                logger.info("Processore di frame impostato con successo")
+
+            # Richiedi esplicitamente dual camera se disponibile
+            if hasattr(receiver, 'request_dual_camera'):
+                logger.info("Richiesta esplicita dual camera")
+                receiver.request_dual_camera(True)
+            elif hasattr(receiver, 'set_dual_camera'):
+                logger.info("Impostazione esplicita dual camera")
+                receiver.set_dual_camera(True)
+
+            # Abilita routing diretto per efficienza
+            if hasattr(receiver, 'enable_direct_routing'):
+                receiver.enable_direct_routing(True)
+                logger.info("Routing diretto abilitato per efficienza")
+
+            # Verifica e diagnosi ulteriori connessioni
+            if hasattr(receiver, '_connections'):
+                conn_count = len(receiver._connections)
+                logger.info(f"Stream receiver ha {conn_count} connessioni attive")
+
+                if conn_count == 0:
+                    logger.warning("Nessuna connessione attiva nel receiver!")
+                    # Prova a inviare un comando di riavvio streaming al server
+                    if self.selected_scanner and self.scanner_controller:
+                        try:
+                            logger.info("Riavvio stream dal server...")
+                            # Prima ferma lo streaming eventuale
+                            self.scanner_controller.send_command(
+                                self.selected_scanner.device_id,
+                                "STOP_STREAM"
+                            )
+                            time.sleep(0.3)
+                            # Riavvia con dual_camera=True esplicito
+                            self.scanner_controller.send_command(
+                                self.selected_scanner.device_id,
+                                "START_STREAM",
+                                {"dual_camera": True}
+                            )
+                        except Exception as e:
+                            logger.error(f"Errore nel riavvio dello stream: {e}")
+
+            # Configura timer di verifica camere mancanti
+            if not hasattr(self, '_camera_check_timer') or not self._camera_check_timer.is_alive():
+                self._camera_check_timer = threading.Timer(3.0, self._verify_camera_streams)
+                self._camera_check_timer.daemon = True
+                self._camera_check_timer.start()
+                logger.info("Timer di verifica camere avviato")
+
+            self._stream_connected = True
             return True
 
-        try:
-            # Cerca il main window
-            main_window = self.window()
-            logger.info(f"MainWindow trovata: {main_window is not None}")
+        # --- FASE 5: Fallback tramite streaming_widget ---
+        elif hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
+            logger.info("Tentativo tramite streaming_widget")
+            streaming_widget = main_window.streaming_widget
 
-            # NUOVA IMPLEMENTAZIONE: verifica prima il riferimento diretto a stream_receiver
-            has_stream_receiver = hasattr(main_window, 'stream_receiver')
-            logger.info(f"MainWindow ha stream_receiver: {has_stream_receiver}")
+            # Cerca stream_receiver nel widget
+            if hasattr(streaming_widget, 'stream_receiver') and streaming_widget.stream_receiver:
+                logger.info("Stream receiver trovato in streaming_widget")
+                receiver = streaming_widget.stream_receiver
 
-            if has_stream_receiver and main_window.stream_receiver:
-                receiver = main_window.stream_receiver
+                # Disconnetti eventuali connessioni esistenti
+                try:
+                    receiver.frame_received.disconnect(self._on_frame_received)
+                except:
+                    pass
 
-                # Verifica se il receiver ha i metodi necessari
-                logger.info(f"Metodi disponibili nel receiver: "
-                            f"frame_received={hasattr(receiver, 'frame_received')}, "
-                            f"set_frame_processor={hasattr(receiver, 'set_frame_processor')}, "
-                            f"enable_direct_routing={hasattr(receiver, 'enable_direct_routing')}")
+                # Connetti segnali e configura
+                receiver.frame_received.connect(self._on_frame_received)
 
-                # Tenta di accedere al segnale frame_received
-                if hasattr(receiver, 'frame_received'):
+                if hasattr(receiver, 'set_frame_processor'):
+                    receiver.set_frame_processor(self.scan_processor)
+
+                if hasattr(receiver, 'enable_direct_routing'):
+                    receiver.enable_direct_routing(True)
+
+                if hasattr(receiver, 'request_dual_camera'):
+                    receiver.request_dual_camera(True)
+
+                self._stream_connected = True
+                logger.info("Connessione tramite streaming_widget riuscita")
+                return True
+
+        # --- FASE 6: Tentativo tramite scanner_controller ---
+        if hasattr(self, 'scanner_controller') and self.scanner_controller:
+            logger.info("Tentativo tramite scanner_controller")
+
+            # Ottieni stream_receiver dal controller
+            if hasattr(self.scanner_controller, 'get_stream_receiver'):
+                receiver = self.scanner_controller.get_stream_receiver()
+                if receiver:
+                    logger.info("Stream receiver ottenuto da scanner_controller")
+
                     # Disconnetti eventuali connessioni esistenti
                     try:
                         receiver.frame_received.disconnect(self._on_frame_received)
                     except:
                         pass
 
-                    # Collega il segnale
+                    # Connetti segnali e configura
                     receiver.frame_received.connect(self._on_frame_received)
-                    logger.info("Segnale frame_received collegato con successo")
 
-                    # Imposta il processore di scan frame
                     if hasattr(receiver, 'set_frame_processor'):
                         receiver.set_frame_processor(self.scan_processor)
-                        logger.info("Processore di frame impostato con successo")
 
-                    # Abilita routing diretto
                     if hasattr(receiver, 'enable_direct_routing'):
                         receiver.enable_direct_routing(True)
-                        logger.info("Routing diretto abilitato con successo")
+
+                    if hasattr(receiver, 'request_dual_camera'):
+                        receiver.request_dual_camera(True)
+
+                    self._stream_connected = True
+                    logger.info("Connessione tramite scanner_controller riuscita")
+                    return True
+
+            # Verifica riferimento diretto a stream_receiver nel controller
+            elif hasattr(self.scanner_controller, 'stream_receiver'):
+                receiver = self.scanner_controller.stream_receiver
+                if receiver:
+                    logger.info("Usando scanner_controller.stream_receiver")
+
+                    # Configura come sopra
+                    try:
+                        receiver.frame_received.disconnect(self._on_frame_received)
+                    except:
+                        pass
+
+                    receiver.frame_received.connect(self._on_frame_received)
+
+                    if hasattr(receiver, 'set_frame_processor'):
+                        receiver.set_frame_processor(self.scan_processor)
+
+                    if hasattr(receiver, 'enable_direct_routing'):
+                        receiver.enable_direct_routing(True)
+
+                    if hasattr(receiver, 'request_dual_camera'):
+                        receiver.request_dual_camera(True)
 
                     self._stream_connected = True
                     return True
-                else:
-                    logger.error("Segnale frame_received non trovato nel receiver")
-            else:
-                # MANTENGO IL CODICE LEGACY per compatibilità, ma ora come fallback
-                has_streaming_widget = hasattr(main_window, 'streaming_widget')
-                logger.info(f"MainWindow ha streaming_widget: {has_streaming_widget}")
 
-                if has_streaming_widget and main_window.streaming_widget:
-                    # ... [resto del codice esistente per streaming_widget] ...
-                    logger.info("Connessione tramite streaming_widget (legacy)")
-                else:
-                    logger.warning("Né stream_receiver né streaming_widget trovati in MainWindow")
+        # --- FASE 7: Tentativo di creazione nuovo receiver ---
+        logger.info("Tentativo di creazione nuovo receiver")
+        try:
+            if self.selected_scanner:
+                # Ottieni parametri connessione
+                host = self.selected_scanner.ip_address
+                port = self.selected_scanner.port + 1  # Porta stream = porta comandi + 1
 
-                    # Tentativo alternativo di trovare il receiver dal controller
-                    if hasattr(self, 'scanner_controller') and self.scanner_controller:
-                        if hasattr(self.scanner_controller, 'get_stream_receiver'):
-                            receiver = self.scanner_controller.get_stream_receiver()
-                            if receiver:
-                                logger.info("Receiver trovato direttamente dal controller")
+                # Importa dinamicamente StreamReceiver
+                try:
+                    from client.network.stream_receiver import StreamReceiver
+                    logger.info(f"Creazione nuovo StreamReceiver su {host}:{port}")
 
-                                # ... [resto del codice esistente per collegarsi al receiver] ...
-                                # Disconnetti eventuali connessioni esistenti
-                                try:
-                                    receiver.frame_received.disconnect(self._on_frame_received)
-                                except:
-                                    pass
+                    # Crea istanza
+                    receiver = StreamReceiver(host, port)
 
-                                receiver.frame_received.connect(self._on_frame_received)
+                    # Configura
+                    receiver.frame_received.connect(self._on_frame_received)
 
-                                if hasattr(receiver, 'set_frame_processor'):
-                                    receiver.set_frame_processor(self.scan_processor)
+                    if hasattr(receiver, 'set_frame_processor'):
+                        receiver.set_frame_processor(self.scan_processor)
 
-                                if hasattr(receiver, 'enable_direct_routing'):
-                                    receiver.enable_direct_routing(True)
+                    if hasattr(receiver, 'enable_direct_routing'):
+                        receiver.enable_direct_routing(True)
 
-                                self._stream_connected = True
-                                return True
+                    # Avvia il receiver
+                    receiver.start()
 
-                    logger.error("Non è stato possibile trovare un stream receiver valido")
-                    return False
+                    # Mantieni riferimento
+                    self._local_stream_receiver = receiver
 
+                    # Forza avvio streaming se abbiamo il controller
+                    if self.scanner_controller:
+                        logger.info("Invio comando avvio streaming al server...")
+                        self.scanner_controller.send_command(
+                            self.selected_scanner.device_id,
+                            "START_STREAM",
+                            {
+                                "dual_camera": True,
+                                "quality": 90,
+                                "target_fps": 30
+                            }
+                        )
+
+                    self._stream_connected = True
+                    logger.info("Nuovo StreamReceiver creato e avviato")
+                    return True
+                except ImportError:
+                    logger.error("Impossibile importare StreamReceiver")
+                except Exception as e:
+                    logger.error(f"Errore nella creazione StreamReceiver: {e}")
         except Exception as e:
-            logger.error(f"Errore nella connessione agli stream: {e}")
-            import traceback
-            logger.error(f"Traceback completo: {traceback.format_exc()}")
+            logger.error(f"Errore nel tentativo finale: {e}")
 
+        # --- FASE 8: Fallimento finale ---
+        logger.error("Impossibile connettersi agli stream delle camere dopo tutti i tentativi")
         return False
 
     def _register_frame_handler(self):
@@ -631,11 +826,43 @@ class ScanView(QWidget):
 
     def _on_frame_received(self, camera_index: int, frame: np.ndarray, timestamp: float):
         """Gestisce la ricezione di un frame dallo stream."""
-        # Aggiorna il preview corrispondente
-        if camera_index == 0:
-            self.left_preview.update_frame(frame, timestamp)
-        elif camera_index == 1:
-            self.right_preview.update_frame(frame, timestamp)
+        try:
+            # Log migliorato per tracciamento frame
+            if not hasattr(self, '_frame_count_by_camera'):
+                self._frame_count_by_camera = {0: 0, 1: 0}
+                self._last_frame_log_time = time.time()
+
+            # Incrementa contatore per questa camera
+            self._frame_count_by_camera[camera_index] = self._frame_count_by_camera.get(camera_index, 0) + 1
+
+            # Log periodico (ogni 5 secondi) per verificare ricezione frame per camera
+            now = time.time()
+            if now - getattr(self, '_last_frame_log_time', 0) > 5.0:
+                self._last_frame_log_time = now
+                total_frames = sum(self._frame_count_by_camera.values())
+                logger.info(f"Statistiche frame ricevuti negli ultimi 5s: " +
+                            f"totale={total_frames}, " +
+                            ", ".join([f"camera{idx}={count}" for idx, count in self._frame_count_by_camera.items()]))
+                self._frame_count_by_camera = {0: 0, 1: 0}  # Reset contatori
+
+            # Verifica validità frame
+            if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+                logger.warning(f"Frame non valido ricevuto per camera {camera_index}")
+                return
+
+            # Aggiorna il preview corrispondente
+            if camera_index == 0:
+                self.left_preview.update_frame(frame, timestamp)
+            elif camera_index == 1:
+                self.right_preview.update_frame(frame, timestamp)
+            else:
+                logger.warning(f"Indice camera non riconosciuto: {camera_index}")
+
+        except Exception as e:
+            # Log esplicito degli errori per debug
+            logger.error(f"Errore in _on_frame_received per camera {camera_index}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def _on_scan_frame_received(self, camera_index: int, frame: np.ndarray, frame_info: Dict):
         """Gestisce la ricezione di un frame di scansione."""
@@ -1755,3 +1982,100 @@ class ScanView(QWidget):
                 # Mostra errore usando metodo thread-safe
                 self._show_error_message("Errore",
                                          f"Si è verificato un errore durante la scansione sincronizzata:\n{str(e)}")
+    def _verify_camera_streams(self):
+        """
+        Verifica che entrambe le camere stiano ricevendo frame e tenta di recuperare
+        quelle mancanti. Viene eseguito periodicamente dal timer _camera_check_timer.
+        """
+        try:
+            if not hasattr(self, '_frame_count_by_camera'):
+                self._frame_count_by_camera = {0: 0, 1: 0}
+
+            # Verifica quali camere non ricevono frame
+            missing_cameras = []
+            for idx in [0, 1]:
+                if idx not in self._frame_count_by_camera or self._frame_count_by_camera.get(idx, 0) == 0:
+                    missing_cameras.append(idx)
+
+            # Se entrambe le camere funzionano, nessuna azione necessaria
+            if not missing_cameras:
+                # Resetta contatori per prossima verifica
+                self._frame_count_by_camera = {0: 0, 1: 0}
+
+                # Pianifica prossima verifica
+                if not hasattr(self, '_camera_check_timer') or not self._camera_check_timer.is_alive():
+                    self._camera_check_timer = threading.Timer(5.0, self._verify_camera_streams)
+                    self._camera_check_timer.daemon = True
+                    self._camera_check_timer.start()
+                return
+
+            # Altrimenti, abbiamo camere mancanti da recuperare
+            camera_names = ["sinistra" if idx == 0 else "destra" for idx in missing_cameras]
+            camera_str = " e ".join(camera_names)
+            logger.warning(f"Camera {camera_str} non riceve frame. Tentativo di recupero...")
+
+            # STRATEGIA 1: Riavvia lo streaming lato server
+            if self.selected_scanner and self.scanner_controller:
+                try:
+                    # Prima ferma lo streaming
+                    logger.info("Fermata temporanea dello streaming...")
+                    self.scanner_controller.send_command(
+                        self.selected_scanner.device_id,
+                        "STOP_STREAM"
+                    )
+                    time.sleep(0.5)  # Attendi che si fermi
+
+                    # Riavvia con richiesta esplicita dual camera
+                    logger.info("Riavvio streaming con dual_camera=True...")
+                    self.scanner_controller.send_command(
+                        self.selected_scanner.device_id,
+                        "START_STREAM",
+                        {
+                            "dual_camera": True,
+                            "quality": 90,
+                            "target_fps": 30
+                        }
+                    )
+
+                    # Reset contatori per prossima verifica
+                    self._frame_count_by_camera = {0: 0, 1: 0}
+                except Exception as e:
+                    logger.error(f"Errore nel riavvio dello streaming: {e}")
+
+            # STRATEGIA 2: Reinizializza il receiver lato client
+            main_window = self.window()
+            if hasattr(main_window, 'stream_receiver') and main_window.stream_receiver:
+                receiver = main_window.stream_receiver
+
+                # Verifica se esiste un metodo restart o reinit
+                if hasattr(receiver, 'restart') and callable(receiver.restart):
+                    logger.info("Riavvio del receiver...")
+                    try:
+                        receiver.restart()
+                    except Exception as e:
+                        logger.error(f"Errore nel restart del receiver: {e}")
+                elif hasattr(receiver, 'reconnect') and callable(receiver.reconnect):
+                    logger.info("Riconnessione del receiver...")
+                    try:
+                        receiver.reconnect()
+                    except Exception as e:
+                        logger.error(f"Errore nella riconnessione del receiver: {e}")
+
+            # STRATEGIA 3: Forza aggiornamento via refresh di _connect_to_stream
+            logger.info("Forzatura reinizializzazione della connessione...")
+            self._stream_connected = False
+            self._connect_to_stream()
+
+            # Pianifica prossima verifica
+            if not hasattr(self, '_camera_check_timer') or not self._camera_check_timer.is_alive():
+                # Se ci sono problemi, controlla più frequentemente
+                self._camera_check_timer = threading.Timer(3.0, self._verify_camera_streams)
+                self._camera_check_timer.daemon = True
+                self._camera_check_timer.start()
+
+        except Exception as e:
+            logger.error(f"Errore nella verifica delle camere: {e}")
+            # Assicurati che il timer venga comunque riavviato
+            self._camera_check_timer = threading.Timer(5.0, self._verify_camera_streams)
+            self._camera_check_timer.daemon = True
+            self._camera_check_timer.start()
