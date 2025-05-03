@@ -11,6 +11,7 @@ import threading
 import cv2
 import json
 import numpy as np
+import concurrent.futures
 from typing import Dict, Any, Optional, Callable, Set
 import zmq
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QMutex, QMutexLocker, QThread

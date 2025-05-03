@@ -141,11 +141,25 @@ class UnLookServer:
             "start_time": time.time()
         }
 
-        # Inizializza i socket di comunicazione
+        # Inizializza i socket di comunicazione con configurazione a bassa latenza
         self.broadcast_socket = None
         self.context = zmq.Context()
-        self.command_socket = self.context.socket(zmq.REP)  # Socket per i comandi (REP)
-        self.stream_socket = self.context.socket(zmq.PUB)  # Socket per lo streaming (PUB)
+
+        # Socket comandi
+        self.command_socket = self.context.socket(zmq.REP)
+
+        # Socket streaming con configurazione ultra-bassa latenza
+        self.stream_socket = self.context.socket(zmq.PUB)
+        self.stream_socket.setsockopt(zmq.SNDHWM, 1)  # Alta priorità a latenza vs throughput
+        self.stream_socket.setsockopt(zmq.LINGER, 0)  # Non attendere alla chiusura
+        try:
+            self.stream_socket.setsockopt(zmq.IMMEDIATE, 1)  # Evita buffering
+        except:
+            pass  # Ignora se non supportato
+        try:
+            self.stream_socket.setsockopt(zmq.TCP_NODELAY, 1)  # Disabilita Nagle
+        except:
+            pass  # Ignora se non supportato
 
         # Inizializza i thread
         self.broadcast_thread = None
@@ -153,19 +167,19 @@ class UnLookServer:
         self.stream_threads = []
 
         # Controllo di flusso
-        self._frame_interval = 1.0 / 30.0  # Intervallo iniziale per 30 FPS
+        self._frame_interval = 1.0 / 30.0  # 30fps target
         self._dynamic_interval = True  # Regolazione dinamica dell'intervallo
         self._last_frame_time = 0
         self._streaming_start_time = 0
         self._frame_count = 0
 
+        # Parametri di qualità dell'immagine ottimizzati
+        self._jpeg_quality = 75  # Qualità JPEG ridotta per bassa latenza
+
         # Informazioni sul client
         self.client_connected = False
         self.client_ip = None
         self._last_client_activity = 0
-
-        # Parametri di qualità dell'immagine
-        self._jpeg_quality = 90  # Qualità JPEG ottimale per bassa latenza
 
         # Inizializza il gestore di scansione 3D
         self.scan_manager = None
@@ -1666,6 +1680,11 @@ class UnLookServer:
         last_stats_time = time.time()
         next_frame_time = time.time()
         timestamp = time.time()
+
+        # Variabile per indicare se il frame è destinato alla scansione
+        is_scan_frame = False
+
+        # Usa encoder hardware se disponibile
         picamera2_encoder = None
         try:
             from picamera2.encoders import JpegEncoder, Quality
@@ -1678,12 +1697,6 @@ class UnLookServer:
         # Loop ottimizzato per bassa latenza
         while self.state["streaming"] and self.running:
             try:
-                if picamera2_encoder:
-                    encoded_data = picamera2_encoder.encode(frame)
-                else:
-                    # Fallback a cv2
-                    success, encoded_data = cv2.imencode('.jpg', frame, encode_params)
-
                 current_time = time.time()
 
                 # Controllo di flusso ultra-aggressivo:
@@ -1705,6 +1718,7 @@ class UnLookServer:
                 # Cattura il frame con timeout minimo
                 try:
                     frame = camera.capture_array()
+                    timestamp = time.time()  # Timestamp di acquisizione preciso
                     if frame is None or frame.size == 0:
                         continue
                 except Exception as e:
@@ -1722,18 +1736,21 @@ class UnLookServer:
                     frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
 
                 # Compressione JPEG ad alta velocità
-                try:
-                    success, encoded_data = cv2.imencode('.jpg', frame, encode_params)
-                    if not success:
+                if picamera2_encoder:
+                    encoded_data = picamera2_encoder.encode(frame)
+                else:
+                    try:
+                        success, encoded_data = cv2.imencode('.jpg', frame, encode_params)
+                        if not success:
+                            continue
+                    except Exception as e:
                         continue
-                except Exception as e:
-                    continue
 
                 # Struttura: |camera_idx|timestamp|sequence|format_code|
                 import struct
                 header_bin = struct.pack('!BBdI',
                                          camera_index,  # 1 byte
-                                         1 if is_scan_frame else 0,  # 1 byte
+                                         1 if is_scan_frame else 0,  # 1 byte (flag per scan frame)
                                          timestamp,  # 8 byte (double)
                                          frame_count)  # 4 byte (uint32)
 

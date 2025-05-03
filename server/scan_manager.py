@@ -649,7 +649,7 @@ class ScanManager:
             # Acquisizione eseguita in _capture_frame_callback, qui restituiamo solo lo stato
             # e dettagli tecnici per diagnostica
             return {
-                'status': 'ok',  # Cambiato da 'success' a 'ok' per compatibilità
+                'status': 'success',  # Qui dovrebbe essere 'success' per compatibilità
                 'message': f'Pattern {pattern_name} proiettato con successo',
                 'pattern_index': pattern_index,
                 'pattern_name': pattern_name,
