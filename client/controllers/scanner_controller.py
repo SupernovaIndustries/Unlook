@@ -437,29 +437,32 @@ class ScannerController(QObject):
 
         try:
             # Prepara dati comando
-            command_data = {
-                "command": command_type,  # Usa 'command' invece di 'type'
-                "request_id": str(uuid.uuid4()),
-                "timestamp": time.time()
-            }
-
-            # Aggiungi dati se presenti
+            # I dati aggiuntivi non dovrebbero includere 'command' o 'type' per evitare conflitti
+            safe_data = None
             if data:
-                command_data.update(data)
+                safe_data = data.copy()
+                # Rimozione sicura per evitare conflitti
+                if 'command' in safe_data or 'type' in safe_data:
+                    logger.warning(f"I dati contengono 'command' o 'type' che potrebbero causare conflitti")
+                    safe_data.pop('command', None)
+                    safe_data.pop('type', None)
 
-            # Determina timeout effettivo
-            effective_timeout = timeout if timeout is not None else 2.0  # Default 2s
+                # Aggiungiamo timestamp se non presente
+                if 'timestamp' not in safe_data:
+                    safe_data['timestamp'] = time.time()
+            else:
+                safe_data = {"timestamp": time.time()}
 
             # Log dei comandi principali
             if command_type not in ["PING", "GET_STATUS"]:
                 logger.debug(f"Invio comando {command_type} a {device_id}")
 
-            # Invia il comando
+            # Invia il comando - il connection_manager si occuperà di aggiungere command/type
             success = self.connection_manager.send_message(
                 device_id,
-                command_type,  # Pass command type separately
-                command_data,  # Pass command data
-                effective_timeout  # Pass timeout
+                command_type,
+                safe_data,
+                timeout or 2.0  # Default 2s
             )
 
             # Gestione speciale per comandi che potrebbero richiedere retry
@@ -471,8 +474,8 @@ class ScannerController(QObject):
                 success = self.connection_manager.send_message(
                     device_id,
                     command_type,
-                    command_data,
-                    effective_timeout * 1.5  # 50% in più di timeout
+                    safe_data,
+                    (timeout or 2.0) * 1.5  # 50% in più di timeout
                 )
 
             return success

@@ -116,14 +116,17 @@ class ConnectionManager:
                 try:
                     # Timeout più lungo per la connessione iniziale
                     with self._set_socket_timeout(socket, 5000):
+                        # Utilizza sia 'command' che 'type' per compatibilità
                         socket.send_json({
                             "command": "PING",
+                            "type": "PING",  # Aggiungi per compatibilità
                             "timestamp": time.time(),
                             "request_id": str(uuid.uuid4())
                         })
 
                         response = socket.recv_json()
                         if response.get("status") != "ok":
+                            logger.error(f"Risposta ping non valida: {response}")
                             raise Exception(f"Ping iniziale fallito: {response.get('message', 'Risposta non valida')}")
                 except Exception as e:
                     logger.error(f"Errore nella connessione a {endpoint}: {e}")
@@ -227,12 +230,17 @@ class ConnectionManager:
         # Prepara il messaggio
         message = {
             "command": command,
+            "type": command,  # Aggiungi anche 'type' per compatibilità con il server
             "request_id": str(uuid.uuid4())
         }
 
-        # Aggiungi dati se forniti
+        # Aggiungi dati se forniti, ma preserva il comando originale
         if data:
-            message.update(data)
+            data_copy = data.copy()
+            # Rimuovi eventuali campi 'command' o 'type' dai dati per evitare sovrascritture
+            data_copy.pop("command", None)
+            data_copy.pop("type", None)
+            message.update(data_copy)
 
         # Timeout effettivo
         effective_timeout = timeout * 1000 if timeout else self._command_timeout * 1000

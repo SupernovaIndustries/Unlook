@@ -728,15 +728,19 @@ class StreamReceiverThread(QThread):
             cmd_port = self.port - 1  # Assumendo che porta comando = porta stream - 1
             config_socket.connect(f"tcp://{self.host}:{cmd_port}")
 
-            # Invia configurazione
+            # Invia configurazione con formato coerente
             config = {
                 "command": "STREAM_CONFIG",
+                "type": "STREAM_CONFIG",  # Aggiungi anche 'type' per compatibilità
                 "client_ip": local_ip,
                 "dual_camera": self._request_dual_camera,
                 "low_latency": self._low_latency_mode,
                 "quality": 92 if self._low_latency_mode else 95,
                 "request_id": str(uuid.uuid4())
             }
+
+            # Log dettagliato per debug
+            logger.debug(f"Invio configurazione stream: {config}")
 
             config_socket.send_json(config)
 
@@ -752,6 +756,8 @@ class StreamReceiverThread(QThread):
 
         except Exception as e:
             logger.warning(f"Errore invio configurazione stream: {e}")
+            import traceback
+            logger.debug(f"Traceback: {traceback.format_exc()}")
 
     def _receive_loop(self):
         """Loop principale di ricezione ottimizzato."""
