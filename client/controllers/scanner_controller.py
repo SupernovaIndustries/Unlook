@@ -105,25 +105,103 @@ class ScannerController(QObject):
         Invia un ping keepalive allo scanner selezionato per mantenere
         attiva la connessione e monitorare lo stato.
         """
-        if self._selected_scanner and self.is_connected(self._selected_scanner.device_id):
-            try:
-                # Ottieni l'IP locale per bypass NAT
-                local_ip = self._get_local_ip()
+        if not self._selected_scanner or not self.is_connected(self._selected_scanner.device_id):
+            return
 
-                # Invia comando con timestamp preciso
-                self.send_command(
-                    self._selected_scanner.device_id,
-                    "PING",
-                    {
-                        "timestamp": time.time(),
-                        "client_ip": local_ip,
-                        "keepalive": True
-                    }
-                )
-                logger.debug(f"Keepalive inviato a {self._selected_scanner.name}")
-            except Exception as e:
-                logger.error(f"Errore nell'invio del keepalive: {e}")
+        device_id = self._selected_scanner.device_id
 
+        try:
+            # Ottieni l'IP locale per bypass NAT
+            local_ip = self._get_local_ip()
+
+            # Invia comando ping
+            ping_sent = self.send_command(
+                device_id,
+                "PING",
+                {
+                    "timestamp": time.time(),
+                    "client_ip": local_ip,
+                    "keepalive": True
+                },
+                timeout=0.5  # Timeout breve per evitare blocchi
+            )
+
+            if not ping_sent:
+                logger.debug(f"Impossibile inviare ping keepalive a {self._selected_scanner.name}")
+                return
+
+            # Attendi esplicitamente la risposta per completare il ciclo REQ/REP
+            response = self.receive_response(device_id, timeout=0.5)
+
+            if response:
+                # Reset contatore errori
+                if device_id in self._consecutive_missed_heartbeats:
+                    self._consecutive_missed_heartbeats[device_id] = 0
+            else:
+                # Incrementa contatore errori
+                if device_id in self._consecutive_missed_heartbeats:
+                    self._consecutive_missed_heartbeats[device_id] += 1
+                    # Log solo per errori multipli consecutivi
+                    if self._consecutive_missed_heartbeats[device_id] > 3:
+                        logger.warning(
+                            f"Mancata risposta al ping per {self._consecutive_missed_heartbeats[device_id]} volte consecutive")
+
+                        # Se troppi errori consecutivi, tenta ripristino socket
+                        if self._consecutive_missed_heartbeats[device_id] > 5:
+                            logger.info(
+                                f"Ripristino connessione dopo {self._consecutive_missed_heartbeats[device_id]} ping falliti")
+                            self.connection_manager._reset_socket_state(device_id)
+                            self._consecutive_missed_heartbeats[device_id] = 0
+
+        except Exception as e:
+            logger.error(f"Errore nell'invio del keepalive: {e}")
+
+    def check_streaming_status(self, device_id: str) -> bool:
+        """
+        Verifica in modo esplicito se lo streaming è attivo per questo scanner.
+
+        Args:
+            device_id: ID dello scanner
+
+        Returns:
+            bool: True se lo streaming è attivo, False altrimenti
+        """
+        if not self.is_connected(device_id):
+            return False
+
+        try:
+            # Richiedi lo stato con GET_STATUS
+            status_sent = self.send_command(
+                device_id,
+                "GET_STATUS",
+                timeout=2.0
+            )
+
+            if not status_sent:
+                logger.warning(f"Impossibile inviare GET_STATUS a {device_id}")
+                return False
+
+            # Attendi la risposta
+            response = self.receive_response(device_id, timeout=2.0)
+
+            if not response:
+                logger.warning(f"Nessuna risposta a GET_STATUS da {device_id}")
+                return False
+
+            # Controlla se lo streaming è attivo nella risposta
+            state = response.get('state', {})
+            streaming_active = state.get('streaming', False)
+
+            if streaming_active:
+                logger.info(f"Streaming attivo confermato per {device_id}")
+            else:
+                logger.warning(f"Lo streaming non risulta attivo per {device_id}")
+
+            return streaming_active
+
+        except Exception as e:
+            logger.error(f"Errore nel controllo dello stato streaming: {e}")
+            return False
     def _get_local_ip(self):
         """
         Rileva l'indirizzo IP locale della macchina per connessioni uscenti.
@@ -517,66 +595,31 @@ class ScannerController(QObject):
 
             logger.debug(f"Attesa risposta a {command_type} con timeout {effective_timeout}s")
 
-            # Attesa non bloccante
-            start_time = time.time()
-            check_interval = 0.01  # 10ms per comandi real-time
+            # Attesa non bloccante con un solo controllo di response
+            # Invece di polling attivo che potrebbe compromettere REQ/REP
+            response = self.connection_manager.receive_response(device_id, effective_timeout)
 
-            # Adatta intervallo per comandi meno sensibili alla latenza
-            if command_type not in ["SYNC_PATTERN", "GET_FRAME"]:
-                check_interval = 0.05  # 50ms
-
-            while (time.time() - start_time) < effective_timeout:
-                # Consenti all'UI di rispondere durante l'attesa
-                QApplication.processEvents()
-
-                # Verifica risposta
-                if self.connection_manager.has_response(device_id, command_type):
-                    response = self.connection_manager.get_response(device_id, command_type)
-
-                    # Log non verboso per comandi frequenti
+            if response:
+                # Verifica se la risposta è per il comando atteso
+                resp_type = response.get('original_type') or response.get('type')
+                if resp_type == command_type:
                     if command_type not in ["PING", "GET_STATUS", "SYNC_PATTERN"]:
-                        logger.debug(
-                            f"Risposta ricevuta per {command_type} in {(time.time() - start_time) * 1000:.1f}ms")
-
+                        logger.debug(f"Risposta ricevuta per {command_type}")
                     return response
-
-                # Ping periodico per comandi lunghi
-                elapsed = time.time() - start_time
-                if elapsed > 3 and command_type not in ["PING", "SYNC_PATTERN"]:
-                    if elapsed % 3 < check_interval:
-                        try:
-                            # Invia ping silenzioso
-                            self.send_command(
-                                device_id,
-                                "PING",
-                                {"timestamp": time.time(), "silent": True},
-                                timeout=0.5
-                            )
-                        except:
-                            pass
-
-                time.sleep(check_interval)
+                else:
+                    logger.warning(f"Ricevuta risposta per {resp_type} mentre si attendeva {command_type}")
+                    return None
 
             # Timeout
             logger.warning(f"Timeout nell'attesa della risposta a {command_type} dopo {effective_timeout}s")
 
-            # Verifica stato connessione
-            if self.is_connected(device_id):
-                # Gestione speciale per timeout di comandi critici
-                if command_type == "START_SCAN":
-                    # Verifica stato scan
-                    try:
-                        self.send_command(device_id, "GET_SCAN_STATUS", timeout=1.0)
-                    except:
-                        pass
-                elif command_type == "START_STREAM":
-                    # Riprova a fermare e riavviare lo stream
-                    try:
-                        self.send_command(device_id, "STOP_STREAM", timeout=1.0)
-                        time.sleep(0.5)
-                        self.send_command(device_id, "START_STREAM", {"force": True}, timeout=1.0)
-                    except:
-                        pass
+            # Gestione speciale per timeout di comandi critici
+            if command_type == "START_STREAM":
+                # Forza reset del socket in caso di timeout su START_STREAM
+                try:
+                    self.connection_manager._reset_socket_state(device_id)
+                except:
+                    pass
 
             return None
 
@@ -720,6 +763,43 @@ class ScannerController(QObject):
 
             except Exception as e:
                 logger.error(f"Errore nella sincronizzazione dello stato di {scanner.name}: {e}")
+
+    def receive_response(self, device_id: str, timeout: float = None) -> Optional[Dict[str, Any]]:
+        """
+        Riceve una risposta da un comando inviato in precedenza.
+
+        Args:
+            device_id: ID univoco dello scanner
+            timeout: Timeout in secondi (default: usa il timeout predefinito)
+
+        Returns:
+            Dizionario con la risposta o None se non ricevuta
+        """
+        try:
+            if not self.is_connected(device_id):
+                logger.error(f"Impossibile ricevere risposta: scanner {device_id} non connesso")
+                return None
+
+            # Delega al connection manager
+            response = self.connection_manager.receive_response(device_id, timeout)
+
+            if response:
+                # Aggiorna statistiche e timestamp
+                if device_id in self._last_heartbeat_responses:
+                    self._last_heartbeat_responses[device_id] = time.time()
+                    self._consecutive_missed_heartbeats[device_id] = 0
+
+                # Log essenziale solo per comandi significativi
+                command_type = response.get("original_type", response.get("type", "unknown"))
+                if command_type not in ["PING", "GET_STATUS"]:
+                    logger.info(
+                        f"Risposta ricevuta per comando {command_type}: status={response.get('status', 'unknown')}")
+
+            return response
+
+        except Exception as e:
+            logger.error(f"Errore nella ricezione della risposta da {device_id}: {e}")
+            return None
 
     def get_stream_receiver(self):
         """

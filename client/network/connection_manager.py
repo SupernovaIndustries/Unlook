@@ -270,9 +270,26 @@ class ConnectionManager:
             # Successo - messaggio inviato (risposta ricevuta separatamente)
             return True
 
-        except zmq.Again:
-            logger.error(f"Timeout inviando messaggio '{command}' a {device_id}")
-            return False
+        except zmq.ZMQError as e:
+            if "Operation cannot be accomplished in current state" in str(e):
+                logger.warning(f"Errore stato ZMQ inviando '{command}' a {device_id}, ripristino socket...")
+                # Reset il socket per prepararlo al prossimo comando
+                reset_success = self._reset_socket_state(device_id)
+                if reset_success and command not in ["PING", "GET_STATUS"]:
+                    # Per comandi critici, riprova dopo il reset (tranne per ping/status)
+                    logger.info(f"Riprovando invio comando {command} dopo reset socket")
+                    return self.send_message(device_id, command, data, timeout)
+                return False
+            elif e.errno == zmq.EAGAIN:
+                logger.error(f"Timeout inviando messaggio '{command}' a {device_id}")
+                return False
+            else:
+                logger.error(f"Errore ZMQ inviando messaggio '{command}' a {device_id}: {e}")
+                # Marca la connessione come problematica
+                with self._lock:
+                    if device_id in self._connections:
+                        self._connections[device_id].is_connected = False
+                return False
         except Exception as e:
             logger.error(f"Errore inviando messaggio '{command}' a {device_id}: {e}")
             # Marca la connessione come problematica
@@ -281,9 +298,59 @@ class ConnectionManager:
                     self._connections[device_id].is_connected = False
             return False
 
+    def _reset_socket_state(self, device_id: str) -> bool:
+        """
+        Ripristina lo stato del socket dopo un errore di comunicazione.
+        Essenziale per recuperare da violazioni del pattern REQ/REP.
+        """
+        with self._lock:
+            if device_id not in self._connections:
+                return False
+
+            connection = self._connections[device_id]
+            old_socket = connection.socket
+
+            try:
+                # Chiudi il socket corrente (senza attendere)
+                if old_socket:
+                    old_socket.setsockopt(zmq.LINGER, 0)
+                    old_socket.close()
+
+                # Crea un nuovo socket
+                new_socket = self._zmq_context.socket(zmq.REQ)
+
+                # Configura socket per bassa latenza
+                new_socket.setsockopt(zmq.LINGER, 0)
+                new_socket.setsockopt(zmq.RCVTIMEO, 5000)
+                new_socket.setsockopt(zmq.SNDTIMEO, 5000)
+
+                try:
+                    new_socket.setsockopt(zmq.TCP_NODELAY, 1)
+                except:
+                    pass
+
+                # Riconnetti
+                endpoint = f"tcp://{connection.ip_address}:{connection.port}"
+                new_socket.connect(endpoint)
+
+                # Aggiorna il socket nella connessione
+                connection.socket = new_socket
+
+                # Resetta stato connessione
+                connection.pending_responses = {}
+                connection.is_connected = True
+
+                logger.info(f"Socket per {device_id} ripristinato con successo")
+                return True
+
+            except Exception as e:
+                logger.error(f"Errore nel ripristino del socket per {device_id}: {e}")
+                connection.is_connected = False
+                return False
+
     def receive_response(self, device_id: str, timeout: float = None) -> Optional[Dict]:
         """
-        Riceve una risposta da un dispositivo connesso.
+        Riceve una risposta da un dispositivo connesso con gestione robusta degli errori.
 
         Args:
             device_id: ID del dispositivo
@@ -312,27 +379,34 @@ class ConnectionManager:
                 connection.last_activity = time.time()
 
                 # Elabora risposta
-                request_id = response.get("request_id")
-                if request_id in connection.pending_responses:
+                request_id = response.get("request_id", "")
+                if request_id and request_id in connection.pending_responses:
                     # Memorizza risposta
                     connection.pending_responses[request_id]["response"] = response
 
-                    # Pulizia vecchie risposte (opzionale)
+                    # Pulizia vecchie risposte
                     self._cleanup_old_responses(connection)
                 else:
-                    logger.warning(f"Ricevuta risposta non richiesta: {response}")
+                    # Rispondiamo a richieste senza ID o con ID non corrispondenti
+                    logger.debug(f"Risposta ricevuta senza match request_id: {response}")
 
             return response
 
         except zmq.Again:
-            logger.error(f"Timeout ricevendo risposta da {device_id}")
+            logger.warning(f"Timeout ricevendo risposta da {device_id}")
+            # Non resettiamo il socket qui per evitare violazione REQ/REP
+            # Il reset dovrebbe essere fatto solo prima del prossimo invio
             return None
         except Exception as e:
             logger.error(f"Errore ricevendo risposta da {device_id}: {e}")
-            # Marca la connessione come problematica
+            # Segna la connessione come problematica
             with self._lock:
                 if device_id in self._connections:
                     self._connections[device_id].is_connected = False
+
+            # Reset socket per operazioni future
+            self._reset_socket_state(device_id)
+
             return None
 
     def wait_for_response(self, device_id: str, command: str,

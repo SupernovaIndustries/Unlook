@@ -728,14 +728,19 @@ class StreamReceiverThread(QThread):
             cmd_port = self.port - 1  # Assumendo che porta comando = porta stream - 1
             config_socket.connect(f"tcp://{self.host}:{cmd_port}")
 
-            # Invia configurazione con formato coerente
+            # MODIFICA: Usa SET_CONFIG invece di STREAM_CONFIG e segui la struttura server
             config = {
-                "command": "STREAM_CONFIG",
-                "type": "STREAM_CONFIG",  # Aggiungi anche 'type' per compatibilità
+                "command": "SET_CONFIG",
+                "type": "SET_CONFIG",  # Deve corrispondere al type gestito dal server
+                "config": {
+                    "stream": {
+                        "dual_camera": self._request_dual_camera,
+                        "low_latency": self._low_latency_mode,
+                        "quality": 92 if self._low_latency_mode else 95,
+                        "target_fps": 30
+                    }
+                },
                 "client_ip": local_ip,
-                "dual_camera": self._request_dual_camera,
-                "low_latency": self._low_latency_mode,
-                "quality": 92 if self._low_latency_mode else 95,
                 "request_id": str(uuid.uuid4())
             }
 
