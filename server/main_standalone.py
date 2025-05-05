@@ -159,18 +159,46 @@ class UnLookServer:
         # Socket comandi
         self.command_socket = self.context.socket(zmq.REP)
 
+        # Inizializza i socket di comunicazione con configurazione a bassa latenza
+        self.broadcast_socket = None
+        self.context = zmq.Context()
+
+        # Socket comandi
+        self.command_socket = self.context.socket(zmq.REP)
+
         # Socket streaming con configurazione ultra-bassa latenza
         self.stream_socket = self.context.socket(zmq.PUB)
-        self.stream_socket.setsockopt(zmq.SNDHWM, 1)  # Alta priorità a latenza vs throughput
-        self.stream_socket.setsockopt(zmq.LINGER, 0)  # Non attendere alla chiusura
+
+        # Ottimizzazione primaria per latenza: riduzione del buffer di invio
+        self.stream_socket.setsockopt(zmq.SNDHWM, 1)  # Riduce buffer a dimensione minima
+
+        # Configurazione per frame-dropping controllato
+        self.stream_socket.setsockopt(zmq.LINGER, 0)  # No buffering alla chiusura
         try:
-            self.stream_socket.setsockopt(zmq.IMMEDIATE, 1)  # Evita buffering
+            self.stream_socket.setsockopt(zmq.IMMEDIATE, 1)  # Invio immediato senza buffering
         except:
-            pass  # Ignora se non supportato
+            logger.warning("Opzione IMMEDIATE non supportata su questa versione di ZMQ")
+
+        # Ottimizzazioni TCP avanzate
         try:
-            self.stream_socket.setsockopt(zmq.TCP_NODELAY, 1)  # Disabilita Nagle
-        except:
-            pass  # Ignora se non supportato
+            # Disabilita algoritmo di Nagle per ridurre latenza
+            self.stream_socket.setsockopt(zmq.TCP_NODELAY, 1)
+
+            # Configurazione per rilevare rapidamente disconnessioni
+            self.stream_socket.setsockopt(zmq.RECONNECT_IVL, 100)
+            self.stream_socket.setsockopt(zmq.RECONNECT_IVL_MAX, 3000)
+
+            # Timeout breve per operazioni bloccanti
+            self.stream_socket.setsockopt(zmq.SNDTIMEO, 500)  # 500ms timeout
+
+            # Attiva TCP keepalive per rilevare disconnessioni anche in presenza di firewall
+            self.stream_socket.setsockopt(zmq.TCP_KEEPALIVE, 1)
+            self.stream_socket.setsockopt(zmq.TCP_KEEPALIVE_IDLE, 60)  # 1 minuto
+            self.stream_socket.setsockopt(zmq.TCP_KEEPALIVE_INTVL, 15)  # 15 secondi tra i ping
+
+            logger.info("Configurazione TCP avanzata per il socket streaming applicata")
+        except Exception as e:
+            logger.warning(f"Alcune opzioni ZMQ avanzate non supportate: {e}")
 
         # Configurazione aggiuntiva per migliorare la stabilità
         try:

@@ -558,7 +558,7 @@ class ScanView(QWidget):
                 try:
                     if hasattr(receiver.frame_received, 'disconnect'):
                         try:
-                            receiver.frame_received.disconnect(self._on_frame_received)
+                            self._safe_disconnect_signal(receiver.frame_received, self._on_frame_received)
                             disconnect_success = True
                             logger.info("Precedente connessione frame_received disconnessa")
                         except (TypeError, RuntimeError) as e:
@@ -918,7 +918,7 @@ class ScanView(QWidget):
         return False
 
     def _on_frame_received(self, camera_index: int, frame: np.ndarray, timestamp: float):
-        """Gestisce la ricezione di un frame dallo stream con diagnostica migliorata."""
+        """Gestisce la ricezione di un frame dallo stream con diagnostica migliorata e sincronizzazione."""
         try:
             # Log migliorato per tracciamento frame
             if not hasattr(self, '_frame_count_by_camera'):
@@ -960,7 +960,12 @@ class ScanView(QWidget):
                 logger.warning(f"ScanView: frame non valido ricevuto per camera {camera_index}")
                 return
 
-            # Aggiorna il preview corrispondente e traccia visualizzazione
+            # Sincronizza i frame se possibile
+            if self._synchronize_camera_frames(camera_index, frame, timestamp):
+                # Frame già gestito dalla sincronizzazione
+                return
+
+            # Se non è stato sincronizzato, aggiorna comunque il preview corrispondente
             if camera_index == 0:
                 self.left_preview.update_frame(frame, timestamp)
                 if hasattr(self, '_frames_displayed'):
@@ -2065,3 +2070,106 @@ class ScanView(QWidget):
             self._camera_check_timer = threading.Timer(5.0, self._verify_camera_streams)
             self._camera_check_timer.daemon = True
             self._camera_check_timer.start()
+
+    def _synchronize_camera_frames(self, camera_index, frame, timestamp):
+        """
+        Sincronizza i frame delle diverse camere in base ai timestamp.
+
+        Args:
+            camera_index: Indice della camera
+            frame: Frame ricevuto
+            timestamp: Timestamp del frame
+
+        Returns:
+            True se il frame è stato sincronizzato, False altrimenti
+        """
+        # Inizializza buffer e timestamp se necessario
+        if not hasattr(self, '_frame_buffer'):
+            self._frame_buffer = {0: None, 1: None}
+            self._frame_timestamps = {0: 0, 1: 0}
+            self._last_sync_time = time.time()
+
+        # Memorizza il frame e il timestamp
+        self._frame_buffer[camera_index] = frame.copy()
+        self._frame_timestamps[camera_index] = timestamp
+
+        # Controlla se abbiamo entrambi i frame
+        current_time = time.time()
+
+        # Sincronizzazione time-based: cerca di corrispondere frame in una finestra di 100ms
+        all_frames_available = all(ts > 0 for ts in self._frame_timestamps.values())
+        timestamp_difference = abs(self._frame_timestamps.get(0, 0) - self._frame_timestamps.get(1, 0))
+        time_since_last_sync = current_time - self._last_sync_time
+
+        # Frame matching se non c'è stata sincronizzazione da almeno 30ms e abbiamo frame da entrambe le camere
+        should_sync = (all_frames_available and time_since_last_sync > 0.03 and
+                       (timestamp_difference < 0.1))  # 100ms max differenza
+
+        # Forza sincronizzazione dopo 200ms anche se non abbiamo frame perfettamente sincronizzati
+        force_sync = time_since_last_sync > 0.2 and all(f is not None for f in self._frame_buffer.values())
+
+        if should_sync or force_sync:
+            # Aggiorna i preview
+            left_frame = self._frame_buffer.get(0)
+            right_frame = self._frame_buffer.get(1)
+
+            if left_frame is not None:
+                self.left_preview.update_frame(left_frame, self._frame_timestamps.get(0, 0))
+
+            if right_frame is not None:
+                self.right_preview.update_frame(right_frame, self._frame_timestamps.get(1, 0))
+
+            # Reset
+            self._last_sync_time = current_time
+
+            # Log periodico per debug
+            if not hasattr(self, '_sync_count'):
+                self._sync_count = 0
+
+            self._sync_count += 1
+            if self._sync_count % 30 == 0:  # Log ogni 30 sincronizzazioni
+                logger.debug(f"Sincronizzazione frame: diff={timestamp_difference * 1000:.1f}ms, "
+                             f"force={force_sync}")
+
+            return True
+
+        return False
+
+    def _safe_disconnect_signal(self, signal, slot):
+        """
+        Disconnette un segnale da uno slot in modo sicuro, gestendo gli errori.
+
+        Args:
+            signal: Il segnale da disconnettere
+            slot: Lo slot da disconnettere
+
+        Returns:
+            True se la disconnessione è riuscita o non era necessaria, False in caso di errore
+        """
+        try:
+            # Verifica se il segnale è connesso allo slot
+            try:
+                is_connected = signal.isConnected(slot)
+            except (AttributeError, TypeError):
+                # Alcuni segnali non hanno il metodo isConnected o non possiamo verificare
+                is_connected = True  # Assumiamo sia connesso per sicurezza
+
+            # Disconnetti solo se era connesso
+            if is_connected:
+                signal.disconnect(slot)
+                logger.debug(f"Segnale disconnesso con successo: {signal} da {slot.__name__}")
+            else:
+                logger.debug(f"Segnale non era connesso: {signal} a {slot.__name__}")
+
+            return True
+        except (RuntimeError, TypeError) as e:
+            # Ignora errori specifici che indicano disconnessione già avvenuta
+            if "not connected" in str(e).lower() or "failed to disconnect" in str(e).lower():
+                logger.debug(f"Segnale già disconnesso: {e}")
+                return True
+            else:
+                logger.warning(f"Errore non previsto nella disconnessione del segnale: {e}")
+                return False
+        except Exception as e:
+            logger.warning(f"Errore imprevisto nella disconnessione del segnale: {e}")
+            return False

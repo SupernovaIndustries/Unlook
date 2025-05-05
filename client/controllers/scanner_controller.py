@@ -8,7 +8,7 @@ Controller per la gestione degli scanner UnLook.
 import logging
 import time
 from typing import List, Optional, Callable, Dict, Any
-
+import uuid
 from PySide6.QtCore import QObject, Signal, Slot, Property, QSettings, QTimer, QCoreApplication
 from PySide6.QtWidgets import QApplication, QMainWindow
 
@@ -35,25 +35,45 @@ class ScannerController(QObject):
     scanner_disconnected = Signal(Scanner)
     connection_error = Signal(str, str)  # device_id, error_message
 
-    def __init__(self, scanner_manager: ScannerManager):
+    def __init__(self, scanner_manager=None):
+        """
+        Inizializza il controller degli scanner.
+
+        Args:
+            scanner_manager: Manager degli scanner (opzionale)
+        """
         super().__init__()
-        self._scanner_manager = scanner_manager
-        self._connection_manager = ConnectionManager()
-        self._selected_scanner: Optional[Scanner] = None
+        self.scanner_manager = scanner_manager or ScannerManager()
+        self._selected_scanner = None
 
-        # Collega i segnali del ScannerManager
-        self._scanner_manager.scanner_discovered.connect(self._on_scanner_discovered)
-        self._scanner_manager.scanner_lost.connect(self._on_scanner_lost)
+        # Importa ConnectionManager come classe, non come istanza
+        from client.network.connection_manager import ConnectionManager
 
-        # Collega i segnali del ConnectionManager
-        self._connection_manager.connection_established.connect(self._on_connection_established)
-        self._connection_manager.connection_failed.connect(self._on_connection_failed)
-        self._connection_manager.connection_closed.connect(self._on_connection_closed)
+        # Memorizza la classe (non creare ancora l'istanza)
+        self._connection_manager_class = ConnectionManager
 
-        # Aggiungi un timer per il keep-alive
-        self._keepalive_timer = QTimer(self)
-        self._keepalive_timer.timeout.connect(self._send_keepalive)
-        self._keepalive_timer.start(5000)  # Invia un ping ogni 5 secondi
+        # Collega segnali del ScannerManager
+        self.scanner_manager.scanner_discovered.connect(self._on_scanner_discovered)
+        self.scanner_manager.scanner_lost.connect(self._on_scanner_lost)
+
+        # Dizionario per memorizzare le preferenze utente
+        self._last_connected_scanner = None
+
+        # Carica le preferenze
+        self._load_preferences()
+
+        logger.info("ScannerController inizializzato")
+
+        # Metodo getter per ottenere l'istanza di ConnectionManager
+        def _get_connection_manager(self):
+            """
+            Ottiene l'istanza singleton di ConnectionManager in modo thread-safe.
+
+            Returns:
+                Istanza di ConnectionManager
+            """
+            # Usa il pattern singleton per ottenere l'istanza
+            return self._connection_manager_class()
 
     def _send_keepalive(self):
         """Invia un ping per mantenere attiva la connessione."""
@@ -218,41 +238,152 @@ class ScannerController(QObject):
         # ma diamo priorità allo stato dello scanner se è in streaming
         return scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
 
-    def send_command(self, device_id: str, command_type: str, params: dict = None, timeout: float = None) -> bool:
+    def send_command(self, device_id, command_type, data=None, timeout=None):
         """
-        Invia un comando a uno scanner.
+        Invia un comando allo scanner con supporto per timeout configurabile.
 
         Args:
-            device_id: ID del dispositivo destinatario
-            command_type: Tipo di comando da inviare
-            params: Parametri del comando (opzionale)
-            timeout: Timeout in secondi per l'invio del comando (opzionale)
+            device_id: ID del dispositivo
+            command_type: Tipo di comando
+            data: Dati del comando (opzionale)
+            timeout: Timeout in secondi (opzionale)
 
         Returns:
-            True se il comando è stato inviato con successo, False altrimenti
+            True se il comando è stato inviato correttamente, False altrimenti
         """
-        if not params:
-            params = {}
-
-        command = {
-            "type": command_type,
-            "id": str(time.time()),
-            "timestamp": time.time()
-        }
-        command.update(params)
-
         try:
-            # Usa il timeout se specificato, altrimenti usa il valore predefinito
-            if timeout is not None:
-                result = self.connection_manager.send_message(device_id, command, timeout=timeout)
-            else:
-                result = self.connection_manager.send_message(device_id, command)
+            # Ottieni ConnectionManager tramite il getter
+            connection_manager = self._get_connection_manager()
 
-            if not result:
-                logger.error(f"Errore nell'invio del comando {command_type} a {device_id}")
-            return result
+            # Verifica che il device_id sia valido
+            if not device_id:
+                logger.error("Device ID non valido")
+                return False
+
+            # Prepara i dati comando
+            command_data = {
+                "type": command_type,
+                "id": str(uuid.uuid4()),
+                "timestamp": time.time()
+            }
+
+            # Aggiungi i dati se presenti
+            if data:
+                command_data.update(data)
+
+            # Invia il comando con timeout specifico se fornito
+            if timeout is not None:
+                # Se il metodo non esiste, implementiamo qui un fallback
+                if hasattr(connection_manager, 'send_message_with_timeout'):
+                    return connection_manager.send_message_with_timeout(device_id, command_data, timeout)
+                else:
+                    # Implementazione fallback
+                    logger.warning("Metodo send_message_with_timeout non disponibile, uso send_message standard")
+                    return connection_manager.send_message(device_id, command_data)
+            else:
+                return connection_manager.send_message(device_id, command_data)
+
         except Exception as e:
             logger.error(f"Errore nell'invio del comando {command_type}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return False
+
+    def start_heartbeat(self, device_id, interval=2.0):
+        """
+        Avvia un timer per inviare periodicamente heartbeat allo scanner.
+
+        Args:
+            device_id: ID dello scanner
+            interval: Intervallo in secondi tra gli heartbeat
+        """
+        if not hasattr(self, '_heartbeat_timers'):
+            self._heartbeat_timers = {}
+
+        # Ferma un eventuale timer esistente
+        if device_id in self._heartbeat_timers:
+            self._heartbeat_timers[device_id].stop()
+
+        # Crea un nuovo timer
+        from PySide6.QtCore import QTimer
+        timer = QTimer()
+        timer.timeout.connect(lambda: self._send_heartbeat(device_id))
+        timer.start(int(interval * 1000))  # Converti in millisecondi
+
+        # Memorizza il timer
+        self._heartbeat_timers[device_id] = timer
+
+        logger.info(f"Heartbeat avviato per {device_id} (intervallo: {interval}s)")
+
+    def _send_heartbeat(self, device_id):
+        """Invia un heartbeat allo scanner."""
+        try:
+            import socket
+            # Ottieni l'IP locale
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+
+            # Invia il heartbeat
+            success = self.send_command(
+                device_id,
+                "PING",
+                {
+                    "timestamp": time.time(),
+                    "client_ip": local_ip,
+                    "heartbeat": True
+                },
+                timeout=0.5  # Timeout breve per non bloccare
+            )
+
+            if not success:
+                logger.warning(f"Heartbeat fallito per {device_id}")
+                # Incrementa contatore fallimenti
+                if not hasattr(self, '_heartbeat_failures'):
+                    self._heartbeat_failures = {}
+
+                self._heartbeat_failures[device_id] = self._heartbeat_failures.get(device_id, 0) + 1
+
+                # Se troppe fallimenti consecutivi, tenta riconnessione
+                if self._heartbeat_failures[device_id] >= 3:
+                    logger.warning(f"Troppe fallimenti di heartbeat ({self._heartbeat_failures[device_id]}), "
+                                   f"tentativo di riconnessione...")
+                    self._attempt_reconnection(device_id)
+            else:
+                # Reset contatore fallimenti
+                if hasattr(self, '_heartbeat_failures') and device_id in self._heartbeat_failures:
+                    self._heartbeat_failures[device_id] = 0
+
+        except Exception as e:
+            logger.error(f"Errore nell'invio dell'heartbeat: {e}")
+
+    def _attempt_reconnection(self, device_id):
+        """Tenta di riconnettersi a uno scanner dopo errori di connessione."""
+        try:
+            # Ottieni lo scanner
+            scanner = None
+            for s in self.scanner_manager.scanners:
+                if s.device_id == device_id:
+                    scanner = s
+                    break
+
+            if not scanner:
+                logger.error(f"Scanner {device_id} non trovato")
+                return False
+
+            # Disconnetti
+            self.disconnect_from_scanner(device_id)
+
+            # Pausa breve
+            import time
+            time.sleep(0.5)
+
+            # Riconnetti
+            return self.connect_to_scanner(device_id)
+
+        except Exception as e:
+            logger.error(f"Errore nel tentativo di riconnessione a {device_id}: {e}")
             return False
 
     def synchronize_scanner_states(self):
