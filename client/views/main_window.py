@@ -654,16 +654,10 @@ class MainWindow(QMainWindow):
 
     def _setup_stream_receiver(self, scanner):
         """
-        Configura e inizializza il receiver di stream con gestione robusta degli errori.
-
-        Args:
-            scanner: Scanner a cui connettersi
-
-        Returns:
-            True se l'inizializzazione è riuscita, False altrimenti
+        Configura il receiver di stream per uno scanner connesso con gestione robusta degli errori.
         """
         try:
-            # Prima ferma eventuali receiver esistenti
+            # Prima fermia eventuali receiver esistenti
             if hasattr(self, 'stream_receiver') and self.stream_receiver:
                 try:
                     self.stream_receiver.stop()
@@ -672,65 +666,57 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     logger.warning(f"Errore nell'arresto del receiver esistente: {e}")
 
-            # Importa StreamReceiver
             from client.network.stream_receiver import StreamReceiver
 
-            # Ottieni parametri di connessione
+            # Informazioni di connessione
             host = scanner.ip_address
-            port = scanner.port + 1  # Porta stream = porta comandi + 1
+            port = scanner.port + 1  # La porta di streaming è quella di comando + 1
 
             logger.info(f"Inizializzazione stream receiver da {host}:{port}")
 
-            # Crea il receiver
+            # Crea il receiver se non esiste già
             self.stream_receiver = StreamReceiver(host, port)
 
             # Invia comando per fermare qualsiasi streaming esistente
-            connection_manager = self.scanner_controller._get_connection_manager()
             try:
-                # Usa send_message direttamente su connection_manager
-                message = {
-                    "type": "STOP_STREAM",
-                    "id": str(uuid.uuid4()),
-                    "timestamp": time.time()
-                }
-                connection_manager.send_message(scanner.device_id, message)
+                self.scanner_controller.send_command(
+                    scanner.device_id,
+                    "STOP_STREAM"
+                )
                 time.sleep(0.5)  # Attendi che lo streaming si fermi
             except Exception as e:
                 logger.warning(f"Errore nell'arresto dello streaming esistente: {e}")
 
-            # Invia comando START_STREAM con retry
+            # Invia comando per avviare lo streaming con retry
             max_attempts = 3
             for attempt in range(max_attempts):
                 try:
-                    message = {
-                        "type": "START_STREAM",
-                        "id": str(uuid.uuid4()),
-                        "timestamp": time.time(),
-                        "dual_camera": True,
-                        "quality": 90,
-                        "target_fps": 30
-                    }
+                    # Invia comando START_STREAM con un timeout più lungo
+                    command_success = self.scanner_controller.send_command(
+                        scanner.device_id,
+                        "START_STREAM",
+                        {
+                            "dual_camera": True,
+                            "quality": 90,
+                            "target_fps": 30
+                        },
+                        timeout=10.0  # Timeout più lungo per dare tempo al server
+                    )
 
-                    # Invia comando
-                    message_success = connection_manager.send_message(scanner.device_id, message)
-
-                    if message_success:
+                    if command_success:
                         # Attendi risposta con timeout più lungo
-                        response = connection_manager.wait_for_response(scanner.device_id, "START_STREAM", timeout=5.0)
+                        response = self.scanner_controller.wait_for_response(
+                            scanner.device_id,
+                            "START_STREAM",
+                            timeout=10.0  # Timeout più lungo
+                        )
 
                         if response and response.get("status") == "ok":
                             # Avvia il receiver
                             self.stream_receiver.start()
                             self._stream_initialized = True
 
-                            # Imposta il socket in blocking mode per ridurre consumo CPU
-                            if hasattr(self.stream_receiver._receiver_thread, '_socket'):
-                                try:
-                                    self.stream_receiver._receiver_thread._socket.setsockopt(zmq.RCVTIMEO, 500)
-                                except:
-                                    pass
-
-                            # Aggiorna il riferimento nei widget
+                            # Aggiorna il riferimento nel ScanView
                             if hasattr(self, 'scanning_widget') and self.scanning_widget:
                                 self.scanning_widget._connect_to_stream()
 

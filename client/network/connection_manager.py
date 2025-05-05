@@ -695,54 +695,6 @@ class ConnectionManager(QObject):
 
         return False
 
-    def send_message_with_timeout(self, device_id, message, timeout=5.0):
-        """
-        Invia un messaggio con timeout configurabile.
-
-        Args:
-            device_id: ID del dispositivo
-            message: Messaggio da inviare
-            timeout: Timeout in secondi (default: 5.0)
-
-        Returns:
-            True se il messaggio è stato inviato correttamente, False altrimenti
-        """
-        try:
-            connection = self._get_connection(device_id)
-            if not connection:
-                logger.error(f"Nessuna connessione trovata per {device_id}")
-                return False
-
-            # Salva il timeout originale
-            original_timeout = connection.socket.getsockopt(zmq.SNDTIMEO)
-
-            try:
-                # Imposta il nuovo timeout (in millisecondi)
-                connection.socket.setsockopt(zmq.SNDTIMEO, int(timeout * 1000))
-
-                # Invia il messaggio
-                connection.socket.send_json(message)
-
-                # Messaggio inviato con successo
-                logger.debug(f"Messaggio {message.get('type')} inviato a {device_id} (timeout: {timeout}s)")
-                return True
-
-            finally:
-                # Ripristina il timeout originale
-                connection.socket.setsockopt(zmq.SNDTIMEO, original_timeout)
-
-        except zmq.ZMQError as e:
-            if e.errno == zmq.EAGAIN:
-                logger.warning(f"Timeout ({timeout}s) raggiunto durante l'invio a {device_id}")
-            else:
-                logger.error(f"Errore ZMQ nell'invio a {device_id}: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Errore imprevisto nell'invio a {device_id}: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return False
-
     def register_message_handler(self, message_type: str, handler: Callable):
         """
         Registra un gestore per un tipo specifico di messaggio.
