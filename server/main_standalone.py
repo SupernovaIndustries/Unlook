@@ -1500,10 +1500,9 @@ class UnLookServer:
 
     def _apply_camera_config(self):
         """
-        Applica la configurazione alle camere.
-        Versione migliorata con supporto per modalità colore/scala di grigi e sincronizzazione delle camere.
+        Applica la configurazione alle camere con supporto per il set di controlli disponibili.
         """
-        # Se lo streaming è attivo, fermalo (dovrebbe già essere fatto nella funzione chiamante)
+        # Se lo streaming è attivo, fermalo
         was_streaming = self.state["streaming"]
         if was_streaming:
             self.stop_streaming()
@@ -1524,50 +1523,58 @@ class UnLookServer:
                 else:
                     cam_config = self.config["camera"]["right"]
 
-                # Aggiorna la modalità della camera nell'oggetto cam_info
+                # Aggiorna la modalità della camera
                 if "mode" in cam_config:
                     cam_info["mode"] = cam_config["mode"]
                     logger.info(f"Impostazione camera {cam_info['name']} in modalità {cam_config['mode']}")
 
-                # Determina il formato in base alla modalità se specificata
-                format_str = cam_config.get("format", "RGB888")
-                if format_str == "GREY":
-                    # Correggi il formato non supportato
-                    format_str = "RGB888"
-                    logger.warning(f"Formato GREY non supportato, convertito a RGB888 per camera {cam_info['name']}")
+                # Assicurati di usare RGB888 come formato di base
+                format_str = "RGB888"
 
-                # Applica i controlli avanzati se presenti
+                # Ottieni i controlli supportati dalla camera
+                supported_controls = []
+                try:
+                    # Ottieni la lista dei controlli supportati
+                    if hasattr(camera, 'camera_controls'):
+                        supported_controls = list(camera.camera_controls.keys())
+                        logger.debug(f"Controlli supportati da camera {cam_info['name']}: {supported_controls}")
+                except Exception as e:
+                    logger.warning(f"Impossibile ottenere controlli supportati: {e}")
+
+                # Applica solo i controlli supportati
                 controls = {"FrameRate": cam_config.get("framerate", 30)}
 
-                # Controlla se ci sono altre impostazioni da applicare
+                # Esposizione - usa solo ExposureTime che è supportato
                 if "exposure" in cam_config:
-                    # Converti da 0-100 a valori appropriati per la camera
-                    controls["AeEnable"] = 0  # Disabilita auto-esposizione
                     exposure_val = int(cam_config["exposure"] * 10000 / 100)
                     controls["ExposureTime"] = exposure_val
                     logger.info(f"Camera {cam_info['name']} esposizione: {exposure_val}")
 
-                if "gain" in cam_config:
-                    controls["AgcEnable"] = 0  # Disabilita auto-gain
+                # Gain - verifica se supportato prima di applicare
+                if "gain" in cam_config and "AnalogueGain" in supported_controls:
                     gain_val = cam_config["gain"] / 100.0 * 10.0  # Mappa 0-100 a 0-10
                     controls["AnalogueGain"] = gain_val
                     logger.info(f"Camera {cam_info['name']} gain: {gain_val}")
 
-                if "brightness" in cam_config:
-                    brightness_val = (cam_config["brightness"] / 100.0) * 2.0 - 1.0  # -1.0 a 1.0
-                    controls["Brightness"] = brightness_val
+                # Aggiungi altri controlli solo se supportati
+                for control_name, config_name in [
+                    ("Brightness", "brightness"),
+                    ("Contrast", "contrast"),
+                    ("Saturation", "saturation"),
+                    ("Sharpness", "sharpness")
+                ]:
+                    if config_name in cam_config and control_name in supported_controls:
+                        value = cam_config[config_name]
+                        if config_name in ["brightness", "contrast", "saturation"]:
+                            # Normalizza i valori 0-100 a scale appropriate
+                            if config_name == "brightness":
+                                value = (value / 100.0) * 2.0 - 1.0  # -1.0 a 1.0
+                            else:  # contrast, saturation
+                                value = value / 50.0  # 0-2.0, 1.0 è neutro
+                        elif config_name == "sharpness":
+                            value = value / 100.0  # 0-1.0
 
-                if "contrast" in cam_config:
-                    contrast_val = cam_config["contrast"] / 50.0  # 0-2.0, 1.0 è neutro
-                    controls["Contrast"] = contrast_val
-
-                if "saturation" in cam_config and format_str != "GREY":
-                    saturation_val = cam_config["saturation"] / 50.0  # 0-2.0, 1.0 è neutro
-                    controls["Saturation"] = saturation_val
-
-                if "sharpness" in cam_config:
-                    sharpness_val = cam_config["sharpness"] / 100.0
-                    controls["Sharpness"] = sharpness_val
+                        controls[control_name] = value
 
                 # Applica la configurazione
                 try:
@@ -1586,7 +1593,6 @@ class UnLookServer:
                 except Exception as e:
                     logger.error(
                         f"Errore durante l'applicazione della configurazione alla camera {cam_info['name']}: {e}")
-                    # Prova a riavviare la camera con la configurazione precedente
                     try:
                         logger.info(f"Tentativo di riavvio camera {cam_info['name']} con la configurazione precedente")
                         camera.start()
@@ -1596,7 +1602,7 @@ class UnLookServer:
             except Exception as e:
                 logger.error(f"Errore nell'applicazione della configurazione alla camera {cam_info['name']}: {e}")
 
-        # Il riavvio dello streaming, se era attivo, sarà gestito dalla funzione chiamante
+        # Il riavvio dello streaming sarà gestito dalla funzione chiamante se necessario
 
     def start_streaming(self):
         """
@@ -1659,7 +1665,15 @@ class UnLookServer:
         logger.info("Streaming video arrestato")
 
     def _stream_camera(self, camera: "Picamera2", camera_index: int, mode: str = "color"):
-        """Funzione ottimizzata per lo streaming della camera con focus sulla latenza e stabilità."""
+        """
+        Funzione ottimizzata per lo streaming della camera con focus sulla semplicità e affidabilità.
+        Utilizza esclusivamente le API native di PiCamera2 evitando OpenCV.
+
+        Args:
+            camera: Oggetto Picamera2
+            camera_index: Indice della camera
+            mode: Modalità di visualizzazione ("color" o "grayscale")
+        """
         logger.info(f"Thread di streaming camera {camera_index} avviato, modalità={mode}")
 
         # Verifica che la camera sia avviata
@@ -1675,232 +1689,139 @@ class UnLookServer:
         try:
             # Aumenta priorità thread
             import os
-            os.nice(-15)  # Alta priorità
+            os.nice(-10)  # Priorità moderatamente alta, ma non eccessiva (-20 a 19)
         except:
             pass
 
-        # Configurazioni per latenza minima
-        quality = max(70, min(80, self._jpeg_quality))  # Limita tra 70-80
-        current_interval = max(0.016, self._frame_interval)  # Minimo ~60 FPS
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, quality,
-                         cv2.IMWRITE_JPEG_OPTIMIZE, 0,  # Disabilita ottimizzazione per velocità
-                         cv2.IMWRITE_JPEG_PROGRESSIVE, 0]  # Disabilita JPEG progressivo
+        # Configurazioni JPEG base
+        quality = max(75, min(92, self._jpeg_quality))  # Qualità bilanciata
+        frame_interval = max(0.016, self._frame_interval)  # Limita a 60 FPS max
 
-        # Statistiche per diagnostica
-        frame_count = 0
-        skipped_frames = 0
-        last_stats_time = time.time()
-        next_frame_time = time.time()
-        timestamp = time.time()
-        last_successful_capture = time.time()
-
-        # Mechanismo di watchdog per rilevare quando la camera smette di catturare
-        watchdog_timeout = 3.0  # Se non riceviamo frame per 3 secondi, prova a reinizializzare
-
-        # Usa encoder hardware se disponibile
-        picamera2_encoder = None
-        encoder_requires_request = False
+        # Prepara l'encoder JPEG standard di PiCamera2
+        encoder = None
         try:
-            # Verifica se l'API richiede il metodo create_request
-            encoder_requires_request = hasattr(JpegEncoder, 'encode') and 'request' in str(
-                JpegEncoder.encode.__code__.co_varnames)
+            from picamera2.encoders import JpegEncoder
+            from picamera2.outputs import FileOutput
 
-            # Crea encoder con configurazione ottimizzata per bassa latenza
-            picamera2_encoder = JpegEncoder(num_threads=2, q=quality)
-            picamera2_encoder.start()
-            logger.info(
-                f"Encoder JPEG inizializzato con qualità={quality}, API richiede request: {encoder_requires_request}")
+            encoder = JpegEncoder(q=quality)
         except Exception as e:
-            logger.error(f"Errore nell'inizializzazione dell'encoder JPEG: {e}")
-            picamera2_encoder = None
+            logger.error(f"Impossibile creare encoder JPEG: {e}")
 
-        # Meccanismo di ripristino automatico della camera
-        consecutive_errors = 0
-        max_consecutive_errors = 5  # Numero massimo di errori consecutivi prima di riavviare la camera
-        camera_restarted = False
+        # Statistiche di base
+        frame_count = 0
+        last_stats_time = time.time()
+        last_capture_time = time.time()
+        next_frame_time = time.time()
 
-        # GESTIONE ERRORI MIGLIORATA: Avvolge l'intero loop in un try-except
+        # Loop principale di streaming
         while self.state["streaming"] and self.running:
             try:
                 current_time = time.time()
 
-                # Watchdog per rilevare camera bloccata
-                if current_time - last_successful_capture > watchdog_timeout and not camera_restarted:
-                    logger.warning(
-                        f"Camera {camera_index} non risponde da {watchdog_timeout}s, tentativo di ripristino...")
-                    try:
-                        # Tenta di riavviare la camera
-                        camera.stop()
-                        time.sleep(0.5)
-                        camera.start()
-                        camera_restarted = True
-                        consecutive_errors = 0
-                        logger.info(f"Camera {camera_index} riavviata con successo")
-                        # Ritarda il prossimo frame per dare tempo alla camera di stabilizzarsi
-                        time.sleep(1.0)
-                        last_successful_capture = time.time()  # Reset del timer
-                    except Exception as e:
-                        logger.error(f"Errore nel riavvio della camera {camera_index}: {e}")
-                        time.sleep(1.0)  # Attendi prima di riprovare
+                # Controllo di flusso semplice: rispetta l'intervallo desiderato
+                if current_time < next_frame_time:
+                    sleep_time = next_frame_time - current_time
+                    if sleep_time > 0.001:  # Solo se vale la pena aspettare (>1ms)
+                        time.sleep(sleep_time)
 
-                # Controllo di flusso ultra-aggressivo:
-                # Se siamo in ritardo, salta questo frame completamente
-                if current_time > next_frame_time + 0.005:  # 5ms di tolleranza
-                    next_frame_time = current_time + current_interval
-                    skipped_frames += 1
-                    continue
+                # Aggiorna il timestamp per il prossimo frame
+                next_frame_time = time.time() + frame_interval
 
-                # Attesa precisa fino al prossimo momento di acquisizione
-                # Questo è cruciale per un frame rate consistente
-                sleep_time = next_frame_time - current_time
-                if sleep_time > 0.001:  # Solo se vale la pena aspettare (>1ms)
-                    time.sleep(sleep_time)
-
-                # Aggiorna il prossimo tempo di frame
-                next_frame_time = current_time + current_interval
-
-                # GESTIONE ERRORI MIGLIORATA: Avvolge la cattura in un try con ritentativi
+                # Cattura il frame direttamente come JPEG usando le API native
+                # Questo evita completamente OpenCV e gli encoder personalizzati
                 frame = None
-                capture_succeeded = False
-                retry_count = 0
-                max_retries = 3
+                timestamp = time.time()
 
-                while frame is None and retry_count < max_retries:
-                    try:
-                        # Cattura il frame con timeout minimo
-                        frame = camera.capture_array()
-                        timestamp = time.time()  # Timestamp di acquisizione preciso
-                        if frame is None or frame.size == 0:
-                            logger.warning(
-                                f"Frame vuoto ricevuto dalla camera {camera_index}, tentativo {retry_count + 1}/{max_retries}")
-                            retry_count += 1
-                            time.sleep(0.01)  # Breve pausa prima di riprovare
-                            continue
+                if mode == "grayscale":
+                    # Per immagini grayscale, catturiamo comunque a colori e convertiamo dopo
+                    # perché alcune versioni di PiCamera2 non supportano direttamente il grayscale
+                    frame = camera.capture_array()
+                else:
+                    # Modalità colore standard
+                    frame = camera.capture_array()
 
-                        # Reset dei contatori di errore se riusciamo a catturare
-                        consecutive_errors = 0
-                        last_successful_capture = time.time()
-                        camera_restarted = False
-                        capture_succeeded = True
-
-                    except Exception as e:
-                        logger.warning(
-                            f"Errore nella cattura del frame dalla camera {camera_index}, tentativo {retry_count + 1}/{max_retries}: {e}")
-                        retry_count += 1
-                        consecutive_errors += 1
-
-                        # Se riceviamo troppi errori consecutivi, prova a riavviare la camera
-                        if consecutive_errors >= max_consecutive_errors and not camera_restarted:
-                            try:
-                                logger.warning(f"Troppi errori consecutivi, riavvio camera {camera_index}...")
-                                camera.stop()
-                                time.sleep(0.5)
-                                camera.start()
-                                camera_restarted = True
-                                consecutive_errors = 0
-                                logger.info(f"Camera {camera_index} riavviata dopo errori consecutivi")
-                                time.sleep(1.0)  # Attendi che la camera si stabilizzi
-                                break  # Esci dal ciclo di retry e riprova al prossimo frame
-                            except Exception as restart_error:
-                                logger.error(f"Errore nel riavvio della camera {camera_index}: {restart_error}")
-
-                        time.sleep(0.01)  # Breve pausa prima di riprovare
-                        continue
-
-                # Se dopo tutti i tentativi il frame è ancora None, salta questo ciclo
-                if not capture_succeeded:
-                    logger.error(
-                        f"Impossibile catturare frame dalla camera {camera_index} dopo {max_retries} tentativi")
+                # Verifico che il frame sia valido
+                if frame is None or frame.size == 0:
+                    logger.warning(f"Frame vuoto ricevuto dalla camera {camera_index}")
+                    # Attendi prima di riprovare
+                    time.sleep(0.01)
                     continue
 
-                # Ora dobbiamo aggiungere il codice per processare e inviare il frame
+                # Aggiorna il timestamp dell'ultima cattura
+                last_capture_time = time.time()
+
+                # Convertiamo in grayscale se necessario (DOPO la cattura)
+                if mode == "grayscale" and len(frame.shape) == 3:
+                    import cv2
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+
+                # Compressione JPEG - usiamo l'approccio più semplice possibile
+                frame_data = None
+
+                # Approccio 1: Utilizzo di BytesIO e Pillow (semplice e affidabile)
                 try:
-                    # Converti il frame in base alla modalità
-                    if mode == "grayscale" and len(frame.shape) == 3:
-                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                    from io import BytesIO
+                    from PIL import Image
 
-                    # Compressione JPEG con controllo del tipo di API
-                    frame_data = None
-                    if picamera2_encoder:
-                        try:
-                            # Determina se usare API con request o diretta
-                            if encoder_requires_request:
-                                # Nuova API con request
-                                try:
-                                    request = picamera2_encoder.create_request()
-                                    if mode == "grayscale" and len(frame.shape) == 2:
-                                        # Converte in RGB per l'encoder hardware
-                                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
-                                        request.set_buffer(rgb_frame)
-                                    else:
-                                        request.set_buffer(frame)
-                                    frame_data = picamera2_encoder.encode(request)
-                                except AttributeError:
-                                    # Se create_request non è disponibile, fallback a OpenCV
-                                    logger.warning("API create_request non disponibile, fallback a OpenCV")
-                                    picamera2_encoder = None
-                            else:
-                                # Vecchia API diretta
-                                if mode == "grayscale" and len(frame.shape) == 2:
-                                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
-                                    frame_data = picamera2_encoder.encode(rgb_frame)
-                                else:
-                                    frame_data = picamera2_encoder.encode(frame)
-                        except Exception as e:
-                            logger.warning(f"Errore encoder hardware, fallback a OpenCV: {e}")
-                            picamera2_encoder = None
+                    img_format = "L" if (mode == "grayscale" and len(frame.shape) == 2) else "RGB"
 
-                    # Fallback a OpenCV se necessario
-                    if frame_data is None:
-                        # Codifica con OpenCV
-                        _, frame_data = cv2.imencode('.jpg', frame, encode_params)
-                        frame_data = frame_data.tobytes()
+                    # Usa BytesIO come buffer in memoria
+                    buffer = BytesIO()
 
-                    # Prepara header compatto in formato binario per bassa latenza
-                    # Formato: |camera_idx:1B|is_scan_flag:1B|timestamp:8B|sequence:4B|
-                    import struct
-                    is_scan_frame = 0  # Flag per identificare frames di scansione
-                    sequence = frame_count
-                    header = struct.pack('!BBdI', camera_index, is_scan_frame, timestamp, sequence)
+                    # Crea un'immagine PIL dal numpy array
+                    if mode == "grayscale" and len(frame.shape) == 2:
+                        # Grayscale diretto
+                        pil_img = Image.fromarray(frame, mode=img_format)
+                    else:
+                        # RGB
+                        pil_img = Image.fromarray(frame, mode=img_format)
 
-                    # Invia header e frame con flag SNDMORE per messaggio in due parti
-                    try:
-                        self.stream_socket.send(header, zmq.SNDMORE)
-                        self.stream_socket.send(frame_data, copy=False)  # Zero-copy per grande efficienza
+                    # Salva l'immagine in formato JPEG nel buffer
+                    pil_img.save(buffer, format="JPEG", quality=quality, optimize=False)
 
-                        # Aggiorna contatori
-                        frame_count += 1
-                        self._frame_count += 1  # Contatore globale
-                    except zmq.ZMQError as e:
-                        logger.warning(f"Errore nell'invio del frame: {e}")
-                        continue
-
-                    # Log periodico statistiche
-                    current_time = time.time()
-                    if current_time - last_stats_time > 10.0:  # Log ogni 10 secondi
-                        elapsed = current_time - last_stats_time
-                        fps = frame_count / elapsed
-
-                        logger.info(f"Camera {camera_index}: {frame_count} frames in {elapsed:.1f}s "
-                                    f"({fps:.1f} FPS, {skipped_frames} skipped)")
-
-                        # Reset contatori
-                        frame_count = 0
-                        skipped_frames = 0
-                        last_stats_time = current_time
+                    # Ottieni i bytes
+                    frame_data = buffer.getvalue()
 
                 except Exception as e:
-                    logger.error(f"Errore nel processing del frame: {e}")
-                    consecutive_errors += 1
+                    logger.warning(f"Errore con encoder Pillow, fallback: {e}")
+                    # Fallback a opencv se disponibile
+                    import cv2
+                    _, frame_data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+                    frame_data = frame_data.tobytes()
+
+                # Prepara header compatto in formato binario
+                import struct
+                is_scan_frame = 0  # Flag per identificare frames di scansione
+                sequence = frame_count
+                header = struct.pack('!BBdI', camera_index, is_scan_frame, timestamp, sequence)
+
+                # Invia header e frame
+                try:
+                    self.stream_socket.send(header, zmq.SNDMORE)
+                    self.stream_socket.send(frame_data, copy=False)  # Zero-copy
+
+                    # Aggiorna contatori
+                    frame_count += 1
+                    self._frame_count += 1  # Contatore globale
+                except zmq.ZMQError as e:
+                    logger.warning(f"Errore nell'invio del frame: {e}")
                     continue
 
+                # Log periodico
+                if current_time - last_stats_time > 10.0:
+                    elapsed = current_time - last_stats_time
+                    fps = frame_count / elapsed if elapsed > 0 else 0
+
+                    logger.info(f"Camera {camera_index}: {frame_count} frames in {elapsed:.1f}s "
+                                f"({fps:.1f} FPS)")
+
+                    # Reset contatori
+                    frame_count = 0
+                    last_stats_time = current_time
+
             except Exception as e:
-                # Cattura errori minori e continua
                 logger.warning(f"Errore nel ciclo di streaming per camera {camera_index}: {e}")
-                time.sleep(0.001)  # Pausa minima
-                consecutive_errors += 1
-                # Non terminare il thread di streaming
-                continue
+                time.sleep(0.01)  # Breve pausa
 
         logger.info(f"Thread di streaming camera {camera_index} terminato dopo {frame_count} frame")
 
