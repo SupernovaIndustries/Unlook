@@ -2,917 +2,559 @@
 # -*- coding: utf-8 -*-
 
 """
-Gestisce le connessioni con gli scanner UnLook.
-Versione migliorata con gestione degli stati di socket ZMQ e meccanismi avanzati di riconnessione.
+Connection Manager ottimizzato per comunicazioni a bassa latenza con scanner UnLook.
+Gestisce connessioni ZMQ con supporto per comandi sincroni e asincroni.
+Implementa meccanismi di keepalive e riconnessione automatica.
 """
 
-import json
 import logging
-import socket
 import time
 import threading
-from typing import Dict, Optional, Tuple, Any, Callable
-from collections import defaultdict
+import json
+import uuid
+import zmq
+from typing import Dict, Any, Optional, List, Tuple
+from dataclasses import dataclass
+import socket
+from contextlib import contextmanager
 
-from PySide6.QtCore import QObject, Signal, QThread, QMutex, QMutexLocker, QTimer, QCoreApplication
-
+# Configurazione logging
 logger = logging.getLogger(__name__)
 
-try:
-    import zmq
-except ImportError:
-    logger.error("ZMQ non trovato, installalo con: pip install pyzmq")
-    raise
+
+@dataclass
+class ConnectionInfo:
+    """Informazioni sulla connessione a un dispositivo."""
+    device_id: str
+    ip_address: str
+    port: int
+    context: Optional[zmq.Context] = None
+    socket: Optional[zmq.Socket] = None
+    last_activity: float = 0.0
+    is_connected: bool = False
+    pending_responses: Dict[str, Dict] = None
+
+    def __post_init__(self):
+        """Inizializza le strutture dati dopo la creazione."""
+        if self.pending_responses is None:
+            self.pending_responses = {}
 
 
-class ConnectionWorker(QThread):
+class ConnectionManager:
     """
-    Worker thread che gestisce una connessione ZMQ con uno scanner.
-    Versione migliorata con gestione avanzata degli stati dei socket e riconnessione automatica.
+    Gestisce le connessioni ai dispositivi scanner UnLook.
+    Ottimizzato per bassa latenza e alta affidabilità con recovery automatico.
     """
-    connection_ready = Signal(str)  # device_id
-    connection_error = Signal(str, str)  # device_id, error_message
-    connection_closed = Signal(str)  # device_id
-    data_received = Signal(str, dict)  # device_id, parsed_data
-
-    def __init__(self, device_id: str, host: str, port: int):
-        super().__init__()
-        self.device_id = device_id
-        self.host = host
-        self.port = port
-        self._socket = None
-        self._context = None
-        self._running = False
-        self._mutex = QMutex()
-        self._send_queue = []
-        self._consecutive_errors = 0
-        # Flag per tracciare lo stato REQ/REP
-        self._waiting_for_reply = False
-        self._last_activity = time.time()
-        # Creazione di un evento di chiusura
-        self._shutdown_event = threading.Event()
-
-    def run(self):
-        """Esegue il loop principale di connessione con migliore gestione degli errori e riconnessione automatica."""
-        reconnect_attempts = 0
-        max_reconnect_attempts = 5
-        reconnect_delay = 1.0  # Delay iniziale (1 secondo)
-
-        while reconnect_attempts <= max_reconnect_attempts and not self._shutdown_event.is_set():
-            try:
-                # Crea e configura il socket ZMQ
-                if self._context is None:
-                    self._context = zmq.Context()
-
-                self._socket = self._context.socket(zmq.REQ)  # Usiamo REQ che corrisponde a REP del server
-
-                # Connessione con timeout e opzioni migliorate
-                endpoint = f"tcp://{self.host}:{self.port}"
-
-                # Configurazione socket con migliori opzioni per robustezza
-                self._socket.setsockopt(zmq.RCVTIMEO, 5000)  # 5 secondi timeout ricezione
-                self._socket.setsockopt(zmq.SNDTIMEO, 5000)  # 5 secondi timeout invio
-                self._socket.setsockopt(zmq.LINGER, 1000)  # Attendi fino a 1 secondo alla chiusura
-                self._socket.setsockopt(zmq.RECONNECT_IVL, 500)  # Riconnetti ogni 500ms
-                self._socket.setsockopt(zmq.RECONNECT_IVL_MAX, 5000)  # Max intervallo riconnessione 5s
-                self._socket.setsockopt(zmq.TCP_KEEPALIVE, 1)  # Abilita TCP keepalive
-                self._socket.setsockopt(zmq.TCP_KEEPALIVE_IDLE, 60)  # Inizia keepalive dopo 60s di inattività
-                self._socket.setsockopt(zmq.TCP_KEEPALIVE_INTVL, 5)  # Intervallo keepalive 5s
-
-                # Se questo è un tentativo di riconnessione, lo segnaliamo
-                if reconnect_attempts > 0:
-                    logger.info(
-                        f"Tentativo di riconnessione {reconnect_attempts}/{max_reconnect_attempts} a {endpoint}")
-                else:
-                    logger.info(f"Tentativo di connessione a {endpoint}")
-
-                # Connessione
-                self._socket.connect(endpoint)
-
-                # Reset del flag di attesa risposta
-                with QMutexLocker(self._mutex):
-                    self._waiting_for_reply = False
-
-                # Connessione riuscita
-                logger.info(f"Connessione stabilita con {self.host}:{self.port}")
-                with QMutexLocker(self._mutex):
-                    self._running = True
-                    self._last_activity = time.time()
-
-                # Reset contatore tentativi di riconnessione
-                reconnect_attempts = 0
-
-                # Notifica connessione riuscita
-                self.connection_ready.emit(self.device_id)
-
-                # Loop principale
-                while self._running and not self._shutdown_event.is_set():
-                    # Invia i messaggi in coda
-                    self._process_send_queue()
-
-                    # Aggiorna periodicamente lo stato di attività
-                    current_time = time.time()
-                    with QMutexLocker(self._mutex):
-                        inactivity_time = current_time - self._last_activity
-
-                    # Se non c'è attività per più di 30 secondi, considera il socket inattivo
-                    if inactivity_time > 30.0:
-                        logger.warning(f"Socket inattivo per {inactivity_time:.1f} secondi, inviando ping")
-                        # Tenta l'invio di un ping
-                        success = self._send_ping()
-                        if not success:
-                            logger.error("Impossibile inviare ping, connessione persa")
-                            break  # Esce dal loop principale per riconnettersi
-
-                    # Pausa breve per evitare di sovraccaricare la CPU
-                    time.sleep(0.05)
-
-                    # Permettiamo alla QApplication di processare eventi
-                    QCoreApplication.processEvents()
-
-                # Se siamo usciti dal loop in modo pulito (self._running = False), usciamo dal loop esterno
-                if not self._running or self._shutdown_event.is_set():
-                    break
-
-            except zmq.ZMQError as e:
-                logger.error(f"Errore ZMQ nella connessione: {e}")
-
-                # Se il thread è stato fermato esplicitamente, usciamo
-                if self._shutdown_event.is_set():
-                    break
-
-                # Incrementa il contatore di tentativi e calcola il ritardo
-                reconnect_attempts += 1
-                current_delay = min(reconnect_delay * (2 ** (reconnect_attempts - 1)),
-                                    30.0)  # Backoff esponenziale, max 30 secondi
-
-                # Se abbiamo superato il numero massimo di tentativi, notifica l'errore e esci
-                if reconnect_attempts > max_reconnect_attempts:
-                    self.connection_error.emit(self.device_id,
-                                               f"Impossibile connettersi dopo {max_reconnect_attempts} tentativi")
-                    break
-
-                # Pulisci il socket corrente
-                self._cleanup_socket()
-
-                # Attendi prima di riprovare
-                logger.info(f"Attesa di {current_delay:.1f} secondi prima del prossimo tentativo...")
-                time.sleep(current_delay)
-
-            except socket.timeout:
-                logger.error(f"Timeout durante la connessione a {self.host}:{self.port}")
-
-                # Comportamento simile all'errore ZMQ
-                if self._shutdown_event.is_set():
-                    break
-
-                reconnect_attempts += 1
-                current_delay = min(reconnect_delay * (2 ** (reconnect_attempts - 1)), 30.0)
-
-                if reconnect_attempts > max_reconnect_attempts:
-                    self.connection_error.emit(self.device_id, "Timeout di connessione ripetuti")
-                    break
-
-                self._cleanup_socket()
-                time.sleep(current_delay)
-
-            except Exception as e:
-                logger.error(f"Errore durante la connessione: {str(e)}")
-
-                if self._shutdown_event.is_set():
-                    break
-
-                reconnect_attempts += 1
-                current_delay = min(reconnect_delay * (2 ** (reconnect_attempts - 1)), 30.0)
-
-                if reconnect_attempts > max_reconnect_attempts:
-                    self.connection_error.emit(self.device_id, f"Errore: {str(e)}")
-                    break
-
-                self._cleanup_socket()
-                time.sleep(current_delay)
-
-            finally:
-                if reconnect_attempts > max_reconnect_attempts or self._shutdown_event.is_set():
-                    # Chiudi il socket in modo sicuro solo se usciamo definitivamente
-                    self._cleanup_socket()
-
-                    # Notifica la chiusura solo se non è stato un ordine esplicito di stop
-                    if not self._shutdown_event.is_set():
-                        self.connection_closed.emit(self.device_id)
-
-    def send_data(self, data: bytes) -> bool:
-        """
-        Accoda i dati da inviare al server.
-
-        Args:
-            data: Dati binari da inviare (già serializzati JSON)
-
-        Returns:
-            True se i dati sono stati accodati, False altrimenti
-        """
-        with QMutexLocker(self._mutex):
-            if not self._running:
-                return False
-            self._send_queue.append(data)
-            return True
-
-    def _process_send_queue(self):
-        """Processa la coda dei messaggi da inviare con miglior gestione degli errori e stato del socket."""
-        with QMutexLocker(self._mutex):
-            if not self._send_queue or self._waiting_for_reply:
-                return
-
-            # Preleva un messaggio dalla coda (solo uno per volta con REQ/REP)
-            data = self._send_queue.pop(0)
-            # Segnala che stiamo per inviare e attendere una risposta
-            self._waiting_for_reply = True
-            # Aggiorna timestamp attività
-            self._last_activity = time.time()
-
-        # Invia il messaggio fuori dal mutex lock
-        try:
-            # Invia il messaggio con timeout
-            self._socket.send(data, flags=zmq.NOBLOCK)
-
-            # Attendi la risposta (pattern REQ/REP: req->rep->req->rep...)
-            try:
-                # Impostiamo un timeout per rilevare disconnessioni più rapidamente
-                poller = zmq.Poller()
-                poller.register(self._socket, zmq.POLLIN)
-
-                if poller.poll(5000):  # 5 secondi di timeout
-                    reply = self._socket.recv()
-
-                    # Reset del flag di attesa risposta
-                    with QMutexLocker(self._mutex):
-                        self._waiting_for_reply = False
-                        self._last_activity = time.time()
-                        self._consecutive_errors = 0
-
-                    try:
-                        # Decodifica e processa la risposta
-                        reply_json = reply.decode('utf-8')
-                        reply_data = json.loads(reply_json)
-                        self.data_received.emit(self.device_id, reply_data)
-                    except Exception as e:
-                        logger.error(f"Errore nella decodifica della risposta: {e}")
-                else:
-                    # Timeout nella ricezione della risposta
-                    logger.error("Timeout nella ricezione della risposta")
-
-                    # Incrementa il contatore di errori consecutivi
-                    with QMutexLocker(self._mutex):
-                        self._consecutive_errors += 1
-                        if self._consecutive_errors >= 3:
-                            logger.error("Troppe risposte mancate, connessione persa")
-                            self._running = False
-                            # Reset del flag di attesa risposta per evitare deadlock
-                            self._waiting_for_reply = False
-                            # Emetti il segnale fuori dal mutex
-
-                    if self._consecutive_errors >= 3:
-                        self.connection_closed.emit(self.device_id)
-                        return
-
-                    # Riavvia il socket per resettare lo stato REQ/REP
-                    self._restart_socket()
-
-                    # Riaccodiamo il messaggio
-                    with QMutexLocker(self._mutex):
-                        # Reset del flag di attesa risposta
-                        self._waiting_for_reply = False
-                        # Rimetti il messaggio in cima alla coda
-                        self._send_queue.insert(0, data)
-
-            except zmq.ZMQError as e:
-                logger.error(f"Errore ZMQ durante l'attesa di risposta: {e}")
-
-                # Incrementa il contatore di errori consecutivi
-                with QMutexLocker(self._mutex):
-                    self._consecutive_errors += 1
-                    if self._consecutive_errors >= 3:
-                        logger.error("Troppe risposte mancate, connessione persa")
-                        self._running = False
-                        # Reset del flag di attesa risposta per evitare deadlock
-                        self._waiting_for_reply = False
-                        # Emetti il segnale fuori dal mutex
-
-                if self._consecutive_errors >= 3:
-                    self.connection_closed.emit(self.device_id)
-                    return
-
-                # Riavvia il socket per resettare lo stato REQ/REP
-                self._restart_socket()
-
-                # Riaccodiamo il messaggio
-                with QMutexLocker(self._mutex):
-                    # Reset del flag di attesa risposta
-                    self._waiting_for_reply = False
-                    # Rimetti il messaggio in cima alla coda
-                    self._send_queue.insert(0, data)
-
-        except zmq.ZMQError as e:
-            logger.error(f"Errore ZMQ durante l'invio: {e}")
-
-            # Reset del flag di attesa risposta
-            with QMutexLocker(self._mutex):
-                self._waiting_for_reply = False
-                self._consecutive_errors += 1
-
-                # Riaccodiamo il messaggio
-                self._send_queue.insert(0, data)
-
-            # Se è un errore critico, segnala la disconnessione
-            if e.errno in [zmq.ETERM, zmq.ENOTSOCK, zmq.ENOTSUP]:
-                logger.error("Errore fatale nella connessione ZMQ")
-                with QMutexLocker(self._mutex):
-                    self._running = False
-                self.connection_closed.emit(self.device_id)
-
-            # Riavvia il socket per resettare lo stato REQ/REP
-            self._restart_socket()
-
-        except Exception as e:
-            logger.error(f"Errore durante l'invio: {str(e)}")
-
-            # Reset del flag di attesa risposta
-            with QMutexLocker(self._mutex):
-                self._waiting_for_reply = False
-                # Riaccodiamo il messaggio
-                self._send_queue.insert(0, data)
-
-            # Riavvia il socket per resettare lo stato REQ/REP
-            self._restart_socket()
-
-    def _send_ping(self) -> bool:
-        """
-        Invia un ping al server per verificare lo stato della connessione.
-        Usato solo quando il socket è in stato inattivo.
-
-        Returns:
-            True se il ping è stato inviato con successo, False altrimenti
-        """
-        try:
-            # Crea un messaggio di ping
-            ping_msg = {
-                "type": "PING",
-                "timestamp": time.time(),
-                "is_keepalive": True
-            }
-
-            # Serializza
-            data = json.dumps(ping_msg).encode('utf-8')
-
-            # Metti in coda
-            return self.send_data(data)
-        except Exception as e:
-            logger.error(f"Errore nell'invio del ping: {e}")
-            return False
-
-    def _restart_socket(self):
-        """Riavvia il socket per resettare lo stato REQ/REP."""
-        logger.info("Riavvio del socket per resettare lo stato REQ/REP")
-
-        try:
-            # Chiudi il socket esistente
-            if self._socket:
-                try:
-                    self._socket.setsockopt(zmq.LINGER, 0)
-                    self._socket.close()
-                except Exception as e:
-                    logger.debug(f"Errore nella chiusura del socket: {e}")
-                self._socket = None
-
-            # Crea un nuovo socket
-            if self._context:
-                try:
-                    self._socket = self._context.socket(zmq.REQ)
-
-                    # Configura il nuovo socket
-                    self._socket.setsockopt(zmq.RCVTIMEO, 5000)
-                    self._socket.setsockopt(zmq.SNDTIMEO, 5000)
-                    self._socket.setsockopt(zmq.LINGER, 1000)
-                    self._socket.setsockopt(zmq.RECONNECT_IVL, 500)
-                    self._socket.setsockopt(zmq.RECONNECT_IVL_MAX, 5000)
-                    self._socket.setsockopt(zmq.TCP_KEEPALIVE, 1)
-                    self._socket.setsockopt(zmq.TCP_KEEPALIVE_IDLE, 60)
-                    self._socket.setsockopt(zmq.TCP_KEEPALIVE_INTVL, 5)
-
-                    # Riconnetti all'endpoint
-                    endpoint = f"tcp://{self.host}:{self.port}"
-                    self._socket.connect(endpoint)
-
-                    logger.info(f"Socket riavviato e riconnesso a {endpoint}")
-                    return True
-                except Exception as e:
-                    logger.error(f"Errore nella creazione del nuovo socket: {e}")
-                    return False
-        except Exception as e:
-            logger.error(f"Errore nel riavvio del socket: {e}")
-            return False
-
-    def stop(self):
-        """Ferma il worker e chiude la connessione in modo sicuro."""
-        logger.info(f"Arresto del worker di connessione per {self.device_id}...")
-
-        try:
-            # Segnala l'evento di arresto
-            self._shutdown_event.set()
-
-            with QMutexLocker(self._mutex):
-                self._running = False
-
-            # Pulisci subito le risorse socket per evitare blocchi
-            self._cleanup_socket()
-
-            # Attendiamo un breve momento per permettere al thread di completare
-            # eventuali operazioni in corso
-            if self.isRunning():
-                # Se il thread è ancora in esecuzione, attendiamo con timeout
-                if not self.wait(2000):  # Attendi fino a 2 secondi
-                    logger.warning(f"Thread di connessione per {self.device_id} non si ferma entro il timeout")
-                    # Non forziamo con terminate() che è pericoloso
-
-            logger.info(f"Worker di connessione per {self.device_id} arrestato")
-        except Exception as e:
-            logger.error(f"Errore nell'arresto del worker di connessione: {e}")
-            # Assicurati che le risorse vengano comunque rilasciate
-            try:
-                self._cleanup_socket()
-            except Exception as cleanup_err:
-                logger.error(f"Errore anche nella pulizia del socket: {cleanup_err}")
-
-    def _cleanup_socket(self):
-        """Pulisce le risorse del worker in modo sicuro."""
-        try:
-            if self._socket:
-                try:
-                    # Chiusura sicura: prima impostiamo LINGER a 0
-                    self._socket.setsockopt(zmq.LINGER, 0)
-                    self._socket.close()
-                except:
-                    pass
-                self._socket = None
-
-            if self._context:
-                try:
-                    # Termina il contesto in modo sicuro
-                    self._context.term()
-                except:
-                    pass
-                self._context = None
-
-            logger.debug(f"Risorse ZMQ rilasciate per worker {self.device_id}")
-        except Exception as e:
-            logger.error(f"Errore nel rilascio delle risorse ZMQ: {e}")
-
-
-class ConnectionManager(QObject):
-    """
-    Gestisce le connessioni con gli scanner UnLook.
-    Versione migliorata con gestione più robusta delle connessioni e riconnessioni automatiche.
-    """
-    connection_established = Signal(str)  # device_id
-    connection_failed = Signal(str, str)  # device_id, error_message
-    connection_closed = Signal(str)  # device_id
-    data_received = Signal(str, dict)  # device_id, parsed_data
-
-    _instance = None
-
-    def __new__(cls):
-        """Implementa il pattern Singleton."""
-        if cls._instance is None:
-            cls._instance = super(ConnectionManager, cls).__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
 
     def __init__(self):
-        """Inizializza il connection manager (solo la prima volta)."""
-        if self._initialized:
-            return
+        """Inizializza il gestore di connessione."""
+        self._connections: Dict[str, ConnectionInfo] = {}
+        self._lock = threading.RLock()
+        self._zmq_context = zmq.Context.instance()
 
-        super().__init__()
-        self._connections: Dict[str, ConnectionWorker] = {}
-        self._message_handlers: Dict[str, Callable] = {}
-        self._responses: Dict[str, Dict[str, Any]] = defaultdict(dict)
-        self._responses_mutex = QMutex()
-        self._connections_mutex = QMutex()  # Mutex per proteggere la lista delle connessioni
-        self._initialized = True
+        # Socket HWM ottimizzato per bassa latenza
+        self._zmq_context.setsockopt(zmq.LINGER, 0)
 
-        # Aggiungi un timer per il monitoraggio periodico delle connessioni
-        self._monitor_timer = QTimer(self)
-        self._monitor_timer.timeout.connect(self._monitor_connections)
-        self._monitor_timer.start(10000)  # Controlla ogni 10 secondi
+        # Parametri di timeout ottimizzati
+        self._connection_timeout = 3.0  # 3 secondi
+        self._command_timeout = 2.0  # 2 secondi
+        self._response_timeout = 2.0  # 2 secondi
+        self._ping_interval = 2.0  # 2 secondi
 
-    def connect(self, device_id: str, host: str, port: int) -> bool:
+        # Avvia thread di monitoraggio connessioni
+        self._stopping = threading.Event()
+        self._monitor_thread = threading.Thread(target=self._connection_monitor_loop, daemon=True)
+        self._monitor_thread.start()
+
+        logger.info("ConnectionManager inizializzato")
+
+    def connect(self, device_id: str, ip_address: str, port: int = 5000) -> bool:
         """
-        Stabilisce una connessione con uno scanner.
+        Stabilisce una connessione al dispositivo specificato.
 
         Args:
-            device_id: ID univoco dello scanner
-            host: Indirizzo IP o hostname dello scanner
-            port: Porta di connessione
+            device_id: ID univoco del dispositivo
+            ip_address: Indirizzo IP del dispositivo
+            port: Porta di comunicazione
 
         Returns:
-            True se la connessione è stata avviata, False altrimenti
+            True se la connessione è stabilita con successo, False altrimenti
         """
-        with QMutexLocker(self._connections_mutex):
-            # Controlla se c'è già una connessione attiva
-            if device_id in self._connections:
-                worker = self._connections[device_id]
-                if worker.isRunning():
-                    logger.info(f"Connessione già attiva per {device_id}")
-                    return True
+        with self._lock:
+            # Controlla se già connesso
+            if device_id in self._connections and self._connections[device_id].is_connected:
+                logger.info(f"Già connesso a {device_id}")
+                return True
 
-                # Rimuovi la vecchia connessione
-                self._cleanup_connection(device_id)
+            try:
+                # Se esiste già una connessione ma non è attiva, pulisci
+                if device_id in self._connections:
+                    self._cleanup_connection(device_id)
 
-            # Crea un nuovo worker
-            worker = ConnectionWorker(device_id, host, port)
+                # Crea socket ZMQ
+                socket = self._zmq_context.socket(zmq.REQ)
 
-            # Collega i segnali
-            worker.connection_ready.connect(self._on_connection_ready)
-            worker.connection_error.connect(self._on_connection_error)
-            worker.connection_closed.connect(self._on_connection_closed)
-            worker.data_received.connect(self._on_data_received)
+                # Configura socket per bassa latenza
+                socket.setsockopt(zmq.LINGER, 0)  # No lingering
+                socket.setsockopt(zmq.RCVTIMEO, 5000)  # 5 secondi timeout ricezione
+                socket.setsockopt(zmq.SNDTIMEO, 5000)  # 5 secondi timeout invio
 
-            # Salva e avvia il worker
-            self._connections[device_id] = worker
-            worker.start()
+                # Opzioni TCP aggressive per bassa latenza
+                try:
+                    socket.setsockopt(zmq.TCP_NODELAY, 1)
+                    logger.debug("TCP_NODELAY abilitato")
+                except:
+                    # Non essenziale, ignora se non supportato
+                    pass
 
-            logger.info(f"Connessione avviata per {device_id} a {host}:{port}")
-            return True
+                # Connetti al dispositivo
+                endpoint = f"tcp://{ip_address}:{port}"
+                logger.info(f"Connessione a {endpoint}...")
+                socket.connect(endpoint)
+
+                # Invia ping iniziale per verificare la connessione
+                try:
+                    # Timeout più lungo per la connessione iniziale
+                    with self._set_socket_timeout(socket, 5000):
+                        socket.send_json({
+                            "command": "PING",
+                            "timestamp": time.time(),
+                            "request_id": str(uuid.uuid4())
+                        })
+
+                        response = socket.recv_json()
+                        if response.get("status") != "ok":
+                            raise Exception(f"Ping iniziale fallito: {response.get('message', 'Risposta non valida')}")
+                except Exception as e:
+                    logger.error(f"Errore nella connessione a {endpoint}: {e}")
+                    socket.close()
+                    return False
+
+                # Crea e salva info connessione
+                connection = ConnectionInfo(
+                    device_id=device_id,
+                    ip_address=ip_address,
+                    port=port,
+                    context=self._zmq_context,
+                    socket=socket,
+                    last_activity=time.time(),
+                    is_connected=True
+                )
+
+                self._connections[device_id] = connection
+                logger.info(f"Connessione stabilita con {device_id} a {ip_address}:{port}")
+                return True
+
+            except Exception as e:
+                logger.error(f"Errore nella connessione a {device_id} ({ip_address}:{port}): {e}")
+                return False
 
     def disconnect(self, device_id: str) -> bool:
         """
-        Chiude la connessione con uno scanner in modo sicuro e robusto.
-
-        Args:
-            device_id: ID univoco dello scanner
-
-        Returns:
-            True se la disconnessione è stata avviata, False altrimenti
-        """
-        logger.info(f"Richiesta disconnessione per device {device_id}")
-
-        try:
-            with QMutexLocker(self._connections_mutex):
-                if device_id not in self._connections:
-                    logger.warning(f"Nessuna connessione attiva per {device_id}")
-                    return False
-
-                # Ottieni il riferimento al worker prima di rimuoverlo dal dizionario
-                worker = self._connections[device_id]
-
-                # Rimuovi immediatamente dal dizionario per evitare accessi multipli
-                self._connections.pop(device_id)
-
-                # Pulisci le risposte in sospeso
-                with QMutexLocker(self._responses_mutex):
-                    if device_id in self._responses:
-                        del self._responses[device_id]
-
-            # Fuori dal mutex, gestiamo la disconnessione effettiva
-            try:
-                # Tentativo di invio diretto del comando DISCONNECT, senza passare per la coda
-                # Ma solo se il worker è ancora in esecuzione
-                if worker.isRunning():
-                    try:
-                        message = {"type": "DISCONNECT", "timestamp": time.time()}
-                        data = json.dumps(message).encode('utf-8')
-                        worker.send_data(data)
-                        logger.debug(f"Comando DISCONNECT inviato a {device_id}")
-                    except Exception as msg_err:
-                        logger.debug(f"Impossibile inviare DISCONNECT: {msg_err}")
-            except Exception as e:
-                logger.debug(f"Errore nell'invio del messaggio di disconnessione: {e}")
-
-            # Ferma il worker in modo sicuro
-            try:
-                # Usa stop() che dovrebbe gestire internamente la terminazione
-                worker.stop()
-
-                # Attendi la terminazione con un timeout ragionevole
-                if worker.isRunning():
-                    logger.debug(f"In attesa della terminazione del worker per {device_id}...")
-                    worker.wait(2000)  # 2 secondi di timeout
-
-                    if worker.isRunning():
-                        logger.warning(f"Il worker per {device_id} non si è fermato nel timeout previsto")
-            except Exception as stop_err:
-                logger.error(f"Errore nell'arresto del worker: {stop_err}")
-
-            # Disconnetti i segnali in modo sicuro
-            self._disconnect_worker_signals_safely(worker)
-
-            logger.info(f"Disconnessione completata per {device_id}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Errore critico durante la disconnessione di {device_id}: {e}")
-            # Rilascia comunque le risorse per evitare memory leak
-            try:
-                with QMutexLocker(self._connections_mutex):
-                    if device_id in self._connections:
-                        self._connections.pop(device_id)
-
-                with QMutexLocker(self._responses_mutex):
-                    if device_id in self._responses:
-                        del self._responses[device_id]
-            except:
-                pass
-            return False
-
-    def _disconnect_worker_signals_safely(self, worker):
-        """Disconnette in modo sicuro i segnali del worker."""
-        try:
-            # Disconnetti ogni segnale individualmente per gestire meglio gli errori
-            signals_to_disconnect = [
-                'connection_ready',
-                'connection_error',
-                'connection_closed',
-                'data_received'
-            ]
-
-            for signal_name in signals_to_disconnect:
-                try:
-                    if hasattr(worker, signal_name):
-                        signal = getattr(worker, signal_name)
-                        # In PySide6/PyQt, non abbiamo accesso diretto al numero di ricevitori
-                        # quindi catturiamo semplicemente le eccezioni
-                        try:
-                            signal.disconnect()
-                        except TypeError:  # Tipo di errore quando non ci sono connessioni
-                            pass
-                        except Exception as e:
-                            logger.debug(f"Errore nella disconnessione del segnale {signal_name}: {e}")
-                except Exception as e:
-                    logger.debug(f"Errore nell'accesso al segnale {signal_name}: {e}")
-        except Exception as e:
-            logger.error(f"Errore generale nella disconnessione dei segnali: {e}")
-
-    def send_message(self, device_id: str, message: Dict[str, Any], timeout: float = 5.0) -> bool:
-        """
-        Invia un messaggio a un dispositivo con supporto timeout.
+        Disconnette dal dispositivo specificato.
 
         Args:
             device_id: ID del dispositivo
-            message: Messaggio da inviare
-            timeout: Timeout in secondi per l'invio del messaggio
+
+        Returns:
+            True se disconnesso con successo, False altrimenti
+        """
+        with self._lock:
+            if device_id not in self._connections:
+                logger.warning(f"Impossibile disconnettere: {device_id} non connesso")
+                return False
+
+            # Invia comando DISCONNECT se connesso
+            connection = self._connections[device_id]
+            if connection.is_connected:
+                try:
+                    # Invia disconnect con timeout breve
+                    with self._set_socket_timeout(connection.socket, 1000):
+                        connection.socket.send_json({
+                            "command": "DISCONNECT",
+                            "request_id": str(uuid.uuid4())
+                        })
+
+                        # Ricevi risposta ma non attendere troppo
+                        try:
+                            connection.socket.recv_json()
+                        except zmq.Again:
+                            pass  # Timeout accettabile durante disconnessione
+                except Exception as e:
+                    logger.debug(f"Errore nell'invio del comando DISCONNECT: {e}")
+
+            # Pulisci la connessione indipendentemente dall'esito del comando
+            self._cleanup_connection(device_id)
+            return True
+
+    def is_connected(self, device_id: str) -> bool:
+        """
+        Verifica se il dispositivo è attualmente connesso.
+
+        Args:
+            device_id: ID del dispositivo
+
+        Returns:
+            True se connesso, False altrimenti
+        """
+        with self._lock:
+            return (device_id in self._connections and
+                    self._connections[device_id].is_connected)
+
+    def send_message(self, device_id: str, command: str,
+                     data: Optional[Dict[str, Any]] = None,
+                     timeout: float = None) -> bool:
+        """
+        Invia un messaggio a un dispositivo connesso.
+
+        Args:
+            device_id: ID del dispositivo
+            command: Comando da inviare
+            data: Dati aggiuntivi per il comando
+            timeout: Timeout per l'invio in secondi (None = default timeout)
 
         Returns:
             True se il messaggio è stato inviato con successo, False altrimenti
         """
-        if device_id not in self._connections:
-            logger.error(f"Nessuna connessione attiva per {device_id}")
-            return False
-
-        try:
-            # Imposta timeout sul socket
-            connection = self._connections[device_id]
-            socket = connection.get("socket")
-            if socket:
-                # Salva il timeout originale
-                original_timeout = socket.getsockopt(zmq.RCVTIMEO)
-                # Imposta il nuovo timeout (in millisecondi)
-                socket.setsockopt(zmq.RCVTIMEO, int(timeout * 1000))
-
-                # Invia il messaggio
-                json_message = json.dumps(message).encode('utf-8')
-                socket.send(json_message)
-
-                # Ripristina il timeout originale
-                socket.setsockopt(zmq.RCVTIMEO, original_timeout)
-
-                # Memorizza la risposta attesa
-                self._expected_responses[device_id] = message.get("type")
-                return True
-        except zmq.ZMQError as e:
-            logger.error(f"Errore ZMQ nell'invio del messaggio: {e}")
-        except Exception as e:
-            logger.error(f"Errore nell'invio del messaggio: {e}")
-
-        return False
-
-    def register_message_handler(self, message_type: str, handler: Callable):
-        """
-        Registra un gestore per un tipo specifico di messaggio.
-
-        Args:
-            message_type: Tipo di messaggio da gestire
-            handler: Funzione di callback che gestirà il messaggio
-        """
-        self._message_handlers[message_type] = handler
-
-    def is_connected(self, device_id: str) -> bool:
-        """
-        Verifica se un dispositivo è connesso.
-        Versione migliorata che controlla effettivamente lo stato attuale.
-
-        Args:
-            device_id: ID univoco dello scanner
-
-        Returns:
-            True se il dispositivo è connesso, False altrimenti
-        """
-        with QMutexLocker(self._connections_mutex):
-            if device_id not in self._connections:
+        # Verifica connessione
+        with self._lock:
+            if not self.is_connected(device_id):
+                logger.error(f"Impossibile inviare messaggio: {device_id} non connesso")
                 return False
 
-            worker = self._connections[device_id]
-            return worker.isRunning()
+            connection = self._connections[device_id]
 
-    def has_response(self, device_id: str, command_type: str) -> bool:
+        # Prepara il messaggio
+        message = {
+            "command": command,
+            "request_id": str(uuid.uuid4())
+        }
+
+        # Aggiungi dati se forniti
+        if data:
+            message.update(data)
+
+        # Timeout effettivo
+        effective_timeout = timeout * 1000 if timeout else self._command_timeout * 1000
+
+        try:
+            # Acquisisci lock per questa operazione specifica
+            with self._lock:
+                if not connection.is_connected:
+                    logger.error(f"Connessione persa durante preparazione invio a {device_id}")
+                    return False
+
+                # Memorizza ID richiesta per tracciare la risposta
+                request_id = message["request_id"]
+                connection.pending_responses[request_id] = {
+                    "command": command,
+                    "timestamp": time.time(),
+                    "response": None
+                }
+
+                # Imposta timeout temporaneo e invia
+                with self._set_socket_timeout(connection.socket, int(effective_timeout)):
+                    connection.socket.send_json(message)
+
+                # Aggiorna timestamp attività
+                connection.last_activity = time.time()
+
+            # Successo - messaggio inviato (risposta ricevuta separatamente)
+            return True
+
+        except zmq.Again:
+            logger.error(f"Timeout inviando messaggio '{command}' a {device_id}")
+            return False
+        except Exception as e:
+            logger.error(f"Errore inviando messaggio '{command}' a {device_id}: {e}")
+            # Marca la connessione come problematica
+            with self._lock:
+                if device_id in self._connections:
+                    self._connections[device_id].is_connected = False
+            return False
+
+    def receive_response(self, device_id: str, timeout: float = None) -> Optional[Dict]:
         """
-        Verifica se è disponibile una risposta per un comando specifico.
-        Versione migliorata per cercare anche risposte con suffissi o con original_type.
+        Riceve una risposta da un dispositivo connesso.
 
         Args:
-            device_id: ID univoco dello scanner
-            command_type: Tipo di comando
+            device_id: ID del dispositivo
+            timeout: Timeout in secondi
+
+        Returns:
+            Dizionario con la risposta o None in caso di errore/timeout
+        """
+        with self._lock:
+            if not self.is_connected(device_id):
+                logger.error(f"Impossibile ricevere risposta: {device_id} non connesso")
+                return None
+
+            connection = self._connections[device_id]
+
+        # Timeout effettivo
+        effective_timeout = timeout * 1000 if timeout else self._response_timeout * 1000
+
+        try:
+            # Imposta timeout temporaneo e ricevi
+            with self._set_socket_timeout(connection.socket, int(effective_timeout)):
+                response = connection.socket.recv_json()
+
+            # Aggiorna timestamp attività
+            with self._lock:
+                connection.last_activity = time.time()
+
+                # Elabora risposta
+                request_id = response.get("request_id")
+                if request_id in connection.pending_responses:
+                    # Memorizza risposta
+                    connection.pending_responses[request_id]["response"] = response
+
+                    # Pulizia vecchie risposte (opzionale)
+                    self._cleanup_old_responses(connection)
+                else:
+                    logger.warning(f"Ricevuta risposta non richiesta: {response}")
+
+            return response
+
+        except zmq.Again:
+            logger.error(f"Timeout ricevendo risposta da {device_id}")
+            return None
+        except Exception as e:
+            logger.error(f"Errore ricevendo risposta da {device_id}: {e}")
+            # Marca la connessione come problematica
+            with self._lock:
+                if device_id in self._connections:
+                    self._connections[device_id].is_connected = False
+            return None
+
+    def wait_for_response(self, device_id: str, command: str,
+                          timeout: float = None) -> Optional[Dict]:
+        """
+        Attende una risposta a un comando specifico.
+
+        Args:
+            device_id: ID del dispositivo
+            command: Comando per cui attendere la risposta
+            timeout: Timeout in secondi
+
+        Returns:
+            Dizionario con la risposta o None in caso di errore/timeout
+        """
+        effective_timeout = timeout or self._response_timeout
+        start_time = time.time()
+
+        # Loop fino al timeout
+        while time.time() - start_time < effective_timeout:
+            with self._lock:
+                if not self.is_connected(device_id):
+                    logger.error(f"Connessione persa mentre si attendeva risposta da {device_id}")
+                    return None
+
+                connection = self._connections[device_id]
+
+                # Cerca nel dizionario delle risposte pendenti
+                for request_id, request_info in list(connection.pending_responses.items()):
+                    if request_info["command"] == command and request_info["response"]:
+                        # Risposta trovata, torna la risposta e pulisci
+                        response = request_info["response"]
+                        del connection.pending_responses[request_id]
+                        return response
+
+            # Attendi un po' prima di riverificare
+            time.sleep(0.01)
+
+        logger.warning(f"Timeout attendendo risposta a '{command}' da {device_id}")
+        return None
+
+    def has_response(self, device_id: str, command: str) -> bool:
+        """
+        Verifica se è disponibile una risposta per un comando specifico.
+
+        Args:
+            device_id: ID del dispositivo
+            command: Comando per cui verificare la risposta
 
         Returns:
             True se è disponibile una risposta, False altrimenti
         """
-        with QMutexLocker(self._responses_mutex):
-            if device_id not in self._responses:
+        with self._lock:
+            if not self.is_connected(device_id):
                 return False
 
-            # Verifica diretta
-            if command_type in self._responses[device_id]:
-                return True
+            connection = self._connections[device_id]
 
-            # Verifica con suffisso "_response"
-            response_type = f"{command_type}_response"
-            if response_type in self._responses[device_id]:
-                return True
-
-            # Verifica basata sul campo original_type
-            for resp_data in self._responses[device_id].values():
-                if isinstance(resp_data, dict) and resp_data.get("original_type") == command_type:
+            # Cerca nel dizionario delle risposte pendenti
+            for request_info in connection.pending_responses.values():
+                if request_info["command"] == command and request_info["response"]:
                     return True
 
-            return False
+        return False
 
-    def get_response(self, device_id: str, command_type: str) -> Optional[Dict[str, Any]]:
+    def get_response(self, device_id: str, command: str) -> Optional[Dict]:
         """
-        Restituisce la risposta per un comando specifico e la rimuove dalla coda.
-        Versione migliorata per una ricerca più flessibile.
+        Ottiene una risposta per un comando specifico senza attendere.
 
         Args:
-            device_id: ID univoco dello scanner
-            command_type: Tipo di comando
+            device_id: ID del dispositivo
+            command: Comando per cui ottenere la risposta
 
         Returns:
             Dizionario con la risposta o None se non disponibile
         """
-        with QMutexLocker(self._responses_mutex):
-            if device_id in self._responses:
-                # Prima verifica per il tipo esatto
-                if command_type in self._responses[device_id]:
-                    response = self._responses[device_id].pop(command_type)
-                    return response
-
-                # Poi controlla se c'è una risposta con il suffisso "_response"
-                response_type = f"{command_type}_response"
-                if response_type in self._responses[device_id]:
-                    response = self._responses[device_id].pop(response_type)
-                    return response
-
-                # Infine verifica se c'è una risposta con original_type che corrisponde
-                for resp_type, resp_data in list(self._responses[device_id].items()):
-                    if isinstance(resp_data, dict) and resp_data.get("original_type") == command_type:
-                        response = self._responses[device_id].pop(resp_type)
-                        return response
-
-            return None
-
-    def wait_for_response(self, device_id: str, command_type: str, timeout: float = 30.0) -> Optional[Dict[str, Any]]:
-        """
-        Attende la risposta a un comando specifico con un timeout.
-        Versione migliorata che evita di bloccare completamente il thread UI.
-
-        Args:
-            device_id: ID univoco dello scanner
-            command_type: Tipo di comando
-            timeout: Timeout in secondi
-
-        Returns:
-            Risposta o None se scaduto il timeout
-        """
-        start_time = time.time()
-
-        # Check immediato
-        response = self.get_response(device_id, command_type)
-        if response:
-            return response
-
-        # Loop di attesa con processing degli eventi Qt
-        while (time.time() - start_time) < timeout:
-            # Piccola pausa per non saturare la CPU
-            time.sleep(0.01)
-
-            # Verifica se è arrivata una risposta
-            response = self.get_response(device_id, command_type)
-            if response:
-                return response
-
-            # Permetti all'applicazione di processare eventi
-            QCoreApplication.processEvents()
-
-            # Verifica se il dispositivo è ancora connesso
+        with self._lock:
             if not self.is_connected(device_id):
-                logger.warning(f"Dispositivo {device_id} disconnesso durante l'attesa della risposta")
                 return None
 
-        # Timeout scaduto
-        logger.warning(f"Timeout durante l'attesa della risposta a {command_type} per {device_id}")
+            connection = self._connections[device_id]
+
+            # Cerca nel dizionario delle risposte pendenti
+            for request_id, request_info in list(connection.pending_responses.items()):
+                if request_info["command"] == command and request_info["response"]:
+                    # Risposta trovata, torna la risposta e pulisci
+                    response = request_info["response"]
+                    del connection.pending_responses[request_id]
+                    return response
+
         return None
 
-    def _cleanup_connection(self, device_id: str):
-        """Rimuove una connessione dalla gestione."""
-        with QMutexLocker(self._connections_mutex):
-            if device_id in self._connections:
-                worker = self._connections.pop(device_id)
-                # Disconnetti i segnali
-                try:
-                    worker.connection_ready.disconnect()
-                    worker.connection_error.disconnect()
-                    worker.connection_closed.disconnect()
-                    worker.data_received.disconnect()
-                except:
-                    pass
+    def _connection_monitor_loop(self):
+        """Thread di monitoraggio connessioni con keepalive e riconnessione."""
+        logger.info("Avvio thread di monitoraggio connessioni")
 
-            # Rimuovi anche le risposte in sospeso
-            with QMutexLocker(self._responses_mutex):
-                if device_id in self._responses:
-                    del self._responses[device_id]
+        while not self._stopping.is_set():
+            try:
+                # Controlla tutte le connessioni
+                with self._lock:
+                    for device_id, connection in list(self._connections.items()):
+                        # Salta se non connesso
+                        if not connection.is_connected:
+                            continue
 
-    def _monitor_connections(self):
-        """
-        Monitora periodicamente lo stato delle connessioni.
-        Utile per rilevare connessioni che potrebbero essere in uno stato inconsistente.
-        """
-        with QMutexLocker(self._connections_mutex):
-            for device_id, worker in list(self._connections.items()):
-                # Verifica se il worker è ancora in esecuzione
-                if not worker.isRunning():
-                    logger.warning(f"Worker per {device_id} non più in esecuzione, pulizia risorse")
-                    self._cleanup_connection(device_id)
-                    self.connection_closed.emit(device_id)
+                        # Controlla inattività
+                        current_time = time.time()
+                        inactivity_time = current_time - connection.last_activity
 
-    def _on_connection_ready(self, device_id: str):
-        """Gestisce l'evento di connessione pronta."""
-        logger.info(f"Connessione stabilita con {device_id}")
-        self.connection_established.emit(device_id)
+                        # Invia ping se inattivo da un po'
+                        if inactivity_time > self._ping_interval:
+                            self._send_keepalive_ping(device_id)
 
-    def _on_connection_error(self, device_id: str, error: str):
-        """Gestisce l'evento di errore di connessione."""
-        logger.error(f"Errore di connessione per {device_id}: {error}")
-        self.connection_failed.emit(device_id, error)
+                # Attendi prima del prossimo ciclo
+                time.sleep(1.0)
 
-    def _on_connection_closed(self, device_id: str):
-        """Gestisce l'evento di chiusura della connessione."""
-        logger.info(f"Connessione chiusa per {device_id}")
+            except Exception as e:
+                logger.error(f"Errore nel thread di monitoraggio: {e}")
+                time.sleep(5.0)  # Attendi più a lungo in caso di errore
 
-        # Rilascia le risorse della connessione
-        self._cleanup_connection(device_id)
+        logger.info("Thread di monitoraggio connessioni terminato")
 
-        # Emetti il segnale
-        self.connection_closed.emit(device_id)
-
-    def _on_data_received(self, device_id: str, message: dict):
-        """Gestisce l'evento di ricezione dati."""
+    def _send_keepalive_ping(self, device_id: str) -> bool:
+        """Invia un ping di keepalive al dispositivo."""
         try:
-            # Estrai il tipo di messaggio
-            message_type = message.get('type', '')
-            original_type = None
+            # Non usare send_message per evitare ricorsione
+            with self._lock:
+                if not device_id in self._connections:
+                    return False
 
-            if message_type.endswith('_response'):
-                # Estrai il tipo originale del comando (rimuovendo "_response")
-                original_type = message_type[:-9]
+                connection = self._connections[device_id]
+                if not connection.is_connected:
+                    return False
 
-            logger.debug(f"Messaggio ricevuto da {device_id}: {message_type}")
+                # Prepara e invia ping
+                ping_message = {
+                    "command": "PING",
+                    "request_id": str(uuid.uuid4()),
+                    "timestamp": time.time(),
+                    "keepalive": True
+                }
 
-            # Archivia la risposta per il comando originale
-            if original_type:
-                with QMutexLocker(self._responses_mutex):
-                    self._responses[device_id][original_type] = message
-                logger.debug(f"Risposta archiviata per comando {original_type}")
+                # Invia con timeout breve
+                with self._set_socket_timeout(connection.socket, 500):  # 500ms
+                    connection.socket.send_json(ping_message)
 
-            # Emetti il segnale generico di dati ricevuti
-            self.data_received.emit(device_id, message)
-
-            # Gestisci il messaggio con l'handler specifico
-            if message_type in self._message_handlers:
-                handler = self._message_handlers[message_type]
-                handler(device_id, message)
-
-            # Gestisci anche con l'handler del tipo originale se esiste
-            if original_type and original_type in self._message_handlers:
-                handler = self._message_handlers[original_type]
-                handler(device_id, message)
+                    # Attendi risposta
+                    try:
+                        connection.socket.recv_json()
+                        # Ping riuscito, aggiorna timestamp
+                        connection.last_activity = time.time()
+                        return True
+                    except zmq.Again:
+                        # Timeout - connessione problematica
+                        logger.warning(f"Keepalive ping timeout per {device_id}")
+                        connection.is_connected = False
+                        return False
 
         except Exception as e:
-            logger.error(f"Errore nella gestione dei dati ricevuti: {str(e)}")
+            logger.error(f"Errore nel keepalive ping per {device_id}: {e}")
+            with self._lock:
+                if device_id in self._connections:
+                    self._connections[device_id].is_connected = False
+            return False
+
+    def _cleanup_connection(self, device_id: str):
+        """Pulisce le risorse associate a una connessione."""
+        with self._lock:
+            if device_id not in self._connections:
+                return
+
+            connection = self._connections[device_id]
+
+            # Chiudi socket
+            if connection.socket:
+                try:
+                    connection.socket.close()
+                except Exception as e:
+                    logger.debug(f"Errore chiudendo socket: {e}")
+
+            # Rimuovi dalla lista connessioni
+            del self._connections[device_id]
+            logger.info(f"Connessione a {device_id} chiusa e pulita")
+
+    def _cleanup_old_responses(self, connection: ConnectionInfo):
+        """Pulisce le vecchie risposte pendenti."""
+        # Rimuovi risposte più vecchie di 30 secondi
+        current_time = time.time()
+        old_threshold = 30.0  # 30 secondi
+
+        to_remove = []
+        for request_id, request_info in connection.pending_responses.items():
+            if current_time - request_info["timestamp"] > old_threshold:
+                to_remove.append(request_id)
+
+        for request_id in to_remove:
+            del connection.pending_responses[request_id]
+
+        if to_remove:
+            logger.debug(f"Rimosse {len(to_remove)} vecchie risposte pendenti")
+
+    @contextmanager
+    def _set_socket_timeout(self, socket, timeout_ms):
+        """Context manager per impostare temporaneamente timeout socket."""
+        # Salva timeout originali
+        original_rcvtimeo = socket.getsockopt(zmq.RCVTIMEO)
+        original_sndtimeo = socket.getsockopt(zmq.SNDTIMEO)
+
+        try:
+            # Imposta nuovi timeout
+            socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+            socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
+            yield
+        finally:
+            # Ripristina timeout originali
+            socket.setsockopt(zmq.RCVTIMEO, original_rcvtimeo)
+            socket.setsockopt(zmq.SNDTIMEO, original_sndtimeo)
+
+    def close(self):
+        """Chiude tutte le connessioni e termina il thread di monitoraggio."""
+        logger.info("Chiusura ConnectionManager...")
+
+        # Ferma thread di monitoraggio
+        self._stopping.set()
+        if self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=2.0)
+
+        # Disconnetti da tutti i dispositivi
+        with self._lock:
+            for device_id in list(self._connections.keys()):
+                self.disconnect(device_id)
+
+        logger.info("ConnectionManager chiuso")

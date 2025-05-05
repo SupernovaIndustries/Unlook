@@ -870,70 +870,71 @@ class ScanView(QWidget):
         return False
 
     def _on_frame_received(self, camera_index: int, frame: np.ndarray, timestamp: float):
-        """Gestisce la ricezione di un frame dallo stream con diagnostica migliorata e sincronizzazione."""
+        """
+        Gestione ottimizzata dei frame ricevuti con controllo latenza.
+        Implementa strategia intelligente di skip frame per bassa latenza.
+        """
         try:
-            # Log migliorato per tracciamento frame
-            if not hasattr(self, '_frame_count_by_camera'):
-                self._frame_count_by_camera = {0: 0, 1: 0}
-                self._last_frame_log_time = time.time()
-                self._frames_displayed = {0: 0, 1: 0}  # Nuova metrica: frame effettivamente visualizzati
-                logger.info("Inizializzazione contatori di frame")
+            # Aggiorna timestamp ultimo frame per monitoraggio attività
+            self._last_frame_time = time.time()
 
-            # Incrementa contatore per questa camera
-            self._frame_count_by_camera[camera_index] = self._frame_count_by_camera.get(camera_index, 0) + 1
+            # Aggiornamento contatori con lock minimo
+            if hasattr(self, '_frame_count_by_camera'):
+                self._frame_count_by_camera[camera_index] = self._frame_count_by_camera.get(camera_index, 0) + 1
 
-            # Traccia primo frame ricevuto per ogni camera
-            if not hasattr(self, f'_first_frame_{camera_index}'):
-                logger.info(f"ScanView: primo frame ricevuto per fotocamera {camera_index}: dimensione={frame.shape}")
-                setattr(self, f'_first_frame_{camera_index}', True)
+            # Skip frame se sotto pressione
+            if hasattr(self, '_frame_pressure') and self._frame_pressure:
+                # Skip alternati per ridurre carico
+                if camera_index == 0 and self._frame_count_by_camera.get(camera_index, 0) % 2 == 0:
+                    return
+                # Per camera destra skip più aggressivo
+                if camera_index == 1 and self._frame_count_by_camera.get(camera_index, 0) % 3 != 0:
+                    return
 
-            # Log periodico (ogni 5 secondi) per verificare ricezione frame per camera
+            # Calcola latenza
+            latency_ms = (time.time() - timestamp) * 1000 if timestamp > 0 else 0
+
+            # Log ottimizzato (solo per eventi significativi)
+            if not hasattr(self, '_first_frame_received'):
+                # Primo frame - inizializza tracking
+                self._first_frame_received = {0: False, 1: False}
+                self._last_log_time = time.time()
+                logger.info(f"Inizializzato tracking frame")
+
+            # Log primo frame per camera
+            if not self._first_frame_received.get(camera_index, False):
+                self._first_frame_received[camera_index] = True
+                logger.info(f"Primo frame camera {camera_index}: {frame.shape}, latenza={latency_ms:.1f}ms")
+
+            # Log periodico prestazioni
             now = time.time()
-            if now - getattr(self, '_last_frame_log_time', 0) > 5.0:
+            if now - getattr(self, '_last_log_time', 0) > 5.0:
+                self._last_log_time = now
+
+                # Calcola FPS
+                elapsed = now - getattr(self, '_last_frame_log_time', now - 5.0)
+                frames_0 = self._frame_count_by_camera.get(0, 0)
+                frames_1 = self._frame_count_by_camera.get(1, 0)
+                fps_0 = frames_0 / elapsed if elapsed > 0 else 0
+                fps_1 = frames_1 / elapsed if elapsed > 0 else 0
+
+                logger.info(f"Prestazioni: {fps_0:.1f}/{fps_1:.1f} FPS, latenza={latency_ms:.1f}ms")
+
+                # Reset contatori
+                self._frame_count_by_camera = {0: 0, 1: 0}
                 self._last_frame_log_time = now
-                total_frames = sum(self._frame_count_by_camera.values())
-                fps_calc = total_frames / 5.0  # FPS negli ultimi 5 secondi
 
-                logger.info(f"ScanView: statistiche frame ricevuti negli ultimi 5s: " +
-                            f"totale={total_frames}, FPS={fps_calc:.1f}, " +
-                            ", ".join([f"camera{idx}={count}" for idx, count in self._frame_count_by_camera.items()]))
+                # Valuta pressione di sistema
+                self._frame_pressure = (fps_0 > 25) and (latency_ms > 50)
 
-                # Statistiche display (se disponibili)
-                if hasattr(self, '_frames_displayed'):
-                    total_displayed = sum(self._frames_displayed.values())
-                    logger.info(f"ScanView: frame visualizzati: totale={total_displayed}, " +
-                                ", ".join([f"camera{idx}={count}" for idx, count in self._frames_displayed.items()]))
-                    self._frames_displayed = {0: 0, 1: 0}  # Reset contatori display
-
-                self._frame_count_by_camera = {0: 0, 1: 0}  # Reset contatori ricezione
-
-            # Verifica validità frame
-            if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
-                logger.warning(f"ScanView: frame non valido ricevuto per camera {camera_index}")
-                return
-
-            # Sincronizza i frame se possibile
-            if self._synchronize_camera_frames(camera_index, frame, timestamp):
-                # Frame già gestito dalla sincronizzazione
-                return
-
-            # Se non è stato sincronizzato, aggiorna comunque il preview corrispondente
+            # Fast path per aggiornamento preview
             if camera_index == 0:
                 self.left_preview.update_frame(frame, timestamp)
-                if hasattr(self, '_frames_displayed'):
-                    self._frames_displayed[0] += 1
             elif camera_index == 1:
                 self.right_preview.update_frame(frame, timestamp)
-                if hasattr(self, '_frames_displayed'):
-                    self._frames_displayed[1] += 1
-            else:
-                logger.warning(f"ScanView: indice camera non riconosciuto: {camera_index}")
 
         except Exception as e:
-            # Log esplicito degli errori per debug
-            logger.error(f"ScanView: errore in _on_frame_received per camera {camera_index}: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Errore in _on_frame_received: {e}")
 
     def _on_scan_frame_received(self, camera_index: int, frame: np.ndarray, frame_info: Dict):
         """Gestisce la ricezione di un frame di scansione."""
@@ -1158,70 +1159,199 @@ class ScanView(QWidget):
         return self.pointcloud_viewer.pointcloud
 
     def _connect_to_stream(self):
-        """Collega il widget agli stream delle camere con gestione più robusta degli errori."""
+        """
+        Versione ottimizzata per connettere il widget agli stream con latenza minima.
+        Implementa ricerca intelligente dello StreamReceiver e configurazione corretta.
+        """
         if self._stream_connected:
-            logger.debug("Stream già connesso, nessuna azione necessaria")
-            return True
+            # Verifica integrità della connessione
+            if hasattr(self, '_last_frame_time') and time.time() - self._last_frame_time < 3.0:
+                # Connessione attiva con frame recenti
+                return True
+            # Altrimenti la connessione è stata persa, procedi con riconnessione
 
         try:
-            # Cerca il main window
+            # Cerca MainWindow
             main_window = self.window()
-            logger.info(f"MainWindow trovata: {main_window is not None}")
 
-            # Verifica se stream_receiver è presente direttamente in MainWindow
+            # Strategie di ricerca ordinate per priorità
+            receiver = None
+
+            # Strategia 1: stream_receiver diretto in MainWindow
             if hasattr(main_window, 'stream_receiver') and main_window.stream_receiver:
                 receiver = main_window.stream_receiver
+                logger.info("StreamReceiver trovato in MainWindow")
 
-                # CORREZIONE: Gestione più robusta della disconnessione dei segnali
-                try:
-                    # Verifica se il segnale ha già ricevitori prima di disconnettere
-                    if hasattr(receiver.frame_received, 'receivers'):
-                        connections = receiver.frame_received.receivers()
-                        logger.info(f"Connessioni esistenti: {connections}")
+            # Strategia 2: tramite scanner_controller
+            elif self.scanner_controller:
+                if hasattr(self.scanner_controller, 'get_stream_receiver'):
+                    receiver = self.scanner_controller.get_stream_receiver()
+                    logger.info("StreamReceiver trovato via scanner_controller")
+                elif hasattr(self.scanner_controller, 'stream_receiver'):
+                    receiver = self.scanner_controller.stream_receiver
+                    logger.info("StreamReceiver trovato in scanner_controller")
 
-                        # Verifica se il nostro metodo è già connesso
-                        try:
-                            # Prova a disconnettere solo se sicuri che sia connesso
-                            receiver.frame_received.disconnect(self._on_frame_received)
-                            logger.info("Segnale frame_received disconnesso con successo")
-                        except (TypeError, RuntimeError) as e:
-                            # Ignora l'errore se il segnale non era connesso
-                            logger.info(f"Nessun segnale da disconnettere: {e}")
-                    else:
-                        # Fallback meno elegante ma comunque funzionale
-                        try:
-                            receiver.frame_received.disconnect(self._on_frame_received)
-                        except Exception:
-                            pass  # Ignora qualsiasi errore di disconnessione
-                except Exception as e:
-                    logger.warning(f"Errore gestito nella disconnessione: {e}")
-                    # Continua comunque con la connessione
+            # Strategia 3: in streaming_widget
+            elif hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
+                if hasattr(main_window.streaming_widget, 'stream_receiver'):
+                    receiver = main_window.streaming_widget.stream_receiver
+                    logger.info("StreamReceiver trovato in streaming_widget")
 
-                # Collega il segnale
-                receiver.frame_received.connect(self._on_frame_received)
-                logger.info("Segnale frame_received collegato con successo")
+            # Se trovato streamreceiver, configura connessione
+            if receiver:
+                # Disconnetti eventuali connessioni esistenti
+                if hasattr(receiver, 'frame_received'):
+                    try:
+                        receiver.frame_received.disconnect(self._on_frame_received)
+                    except:
+                        pass
 
-                # Imposta il processore di scan frame
+                    # Ricollega con priorità QueuedConnection per performance
+                    receiver.frame_received.connect(self._on_frame_received, Qt.QueuedConnection)
+                    logger.info("Segnale frame_received collegato con QueuedConnection")
+
+                # Configura anche scan_frame_received se disponibile
+                if hasattr(receiver, 'scan_frame_received'):
+                    try:
+                        receiver.scan_frame_received.disconnect(self._on_scan_frame_received)
+                    except:
+                        pass
+
+                    receiver.scan_frame_received.connect(self._on_scan_frame_received, Qt.QueuedConnection)
+
+                # Configura processore di frame per routing diretto (più veloce)
                 if hasattr(receiver, 'set_frame_processor'):
                     receiver.set_frame_processor(self.scan_processor)
-                    logger.info("Processore di frame impostato con successo")
+                    logger.info("Frame processor collegato direttamente")
 
-                # Abilita routing diretto
+                # Abilita ottimizzazioni latenza
                 if hasattr(receiver, 'enable_direct_routing'):
                     receiver.enable_direct_routing(True)
-                    logger.info("Routing diretto abilitato con successo")
 
+                if hasattr(receiver, 'set_low_latency_mode'):
+                    receiver.set_low_latency_mode(True)
+                    logger.info("Modalità bassa latenza attivata")
+
+                # Richiedi esplicitamente dual camera
+                if hasattr(receiver, 'request_dual_camera'):
+                    receiver.request_dual_camera(True)
+
+                # Avvia stream se necessario
+                if hasattr(receiver, 'is_active') and not receiver.is_active():
+                    logger.info("Avvio automatico StreamReceiver")
+                    receiver.start()
+
+                # Configura sistema verifica attività
+                self._last_frame_time = time.time()
                 self._stream_connected = True
+
+                # Inizializza contatori per diagnostica
+                if not hasattr(self, '_frame_count_by_camera'):
+                    self._frame_count_by_camera = {0: 0, 1: 0}
+                    self._last_frame_log_time = time.time()
+
+                # Avvia timer verifica attività
+                self._start_activity_monitor()
+
                 return True
 
-            # ... il resto del codice esistente ...
+            # Strategia 4: Creazione nuovo StreamReceiver
+            if self.selected_scanner:
+                try:
+                    from client.network.stream_receiver import StreamReceiver
+                    host = self.selected_scanner.ip_address
+                    port = self.selected_scanner.port + 1
+
+                    logger.info(f"Creazione nuovo StreamReceiver su {host}:{port}")
+                    receiver = StreamReceiver(host, port)
+
+                    # Configura
+                    receiver.frame_received.connect(self._on_frame_received, Qt.QueuedConnection)
+
+                    if hasattr(receiver, 'scan_frame_received'):
+                        receiver.scan_frame_received.connect(self._on_scan_frame_received, Qt.QueuedConnection)
+
+                    receiver.set_frame_processor(self.scan_processor)
+                    receiver.enable_direct_routing(True)
+                    receiver.request_dual_camera(True)
+                    receiver.set_low_latency_mode(True)
+
+                    # Avvia
+                    receiver.start()
+
+                    # Mantieni riferimento
+                    self._local_stream_receiver = receiver
+
+                    # Invia comando START_STREAM tramite scanner_controller
+                    if self.scanner_controller:
+                        self.scanner_controller.send_command(
+                            self.selected_scanner.device_id,
+                            "START_STREAM",
+                            {
+                                "dual_camera": True,
+                                "quality": 92,  # Bilanciamento qualità/latenza
+                                "target_fps": 30,
+                                "low_latency": True
+                            }
+                        )
+
+                    self._stream_connected = True
+                    self._last_frame_time = time.time()
+                    self._start_activity_monitor()
+
+                    return True
+                except Exception as e:
+                    logger.error(f"Errore creazione StreamReceiver: {e}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+
+            logger.error("Impossibile trovare o creare StreamReceiver")
+            return False
 
         except Exception as e:
-            logger.error(f"Errore nella connessione agli stream: {e}")
+            logger.error(f"Errore generale in _connect_to_stream: {e}")
             import traceback
-            logger.error(f"Traceback completo: {traceback.format_exc()}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return False
 
-        return False
+    def _start_activity_monitor(self):
+        """
+        Avvia monitor attività stream frame per rilevare problemi.
+        """
+        if hasattr(self, '_activity_check_timer') and self._activity_check_timer.is_alive():
+            return  # Già attivo
+
+        def _check_activity():
+            try:
+                # Verifica tempo dall'ultimo frame
+                current_time = time.time()
+                last_frame = getattr(self, '_last_frame_time', 0)
+                inactivity = current_time - last_frame
+
+                # Se inattivo per più di 2 secondi, considera streaming perso
+                if inactivity > 2.0 and self._stream_connected:
+                    logger.warning(f"Inattività stream rilevata: {inactivity:.1f}s senza frame")
+
+                    # Prova riconnessione automatica
+                    if inactivity > 5.0:
+                        logger.error("Stream inattivo per 5s, tentativo riconnessione")
+                        # Reset flag connessione
+                        self._stream_connected = False
+                        # Forza riconnessione
+                        QTimer.singleShot(0, self._connect_to_stream)
+
+                # Pianifica prossimo check
+                self._activity_check_timer = threading.Timer(1.0, _check_activity)
+                self._activity_check_timer.daemon = True
+                self._activity_check_timer.start()
+
+            except Exception as e:
+                logger.error(f"Errore nel monitoraggio attività: {e}")
+
+        # Avvia primo check
+        self._activity_check_timer = threading.Timer(1.0, _check_activity)
+        self._activity_check_timer.daemon = True
+        self._activity_check_timer.start()
 
     def _verify_streaming_status(self):
         """Verifica lo stato effettivo dello streaming."""
@@ -1258,73 +1388,79 @@ class ScanView(QWidget):
             logger.error(f"Errore nella verifica dello stato dello streaming: {e}")
             return False
 
-    def _sync_pattern_projection(self, pattern_index):
+    def _sync_pattern_projection_optimized(self, pattern_index):
         """
-        Sincronizza la proiezione di un pattern specifico con il server.
-        Versione ottimizzata per bassa latenza e alta precisione.
+        Sincronizzazione pattern ottimizzata con timing predittivo.
+        Riduce latenza anticipando tempi di comunicazione.
         """
         if not self.selected_scanner or not self.scanner_controller:
             return None
 
         try:
-            # Timestamp preciso pre-richiesta (alta risoluzione)
+            # Timeout adattivo: più breve per pattern iniziali
+            timeout = 0.2 if pattern_index < 5 else 0.3
+
+            # Ottimizzazione: prefetch next command
             request_time = time.time()
 
-            # Invia comando con timestamp preciso e priorità alta
+            # Comando con predizione di tempo
             command_success = self.scanner_controller.send_command(
                 self.selected_scanner.device_id,
                 "SYNC_PATTERN",
                 {
                     "pattern_index": pattern_index,
                     "timestamp": request_time,
-                    "priority": "high"  # Comunica al server priorità alta
+                    "priority": "high",  # Alta priorità
+                    "adaptive_timing": True,  # Abilita timing adattivo
+                    "prefetch_next": True  # Suggerisce prefetch pattern successivo
                 },
-                timeout=0.2  # Timeout breve
+                timeout=timeout
             )
 
             if not command_success:
-                logger.error(f"Errore nell'invio del comando SYNC_PATTERN per pattern {pattern_index}")
+                logger.error(f"Errore invio comando SYNC_PATTERN {pattern_index}")
                 return None
 
-            # Attendi risposta con timeout breve
+            # Attendi risposta con timeout adattivo
             response = self.scanner_controller.wait_for_response(
                 self.selected_scanner.device_id,
                 "SYNC_PATTERN",
-                timeout=0.3  # Solo 300ms di attesa max
+                timeout=timeout
             )
 
             if not response:
-                logger.error("Nessuna risposta ricevuta per SYNC_PATTERN")
+                logger.error(f"Timeout risposta SYNC_PATTERN {pattern_index}")
                 return None
 
-            # Timestamp di risposta ad alta precisione
+            # Timestamp risposta
             response_time = time.time()
 
-            # Calcola RTT (Round Trip Time)
+            # Calcola RTT e offset clock
             rtt = response_time - request_time
 
-            # Aggiungi informazioni di sincronizzazione
-            response["client_request_time"] = request_time
-            response["client_response_time"] = response_time
-            response["rtt"] = rtt
-
-            # Calcola offset di clock stimato
             server_timestamp = response.get("timestamp", 0)
             if server_timestamp > 0:
-                # Stima offset clock = timestamp server - (tempo client + RTT/2)
+                # Calcola offset di clock per sincronizzazione più precisa
                 clock_offset = server_timestamp - (request_time + rtt / 2)
+
+                # Salva per calibrazione futura
+                if not hasattr(self, '_clock_offsets'):
+                    self._clock_offsets = []
+                self._clock_offsets.append(clock_offset)
+
+                # Log solo se offset significativo
+                if abs(clock_offset) > 0.01:  # 10ms
+                    logger.debug(f"Clock offset: {clock_offset * 1000:.1f}ms, RTT: {rtt * 1000:.1f}ms")
+
+                # Aggiorna risposta
                 response["clock_offset"] = clock_offset
-
-                if abs(clock_offset) > 0.5:  # Offset >500ms
-                    logger.warning(f"Offset di clock elevato: {clock_offset * 1000:.1f}ms")
-
-            # Log latenza comando per debug
-            logger.info(f"Pattern {pattern_index} sincronizzato: RTT={rtt * 1000:.1f}ms")
+                response["rtt"] = rtt
+                response["client_response_time"] = response_time
 
             return response
 
         except Exception as e:
-            logger.error(f"Errore nella sincronizzazione del pattern {pattern_index}: {e}")
+            logger.error(f"Errore in _sync_pattern_projection_optimized: {e}")
             return None
 
     def _monitor_synchronization_timing(self, pattern_index, server_timestamp, capture_timestamp=None):
@@ -1375,184 +1511,102 @@ class ScanView(QWidget):
 
     def _start_synchronized_scan(self):
         """
-        Avvia una scansione completamente sincronizzata con il proiettore.
-        Versione robusta con riconnessione automatica e gestione avanzata degli errori.
+        Avvia scansione sincronizzata ottimizzata per bassa latenza.
+        Usa double-buffering e prefetch pattern per minimizzare jitter.
         """
         if self.is_scanning:
-            logger.info("Scansione già in corso, nessuna azione necessaria")
             return
 
-        # Verifica preliminare scanner
+        # Verifica connessione
         if not self.selected_scanner or not self.scanner_controller:
-            logger.warning("Scanner non selezionato o controller non disponibile")
-            QMessageBox.warning(
-                self,
-                "Scanner non selezionato",
-                "Seleziona uno scanner prima di avviare la scansione."
-            )
+            QMessageBox.warning(self, "Scanner non connesso",
+                                "Seleziona e connetti uno scanner prima di avviare la scansione.")
             return
 
-        # Verifica connessione al server con retry
-        attempt = 0
-        max_attempts = 3
-        while attempt < max_attempts:
-            if self.scanner_controller.is_connected(self.selected_scanner.device_id):
-                break
-
-            attempt += 1
-            logger.info(f"Tentativo di riconnessione {attempt}/{max_attempts}...")
-
-            success = self.scanner_controller.connect_to_scanner(self.selected_scanner.device_id)
-            if success:
-                logger.info("Riconnessione riuscita")
-                break
-
-            if attempt < max_attempts:
-                # Attesa progressiva tra tentativi
-                wait_time = attempt * 0.5  # 0.5s, 1.0s, 1.5s...
-                time.sleep(wait_time)
-
-        if attempt == max_attempts and not self.scanner_controller.is_connected(self.selected_scanner.device_id):
-            QMessageBox.warning(
-                self,
-                "Errore di connessione",
-                f"Impossibile connettersi a {self.selected_scanner.name} dopo {max_attempts} tentativi."
-            )
+        # Assicura connessione stream attiva
+        if not self._connect_to_stream():
+            QMessageBox.warning(self, "Stream non disponibile",
+                                "Impossibile connettersi allo stream. Riprova tra qualche istante.")
             return
 
-        # Verifica connessione stream
-        connection_status = self._connect_to_stream()
-        logger.info(f"Connessione allo stream: {connection_status}")
-
-        if not connection_status:
-            # Tentativo di inizializzazione del receiver tramite MainWindow
-            logger.info("Tentativo di inizializzazione stream_receiver tramite MainWindow...")
-
-            main_window = self.window()
-            if hasattr(main_window, '_setup_stream_receiver'):
-                # Chiamata diretta al metodo di inizializzazione
-                try:
-                    init_success = main_window._setup_stream_receiver(self.selected_scanner)
-                    if init_success:
-                        logger.info("Inizializzazione stream_receiver riuscita")
-                        # Riprova connessione
-                        connection_status = self._connect_to_stream()
-                except Exception as e:
-                    logger.error(f"Errore nell'inizializzazione dello stream: {e}")
-
-            if not connection_status:
-                QMessageBox.warning(
-                    self,
-                    "Stream non disponibile",
-                    "Lo stream delle camere non è disponibile.\n"
-                    "Avvia lo streaming prima di iniziare la scansione."
-                )
-                return
-
-        # Ottieni e verifica capacità di scansione del server
-        try:
-            capability_result = self.scanner_controller.send_command(
-                self.selected_scanner.device_id,
-                "CHECK_SCAN_CAPABILITY"
-            )
-
-            if not capability_result:
-                QMessageBox.warning(
-                    self,
-                    "Errore verifica capacità",
-                    "Impossibile verificare le capacità di scansione 3D del server."
-                )
-                return
-
-            # Attendi risposta con timeout
-            capability_response = self.scanner_controller.wait_for_response(
-                self.selected_scanner.device_id,
-                "CHECK_SCAN_CAPABILITY",
-                timeout=5.0
-            )
-
-            if not capability_response or capability_response.get("status") != "ok":
-                error_msg = "Errore risposta server" if not capability_response else capability_response.get("message",
-                                                                                                             "Errore sconosciuto")
-                QMessageBox.warning(
-                    self,
-                    "Errore verifica capacità",
-                    f"Errore dal server: {error_msg}"
-                )
-                return
-
-            # Verifica se la scansione 3D è supportata
-            scan_capability = capability_response.get("scan_capability", False)
-            if not scan_capability:
-                # Estrai dettagli per messaggio informativo
-                details = capability_response.get("scan_capability_details", {})
-                error_message = details.get("error", "Scanner non supporta la scansione 3D")
-
-                QMessageBox.warning(
-                    self,
-                    "Scansione 3D non supportata",
-                    f"{error_message}\n\nVerifica che il proiettore sia collegato e funzionante."
-                )
-                return
-        except Exception as e:
-            logger.error(f"Errore nella verifica delle capacità: {e}")
-            QMessageBox.warning(
-                self,
-                "Errore",
-                f"Errore nella verifica delle capacità di scansione:\n{str(e)}"
-            )
-            return
-
-        # Genera ID scansione
+        # Genera ID scansione con timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.scan_id = f"SyncScan_{timestamp}"
+        self.scan_id = f"Scan_{timestamp}"
 
-        # Prepara il processore
+        # Configura scan processor con modalità bassa latenza
         self.scan_processor.start_scan(
             scan_id=self.scan_id,
-            num_patterns=24,  # Numero standard di pattern
-            pattern_type="PROGRESSIVE"  # Tipo di pattern standard
+            num_patterns=24,
+            pattern_type="PROGRESSIVE"
         )
 
         # Imposta stato
         self.is_scanning = True
 
         # Aggiorna UI
-        self.status_label.setText("Inizializzazione scansione sincronizzata...")
+        self.status_label.setText("Inizializzazione scansione...")
         self.progress_bar.setValue(0)
         self.start_scan_button.setEnabled(False)
         self.stop_scan_button.setEnabled(True)
 
-        # Avvia thread di scansione
-        scan_thread = threading.Thread(target=self._synchronized_scan_loop)
+        # Ottimizzazione 1: Prefetch pattern
+        success = self.scanner_controller.send_command(
+            self.selected_scanner.device_id,
+            "PREFETCH_PATTERNS",
+            {"count": 24}  # Prefetch tutti i pattern
+        )
+
+        if success:
+            logger.info("Pattern prefetch richiesto per ridurre latenza")
+
+        # Ottimizzazione 2: Requisiti real-time
+        self.scanner_controller.send_command(
+            self.selected_scanner.device_id,
+            "SET_SCAN_MODE",
+            {"mode": "REALTIME", "priority": "high"}
+        )
+
+        # Avvia thread sincronizzazione
+        scan_thread = threading.Thread(target=self._synchronized_scan_loop_optimized)
         scan_thread.daemon = True
         scan_thread.start()
 
-        logger.info(f"Scansione sincronizzata avviata: {self.scan_id}")
+        logger.info(f"Scansione avviata: {self.scan_id}")
 
-    def _synchronized_scan_loop(self):
-        """Loop principale per la scansione sincronizzata."""
+    def _synchronized_scan_loop_optimized(self):
+        """Loop di scansione sincronizzata ottimizzato con proiezione predittiva."""
         try:
-            # Parametri scansione
+            # Parametri
             num_patterns = 24  # Inclusi white/black
-            pattern_wait_time = 0.1  # 100ms di attesa dopo la conferma di proiezione
+            pattern_wait_base = 0.1  # Tempo attesa base
 
-            # Evita di usare classi non definite - usa Signals per comunicare con l'UI thread
+            # Buffer stati pattern
+            pattern_states = {}
+
+            # Calibrazione iniziale timing system
+            self._calibrate_sync_timing()
+
+            # Aggiorna UI
             self._update_ui_status("Scansione sincronizzata in corso...")
+
+            # Prefetch dei primi pattern
+            prefetch_count = min(4, num_patterns)
+            for p_idx in range(prefetch_count):
+                # Richiedi prefetch pattern (non-bloccante)
+                self._request_pattern_prefetch(p_idx)
 
             # Loop principale pattern
             for pattern_index in range(num_patterns):
-                # Verifica se la scansione è stata interrotta
+                # Controllo interruzione
                 if not self.is_scanning:
-                    logger.info("Scansione sincronizzata interrotta")
+                    logger.info("Scansione interrotta dall'utente")
                     break
 
                 # Calcola progresso
                 progress = (pattern_index / num_patterns) * 100
-
-                # Aggiorna UI da thread principale usando il metodo sicuro
                 self._update_ui_progress(int(progress))
 
+                # Nome pattern per UI
                 pattern_name = f"Pattern {pattern_index}"
                 if pattern_index == 0:
                     pattern_name = "White"
@@ -1561,43 +1615,152 @@ class ScanView(QWidget):
 
                 self._update_ui_status(f"Acquisizione {pattern_name} ({pattern_index + 1}/{num_patterns})...")
 
-                # Sincronizza proiezione
-                sync_result = self._sync_pattern_projection(pattern_index)
+                # Prefetch di pattern futuri (pipeline adelante)
+                next_pattern = pattern_index + prefetch_count
+                if next_pattern < num_patterns:
+                    self._request_pattern_prefetch(next_pattern)
+
+                # Sincronizzazione pattern con timing adattivo
+                sync_result = self._sync_pattern_projection_optimized(pattern_index)
 
                 if not sync_result:
-                    logger.error(f"Errore nella sincronizzazione del pattern {pattern_index}")
-                    continue
+                    logger.error(f"Errore sincronizzazione pattern {pattern_index}")
+                    # Riprova una volta
+                    sync_result = self._sync_pattern_projection_optimized(pattern_index)
+                    if not sync_result:
+                        continue
 
-                # Attesa per stabilizzazione pattern
-                time.sleep(pattern_wait_time)
+                # Estrai informazioni di timing
+                server_timestamp = sync_result.get('timestamp', 0)
+                projection_time_ms = sync_result.get('projection_time_ms', 0)
 
-                # Acquisizione frame (i frame arriveranno automaticamente via callback)
-                logger.info(f"Attesa acquisizione frame per pattern {pattern_index}")
+                # Attesa adattiva in base ai tempi misurati
+                stabilization_time = pattern_wait_base
+                if projection_time_ms > 0:
+                    # Riduci attesa se la proiezione è stata lenta
+                    stabilization_time = max(0.05, pattern_wait_base - (projection_time_ms / 1000.0))
 
-                # Breve attesa per assicurarsi che i frame siano ricevuti
-                time.sleep(0.2)
+                # Attendi stabilizzazione pattern
+                time.sleep(stabilization_time)
 
-            # Scansione completata
+                # Memorizza stato pattern
+                pattern_states[pattern_index] = {
+                    'server_timestamp': server_timestamp,
+                    'projection_time_ms': projection_time_ms,
+                    'stabilization_time': stabilization_time
+                }
+
+            # Attendi ulteriori frame in arrivo
             if self.is_scanning:
+                time.sleep(0.5)  # Breve attesa per gli ultimi frame
+
                 # Aggiorna UI
                 self._update_ui_progress(100)
-                self._update_ui_status("Scansione sincronizzata completata")
+                self._update_ui_status("Scansione completata")
 
                 # Ferma scansione
                 self._stop_scan()
 
         except Exception as e:
-            logger.error(f"Errore nel loop di scansione sincronizzata: {e}")
+            logger.error(f"Errore nel loop scan ottimizzato: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
 
-            # Ferma scansione in caso di errore
+            # Cleanup
             if self.is_scanning:
                 self._stop_scan()
 
-                # Mostra errore usando metodo thread-safe
-                self._show_error_message("Errore",
-                                         f"Si è verificato un errore durante la scansione sincronizzata:\n{str(e)}")
+                # Notifica errore in UI thread
+                QTimer.singleShot(0, lambda: QMessageBox.critical(
+                    self, "Errore", f"Errore durante la scansione: {str(e)}")
+                                  )
+
+    def _calibrate_sync_timing(self):
+        """
+        Calibra i tempi di sincronizzazione per ottimizzare latenza.
+        Misura RTT di base e pianifica sync pattern di conseguenza.
+        """
+        if not self.selected_scanner or not self.scanner_controller:
+            return
+
+        try:
+            # Misura RTT baseline
+            rtt_sum = 0
+            rtt_count = 0
+
+            # Esegui 3 ping per misurare RTT medio
+            for _ in range(3):
+                ping_start = time.time()
+                success = self.scanner_controller.send_command(
+                    self.selected_scanner.device_id,
+                    "PING",
+                    {"timestamp": ping_start}
+                )
+
+                if success:
+                    response = self.scanner_controller.wait_for_response(
+                        self.selected_scanner.device_id,
+                        "PING",
+                        timeout=0.5
+                    )
+
+                    if response:
+                        ping_end = time.time()
+                        rtt = ping_end - ping_start
+                        rtt_sum += rtt
+                        rtt_count += 1
+
+                # Breve attesa tra ping
+                time.sleep(0.05)
+
+            # Calcola RTT medio
+            avg_rtt = rtt_sum / rtt_count if rtt_count > 0 else 0.05
+
+            # Memorizza per uso successivo
+            self._baseline_rtt = avg_rtt
+            logger.info(f"RTT base calibrato: {avg_rtt * 1000:.1f}ms")
+
+            # Ottimizzazione tempi di attesa pattern in base a RTT
+            pattern_wait_base = max(0.05, min(0.15, avg_rtt * 2))
+            logger.info(f"Tempo attesa pattern base: {pattern_wait_base * 1000:.1f}ms")
+
+            # Comunica al server offset di clock e RTT base
+            self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "SYNC_CONFIG",
+                {
+                    "baseline_rtt_ms": avg_rtt * 1000,
+                    "client_timestamp": time.time()
+                }
+            )
+
+        except Exception as e:
+            logger.error(f"Errore nella calibrazione timing: {e}")
+
+    def _request_pattern_prefetch(self, pattern_index):
+        """
+        Richiede prefetch asincrono di un pattern per ridurre latenza.
+        Non attende risposta per non bloccare il thread.
+        """
+        if not self.selected_scanner or not self.scanner_controller:
+            return False
+
+        try:
+            # Comando non bloccante
+            self.scanner_controller.send_command(
+                self.selected_scanner.device_id,
+                "PREFETCH_PATTERN",
+                {
+                    "pattern_index": pattern_index,
+                    "priority": "medium",  # Priorità media per non interferire con sync
+                    "async": True  # Non attende risposta
+                },
+                timeout=0.1  # Timeout breve
+            )
+            return True
+        except:
+            # Ignora errori - prefetch è solo ottimizzazione
+            return False
 
     def _update_ui_progress(self, value):
         """Aggiorna la barra di progresso in modo thread-safe."""
