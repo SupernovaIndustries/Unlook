@@ -550,25 +550,9 @@ class ScanView(QWidget):
             receiver = main_window.stream_receiver
             logger.info("Stream receiver trovato in MainWindow")
 
-            # CORREZIONE: Try-except per gestire correttamente la disconnessione
-            try:
-                # Verifica se il segnale è connesso prima di disconnetterlo
-                # Utilizziamo un approccio più sicuro per verificare la connessione
-                disconnect_success = False
-                try:
-                    if hasattr(receiver.frame_received, 'disconnect'):
-                        try:
-                            self._safe_disconnect_signal(receiver.frame_received, self._on_frame_received)
-                            disconnect_success = True
-                            logger.info("Precedente connessione frame_received disconnessa")
-                        except (TypeError, RuntimeError) as e:
-                            # Questo è normale se il segnale non era connesso
-                            logger.info(f"Nessuna connessione precedente da disconnettere: {e}")
-                except Exception as e:
-                    logger.info(f"Gestita eccezione durante disconnessione: {e}")
-            except Exception as e:
-                logger.warning(f"Errore nella disconnessione: {e}")
-                # Non bloccare la connessione se c'è un errore nella disconnessione
+            # CORREZIONE: Usa _safe_disconnect_signal invece di try-except
+            if hasattr(receiver, 'frame_received'):
+                self._safe_disconnect_signal(receiver.frame_received, self._on_frame_received)
 
             # Connetti il segnale e configura
             try:
@@ -637,23 +621,9 @@ class ScanView(QWidget):
                     # Breve pausa per consentire l'inizializzazione completa
                     time.sleep(0.5)
 
-            # CORREZIONE: Gestione robusta della disconnessione del segnale
-            try:
-                # Verifica se il segnale è connesso prima di disconnetterlo
-                if hasattr(receiver.frame_received, 'receivers'):
-                    if receiver.frame_received.receivers(receiver.frame_received.signal) > 0:
-                        receiver.frame_received.disconnect(self._on_frame_received)
-                        logger.info("Connessione precedente disconnessa")
-                else:
-                    # In caso non esista il metodo receivers, usa try-except
-                    try:
-                        receiver.frame_received.disconnect(self._on_frame_received)
-                        logger.info("Connessione precedente disconnessa")
-                    except (TypeError, RuntimeError):
-                        logger.debug("Nessuna connessione precedente da disconnettere")
-            except Exception as e:
-                # In caso di errore, logga e continua (non bloccare il processo)
-                logger.warning(f"Gestita eccezione durante disconnessione: {e}")
+            # CORREZIONE: Usa _safe_disconnect_signal invece di try-except
+            if hasattr(receiver, 'frame_received'):
+                self._safe_disconnect_signal(receiver.frame_received, self._on_frame_received)
 
             # Connetti segnali
             receiver.frame_received.connect(self._on_frame_received)
@@ -723,15 +693,9 @@ class ScanView(QWidget):
                 logger.info("Stream receiver trovato in streaming_widget")
                 receiver = streaming_widget.stream_receiver
 
-                # Disconnetti eventuali connessioni esistenti in modo robusto
-                try:
-                    try:
-                        receiver.frame_received.disconnect(self._on_frame_received)
-                        logger.info("Precedente connessione disconnessa")
-                    except (TypeError, RuntimeError):
-                        logger.debug("Nessuna precedente connessione da disconnettere")
-                except Exception as e:
-                    logger.warning(f"Errore gestito durante disconnessione: {e}")
+                # CORREZIONE: Usa _safe_disconnect_signal invece di try-except
+                if hasattr(receiver, 'frame_received'):
+                    self._safe_disconnect_signal(receiver.frame_received, self._on_frame_received)
 
                 # Connetti segnali e configura
                 receiver.frame_received.connect(self._on_frame_received)
@@ -759,15 +723,9 @@ class ScanView(QWidget):
                 if receiver:
                     logger.info("Stream receiver ottenuto da scanner_controller")
 
-                    # Disconnetti eventuali connessioni esistenti in modo robusto
-                    try:
-                        try:
-                            receiver.frame_received.disconnect(self._on_frame_received)
-                            logger.info("Precedente connessione disconnessa")
-                        except (TypeError, RuntimeError):
-                            logger.debug("Nessuna precedente connessione da disconnettere")
-                    except Exception as e:
-                        logger.warning(f"Errore gestito durante disconnessione: {e}")
+                    # CORREZIONE: Usa _safe_disconnect_signal invece di try-except
+                    if hasattr(receiver, 'frame_received'):
+                        self._safe_disconnect_signal(receiver.frame_received, self._on_frame_received)
 
                     # Connetti segnali e configura
                     receiver.frame_received.connect(self._on_frame_received)
@@ -791,15 +749,9 @@ class ScanView(QWidget):
                 if receiver:
                     logger.info("Usando scanner_controller.stream_receiver")
 
-                    # Configura come sopra con gestione errori robusta
-                    try:
-                        try:
-                            receiver.frame_received.disconnect(self._on_frame_received)
-                            logger.info("Precedente connessione disconnessa")
-                        except (TypeError, RuntimeError):
-                            logger.debug("Nessuna precedente connessione da disconnettere")
-                    except Exception as e:
-                        logger.warning(f"Errore gestito durante disconnessione: {e}")
+                    # CORREZIONE: Usa _safe_disconnect_signal invece di try-except
+                    if hasattr(receiver, 'frame_received'):
+                        self._safe_disconnect_signal(receiver.frame_received, self._on_frame_received)
 
                     receiver.frame_received.connect(self._on_frame_received)
 

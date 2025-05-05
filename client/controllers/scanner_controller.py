@@ -9,6 +9,7 @@ import logging
 import time
 from typing import List, Optional, Callable, Dict, Any
 import uuid
+import threading
 from PySide6.QtCore import QObject, Signal, Slot, Property, QSettings, QTimer, QCoreApplication
 from PySide6.QtWidgets import QApplication, QMainWindow
 
@@ -289,102 +290,222 @@ class ScannerController(QObject):
             logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
-    def start_heartbeat(self, device_id, interval=2.0):
+    def start_heartbeat(self, interval=5.0):
         """
-        Avvia un timer per inviare periodicamente heartbeat allo scanner.
+        Avvia un timer per l'invio periodico di heartbeat a tutti gli scanner connessi.
+        Importante per mantenere le connessioni attive e rilevare disconnessioni.
 
         Args:
-            device_id: ID dello scanner
-            interval: Intervallo in secondi tra gli heartbeat
+            interval: Intervallo in secondi tra heartbeat consecutivi (default: 5.0)
         """
-        if not hasattr(self, '_heartbeat_timers'):
-            self._heartbeat_timers = {}
-
-        # Ferma un eventuale timer esistente
-        if device_id in self._heartbeat_timers:
-            self._heartbeat_timers[device_id].stop()
+        # Ferma eventuali timer esistenti
+        if hasattr(self, '_heartbeat_timer') and self._heartbeat_timer:
+            self._heartbeat_timer.cancel()
 
         # Crea un nuovo timer
-        from PySide6.QtCore import QTimer
-        timer = QTimer()
-        timer.timeout.connect(lambda: self._send_heartbeat(device_id))
-        timer.start(int(interval * 1000))  # Converti in millisecondi
+        self._heartbeat_interval = interval
+        self._heartbeat_timer = threading.Timer(interval, self._heartbeat_loop)
+        self._heartbeat_timer.daemon = True
+        self._heartbeat_timer.start()
 
-        # Memorizza il timer
-        self._heartbeat_timers[device_id] = timer
+        # Inizializza strutture dati per il monitoraggio
+        if not hasattr(self, '_last_heartbeat_responses'):
+            self._last_heartbeat_responses = {}
+        if not hasattr(self, '_consecutive_missed_heartbeats'):
+            self._consecutive_missed_heartbeats = {}
 
-        logger.info(f"Heartbeat avviato per {device_id} (intervallo: {interval}s)")
+        logger.info(f"Heartbeat avviato con intervallo di {interval} secondi")
 
-    def _send_heartbeat(self, device_id):
-        """Invia un heartbeat allo scanner."""
+    def _heartbeat_loop(self):
+        """Loop interno per l'invio ciclico di heartbeat."""
         try:
-            import socket
-            # Ottieni l'IP locale
+            # Invia heartbeat a tutti gli scanner connessi
+            self.send_heartbeat()
+
+            # Verifica se ci sono scanner che non rispondono
+            self._check_unresponsive_scanners()
+
+            # Pianifica il prossimo heartbeat
+            if hasattr(self, '_heartbeat_interval'):
+                self._heartbeat_timer = threading.Timer(self._heartbeat_interval, self._heartbeat_loop)
+                self._heartbeat_timer.daemon = True
+                self._heartbeat_timer.start()
+        except Exception as e:
+            logger.error(f"Errore nel loop di heartbeat: {e}")
+            # Riprova comunque
+            if hasattr(self, '_heartbeat_interval'):
+                self._heartbeat_timer = threading.Timer(self._heartbeat_interval, self._heartbeat_loop)
+                self._heartbeat_timer.daemon = True
+                self._heartbeat_timer.start()
+
+    def send_heartbeat(self):
+        """
+        Invia un heartbeat a tutti gli scanner connessi.
+        Importante per verificare che la connessione sia ancora attiva.
+        """
+        if not hasattr(self, '_scanner_connections'):
+            logger.warning("Nessuna connessione scanner disponibile per l'invio del heartbeat")
+            return
+
+        # Ottieni l'IP locale per eventuale configurazione NAT/firewall
+        import socket
+        local_ip = None
+        try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
             s.close()
+        except:
+            pass
 
-            # Invia il heartbeat
-            success = self.send_command(
-                device_id,
-                "PING",
-                {
-                    "timestamp": time.time(),
-                    "client_ip": local_ip,
-                    "heartbeat": True
-                },
-                timeout=0.5  # Timeout breve per non bloccare
-            )
+        # Timestamp preciso per misurazione latenza
+        timestamp = time.time()
 
-            if not success:
-                logger.warning(f"Heartbeat fallito per {device_id}")
+        # Invia heartbeat a tutti gli scanner connessi
+        for device_id, connection in self._scanner_connections.items():
+            try:
+                # Verifica se la connessione è attiva
+                if not self.is_connected(device_id):
+                    logger.debug(f"Scanner {device_id} non connesso, salto heartbeat")
+                    continue
+
+                # Prepara il payload
+                payload = {
+                    "timestamp": timestamp,
+                    "client_ip": local_ip
+                }
+
+                # Invia il comando PING con timeout ridotto
+                success = self.send_command(
+                    device_id,
+                    "PING",
+                    payload,
+                    timeout=1.0  # Timeout ridotto per heartbeat
+                )
+
+                # Aggiorna lo stato basato sulla risposta
+                if success:
+                    self._last_heartbeat_responses[device_id] = timestamp
+                    self._consecutive_missed_heartbeats[device_id] = 0
+                    logger.debug(f"Heartbeat inviato con successo a {device_id}")
+                else:
+                    missed = self._consecutive_missed_heartbeats.get(device_id, 0) + 1
+                    self._consecutive_missed_heartbeats[device_id] = missed
+                    logger.warning(f"Heartbeat fallito per {device_id} (consecutivi: {missed})")
+
+            except Exception as e:
+                logger.error(f"Errore nell'invio del heartbeat a {device_id}: {e}")
                 # Incrementa contatore fallimenti
-                if not hasattr(self, '_heartbeat_failures'):
-                    self._heartbeat_failures = {}
+                missed = self._consecutive_missed_heartbeats.get(device_id, 0) + 1
+                self._consecutive_missed_heartbeats[device_id] = missed
 
-                self._heartbeat_failures[device_id] = self._heartbeat_failures.get(device_id, 0) + 1
+    def _check_unresponsive_scanners(self):
+        """
+        Verifica gli scanner che non rispondono e tenta il recupero.
+        Strategia: dopo 3 heartbeat mancati consecutivi, tenta la riconnessione.
+        """
+        current_time = time.time()
+        reconnection_threshold = 3  # Tentativi mancati prima di riconnessione
 
-                # Se troppe fallimenti consecutivi, tenta riconnessione
-                if self._heartbeat_failures[device_id] >= 3:
-                    logger.warning(f"Troppe fallimenti di heartbeat ({self._heartbeat_failures[device_id]}), "
-                                   f"tentativo di riconnessione...")
-                    self._attempt_reconnection(device_id)
-            else:
-                # Reset contatore fallimenti
-                if hasattr(self, '_heartbeat_failures') and device_id in self._heartbeat_failures:
-                    self._heartbeat_failures[device_id] = 0
+        for device_id, missed in list(self._consecutive_missed_heartbeats.items()):
+            # Verifica se abbiamo superato la soglia
+            if missed >= reconnection_threshold:
+                logger.warning(
+                    f"Scanner {device_id} non risponde da {missed} heartbeat consecutivi, tentativo di riconnessione")
 
-        except Exception as e:
-            logger.error(f"Errore nell'invio dell'heartbeat: {e}")
+                # Tenta la riconnessione
+                self.attempt_reconnection(device_id)
 
-    def _attempt_reconnection(self, device_id):
-        """Tenta di riconnettersi a uno scanner dopo errori di connessione."""
-        try:
-            # Ottieni lo scanner
-            scanner = None
-            for s in self.scanner_manager.scanners:
-                if s.device_id == device_id:
-                    scanner = s
-                    break
+                # Reset contatore per dare il tempo di riconnettersi
+                self._consecutive_missed_heartbeats[device_id] = 0
 
-            if not scanner:
-                logger.error(f"Scanner {device_id} non trovato")
-                return False
+    def attempt_reconnection(self, device_id):
+        """
+        Tenta di riconnettersi a uno scanner specifico.
+        Implementa una strategia di riconnessione robusta con backoff esponenziale.
 
-            # Disconnetti
-            self.disconnect_from_scanner(device_id)
+        Args:
+            device_id: ID del dispositivo scanner da riconnettere
 
-            # Pausa breve
-            import time
-            time.sleep(0.5)
+        Returns:
+            bool: True se la riconnessione ha avuto successo, False altrimenti
+        """
+        # Verifica se lo scanner è registrato
+        scanner = None
+        for s in self.scanners:
+            if s.device_id == device_id:
+                scanner = s
+                break
 
-            # Riconnetti
-            return self.connect_to_scanner(device_id)
-
-        except Exception as e:
-            logger.error(f"Errore nel tentativo di riconnessione a {device_id}: {e}")
+        if not scanner:
+            logger.error(f"Scanner {device_id} non trovato nel registro, impossibile riconnettere")
             return False
+
+        logger.info(f"Tentativo di riconnessione a {scanner.name} ({device_id})")
+
+        # Prima disconnetti per pulire eventuali connessioni zombie
+        if self.is_connected(device_id):
+            try:
+                # Disconnessione soft per evitare di bloccare risorse
+                self.disconnect_from_scanner(device_id, force_cleanup=True)
+                time.sleep(0.5)  # Pausa breve per permettere la pulizia completa
+            except Exception as e:
+                logger.warning(f"Errore nella disconnessione preparatoria: {e}")
+                # Continua comunque con la riconnessione
+
+        # Strategia con backoff esponenziale
+        max_attempts = 3
+        base_delay = 0.5  # 500ms iniziali
+
+        for attempt in range(max_attempts):
+            try:
+                # Calcola ritardo crescente
+                delay = base_delay * (2 ** attempt)
+
+                # Log del tentativo
+                logger.info(
+                    f"Tentativo {attempt + 1}/{max_attempts} di riconnessione a {scanner.name} dopo {delay:.1f}s")
+
+                # Attendi prima del tentativo
+                if attempt > 0:
+                    time.sleep(delay)
+
+                # Tenta la connessione
+                success = self.connect_to_scanner(device_id)
+
+                if success:
+                    logger.info(f"Riconnessione a {scanner.name} riuscita al tentativo {attempt + 1}")
+
+                    # Verifica la connessione con un ping
+                    ping_success = self.send_command(
+                        device_id,
+                        "PING",
+                        {"timestamp": time.time()},
+                        timeout=1.0
+                    )
+
+                    if ping_success:
+                        logger.info(f"Connessione a {scanner.name} verificata con ping")
+                        # Reset contatore heartbeat
+                        self._consecutive_missed_heartbeats[device_id] = 0
+                        return True
+                    else:
+                        logger.warning(f"Riconnessione a {scanner.name} riuscita ma ping fallito")
+                        # Continua con il prossimo tentativo
+                else:
+                    logger.warning(f"Tentativo {attempt + 1} di riconnessione a {scanner.name} fallito")
+
+            except Exception as e:
+                logger.error(f"Errore nel tentativo {attempt + 1} di riconnessione a {scanner.name}: {e}")
+
+        # Se arriviamo qui, tutti i tentativi sono falliti
+        logger.error(f"Riconnessione a {scanner.name} fallita dopo {max_attempts} tentativi")
+
+        # Aggiorna lo stato dello scanner
+        scanner.status = ScannerStatus.DISCONNECTED
+        scanner.error_message = "Riconnessione fallita dopo multipli tentativi"
+
+        return False
 
     def synchronize_scanner_states(self):
         """
