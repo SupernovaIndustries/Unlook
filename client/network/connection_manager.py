@@ -208,7 +208,7 @@ class ConnectionManager:
                      data: Optional[Dict[str, Any]] = None,
                      timeout: float = None) -> bool:
         """
-        Invia un messaggio a un dispositivo connesso.
+        Invia un messaggio a un dispositivo connesso con gestione robusta del pattern REQ/REP.
 
         Args:
             device_id: ID del dispositivo
@@ -227,17 +227,25 @@ class ConnectionManager:
 
             connection = self._connections[device_id]
 
+        # Verifica stato socket
+        with self._lock:
+            # Controlla se il socket è in uno stato valido per l'invio
+            if hasattr(connection.socket, '_zmq_state') and connection.socket._zmq_state != 0:
+                logger.warning(f"Socket in stato non valido prima dell'invio di {command}, ripristino...")
+                self._reset_socket_state(device_id)
+                connection = self._connections[device_id]
+
         # Prepara il messaggio
         message = {
             "command": command,
-            "type": command,  # Aggiungi anche 'type' per compatibilità con il server
+            "type": command,  # Per compatibilità col server
             "request_id": str(uuid.uuid4())
         }
 
-        # Aggiungi dati se forniti, ma preserva il comando originale
+        # Aggiungi dati se forniti
         if data:
             data_copy = data.copy()
-            # Rimuovi eventuali campi 'command' o 'type' dai dati per evitare sovrascritture
+            # Rimuovi campi che potrebbero causare conflitti
             data_copy.pop("command", None)
             data_copy.pop("type", None)
             message.update(data_copy)
@@ -246,7 +254,7 @@ class ConnectionManager:
         effective_timeout = timeout * 1000 if timeout else self._command_timeout * 1000
 
         try:
-            # Acquisisci lock per questa operazione specifica
+            # Acquisisci lock per questa operazione
             with self._lock:
                 if not connection.is_connected:
                     logger.error(f"Connessione persa durante preparazione invio a {device_id}")
@@ -260,23 +268,29 @@ class ConnectionManager:
                     "response": None
                 }
 
-                # Imposta timeout temporaneo e invia
+                # Imposta timeout e invia
                 with self._set_socket_timeout(connection.socket, int(effective_timeout)):
                     connection.socket.send_json(message)
 
                 # Aggiorna timestamp attività
                 connection.last_activity = time.time()
 
-            # Successo - messaggio inviato (risposta ricevuta separatamente)
+            # IMPORTANTE: Per i comandi che non sono GET o PING, attendi esplicitamente la risposta
+            if command not in ["GET_STATUS", "PING"] and not data.get("async", False):
+                # Attendi brevemente la risposta per completare il ciclo REQ/REP
+                response = self.receive_response(device_id, timeout=0.5)
+                if not response:
+                    logger.warning(f"Nessuna risposta ricevuta per {command}, possibile violazione pattern REQ/REP")
+                    # Non fare ulteriori azioni qui - il socket verrà ripristinato al prossimo invio se necessario
+
             return True
 
         except zmq.ZMQError as e:
+            # Gestione specifica degli errori ZMQ
             if "Operation cannot be accomplished in current state" in str(e):
                 logger.warning(f"Errore stato ZMQ inviando '{command}' a {device_id}, ripristino socket...")
-                # Reset il socket per prepararlo al prossimo comando
                 reset_success = self._reset_socket_state(device_id)
                 if reset_success and command not in ["PING", "GET_STATUS"]:
-                    # Per comandi critici, riprova dopo il reset (tranne per ping/status)
                     logger.info(f"Riprovando invio comando {command} dopo reset socket")
                     return self.send_message(device_id, command, data, timeout)
                 return False
@@ -285,14 +299,12 @@ class ConnectionManager:
                 return False
             else:
                 logger.error(f"Errore ZMQ inviando messaggio '{command}' a {device_id}: {e}")
-                # Marca la connessione come problematica
                 with self._lock:
                     if device_id in self._connections:
                         self._connections[device_id].is_connected = False
                 return False
         except Exception as e:
             logger.error(f"Errore inviando messaggio '{command}' a {device_id}: {e}")
-            # Marca la connessione come problematica
             with self._lock:
                 if device_id in self._connections:
                     self._connections[device_id].is_connected = False
