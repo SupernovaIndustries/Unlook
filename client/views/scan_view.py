@@ -930,19 +930,30 @@ class ScanView(QWidget):
                     logger.warning(f"Errore nell'arresto del receiver esistente: {e}")
 
             # FASE 2: Invio del comando di stop prima di inizializzare il nuovo receiver
-            try:
-                # Questo è fondamentale per un corretto ciclo REQ/REP: ferma qualsiasi stream attivo
-                if self.scanner_controller and self.selected_scanner:
-                    self.scanner_controller.send_command(
-                        self.selected_scanner.device_id,
-                        "STOP_STREAM"
-                    )
-                    # Importante: attendi esplicitamente la risposta per completare il ciclo REQ/REP
-                    response = self.scanner_controller.receive_response(self.selected_scanner.device_id)
-                    logger.info(f"Risposta STOP_STREAM: {response}")
-                    time.sleep(0.5)  # Attendi che lo streaming si fermi completamente
-            except Exception as e:
-                logger.warning(f"Errore nell'invio del comando STOP_STREAM: {e}")
+            # Questo è fondamentale per un corretto ciclo REQ/REP
+            if self.scanner_controller and self.selected_scanner:
+                try:
+                    # Verifica che la connessione sia attiva prima di inviare comandi
+                    is_connected = self.scanner_controller.is_connected(self.selected_scanner.device_id)
+                    if is_connected:
+                        # Invia comando STOP_STREAM con comando esplicito, senza await
+                        stop_sent = self.scanner_controller.send_command(
+                            self.selected_scanner.device_id,
+                            "STOP_STREAM",
+                            timeout=2.0  # Timeout ragionevole
+                        )
+
+                        if stop_sent:
+                            # Importante: attendi esplicitamente la risposta per completare il ciclo REQ/REP
+                            response = self.scanner_controller.receive_response(self.selected_scanner.device_id,
+                                                                                timeout=2.0)
+                            logger.info(f"Risposta STOP_STREAM: {response}")
+
+                        # Attendi che lo streaming si fermi completamente sul server
+                        time.sleep(0.5)
+                except Exception as e:
+                    logger.warning(f"Errore nell'invio del comando STOP_STREAM: {e}")
+                    # Continua comunque con il setup
 
             # FASE 3: Inizializzazione del nuovo receiver
             from client.network.stream_receiver import StreamReceiver
@@ -968,30 +979,34 @@ class ScanView(QWidget):
             if hasattr(receiver, 'request_dual_camera'):
                 receiver.request_dual_camera(True)
 
-            if hasattr(receiver, 'set_low_latency_mode'):
-                receiver.set_low_latency_mode(True)
-
             # FASE 4: Avvia il receiver
             receiver.start()
 
-            # Verifica che lo streaming si sia avviato con un breve timeout
+            # Verifica che il receiver si sia avviato correttamente
+            started_ok = False
             for attempt in range(3):
                 # Attendi un breve periodo per l'inizializzazione
                 time.sleep(0.3 * (attempt + 1))
 
                 # Verifica che il receiver sia attivo
                 if hasattr(receiver, 'is_active') and receiver.is_active():
+                    started_ok = True
                     break
 
-                # Se non è attivo dopo 3 tentativi, registra un warning
-                if attempt == 2:
-                    logger.warning("Receiver avviato ma non sembra attivo. Continuando comunque...")
+            if not started_ok:
+                logger.warning("Receiver avviato ma non sembra attivo. Tentativo di reinizializzazione...")
+                receiver.stop()
+                time.sleep(0.5)
+                receiver = StreamReceiver(host, port)
+                if hasattr(self, 'scan_processor'):
+                    receiver.set_frame_processor(self.scan_processor)
+                receiver.start()
 
             # FASE 5: Memorizza il receiver e propaga il riferimento
-            # Nota: è cruciale mantenere un solo riferimento attivo al receiver
+            # È cruciale mantenere un solo riferimento attivo al receiver
             self._stream_receiver = receiver
 
-            # Aggiorna anche il riferimento nella MainWindow se necessario
+            # Aggiorna il riferimento nella MainWindow
             main_window = self.window()
             if hasattr(main_window, 'stream_receiver'):
                 main_window.stream_receiver = receiver
@@ -1011,6 +1026,7 @@ class ScanView(QWidget):
     def _start_streaming(self):
         """
         Avvia lo streaming video in modo robusto con verifica della risposta e retry.
+        Risolve i problemi di sincronizzazione tra client e server.
         """
         if not self.selected_scanner or not self.scanner_controller:
             logger.error("Impossibile avviare streaming: scanner non selezionato/connesso")
@@ -1029,7 +1045,7 @@ class ScanView(QWidget):
             "client_ip": self._get_local_ip()  # Importante per NAT traversal
         }
 
-        # Implementazione con tentativi multipli
+        # Implementazione con tentativi multipli e attesa per completamento ciclo REQ/REP
         max_attempts = 3
         success = False
 
@@ -1051,7 +1067,7 @@ class ScanView(QWidget):
                     logger.warning(f"Errore nell'invio del comando START_STREAM (tentativo {attempt + 1})")
                     continue
 
-                # IMPORTANTE: Attendi esplicitamente la risposta per completare il ciclo REQ/REP
+                # FONDAMENTALE: Attendi ESPLICITAMENTE la risposta per completare il ciclo REQ/REP
                 response = self.scanner_controller.receive_response(device_id, timeout=5.0)
 
                 if response and response.get("status") == "ok":
@@ -1073,8 +1089,23 @@ class ScanView(QWidget):
                 else:
                     logger.warning(f"Risposta non valida a START_STREAM: {response}")
 
+                    # Se non c'è risposta, il socket potrebbe essere in stato invalido
+                    # Reset socket di comunicazione prima del prossimo tentativo
+                    if not response and hasattr(self.scanner_controller, 'connection_manager'):
+                        try:
+                            self.scanner_controller.connection_manager._reset_socket_state(device_id)
+                            logger.info("Socket di comunicazione resettato prima del prossimo tentativo")
+                        except:
+                            pass
+
             except Exception as e:
                 logger.error(f"Errore nell'avvio dello streaming (tentativo {attempt + 1}): {e}")
+
+                # Tenta di completare comunque il ciclo REQ/REP ricevendo qualsiasi risposta in sospeso
+                try:
+                    self.scanner_controller.receive_response(device_id, timeout=0.5)
+                except:
+                    pass
 
         if not success:
             logger.error(f"Impossibile avviare lo streaming dopo {max_attempts} tentativi")
@@ -2249,13 +2280,15 @@ class ScanView(QWidget):
         quelle mancanti in modo più aggressivo.
         """
         try:
+            # Inizializza contatori frame se necessario
             if not hasattr(self, '_frame_count_by_camera'):
                 self._frame_count_by_camera = {0: 0, 1: 0}
 
             # Verifica quali camere non ricevono frame
             missing_cameras = []
             for idx in [0, 1]:
-                if idx not in self._frame_count_by_camera or self._frame_count_by_camera.get(idx, 0) == 0:
+                # Una camera è considerata missing se non ha ricevuto frame o ha ricevuto meno di 3 frame
+                if idx not in self._frame_count_by_camera or self._frame_count_by_camera.get(idx, 0) < 3:
                     missing_cameras.append(idx)
 
             # Se entrambe le camere funzionano, nessuna azione necessaria
@@ -2273,102 +2306,54 @@ class ScanView(QWidget):
             # Altrimenti, abbiamo camere mancanti da recuperare
             camera_names = ["sinistra" if idx == 0 else "destra" for idx in missing_cameras]
             camera_str = " e ".join(camera_names)
-            logger.warning(f"Camera {camera_str} non riceve frame. Tentativo di recupero più aggressivo...")
+            logger.warning(f"Camera {camera_str} non riceve frame. Tentativo di recovery...")
 
             # Monitora il tempo di inattività
             if not hasattr(self, '_camera_inactive_since'):
                 self._camera_inactive_since = time.time()
 
             inactivity_time = time.time() - self._camera_inactive_since
-            logger.info(f"Le camere {camera_str} sono inattive da {inactivity_time:.1f}s")
 
-            # STRATEGIA 1: Riavvia lo streaming lato server più aggressivamente
-            if self.selected_scanner and self.scanner_controller:
-                try:
-                    # Prima verifica la connessione con un PING
-                    ping_success = self.scanner_controller.send_command(
-                        self.selected_scanner.device_id,
-                        "PING",
-                        {"timestamp": time.time()}
-                    )
+            if inactivity_time > 10.0:  # Solo dopo 10 secondi di inattività
+                logger.warning(
+                    f"Le camere {camera_str} sono inattive da {inactivity_time:.1f}s, tentativo di recovery aggressivo")
 
-                    if not ping_success:
-                        logger.warning("Ping fallito, tentativo di riconnessione...")
-                        reconnect_success = self.scanner_controller.connect_to_scanner(self.selected_scanner.device_id)
-                        if reconnect_success:
-                            logger.info("Riconnessione al server riuscita")
-                        else:
-                            logger.error("Riconnessione al server fallita")
-
-                    # Prima ferma lo streaming - più tentativi con attese più brevi
-                    for attempt in range(2):
-                        logger.info(f"Tentativo {attempt + 1} di fermata temporanea dello streaming...")
-                        stop_success = self.scanner_controller.send_command(
+                # STRATEGIA 1: Reset completo dello streaming
+                if self.selected_scanner and self.scanner_controller:
+                    try:
+                        # 1. Ferma lo streaming attuale
+                        logger.info("Fermata streaming per recovery...")
+                        self.scanner_controller.send_command(
                             self.selected_scanner.device_id,
                             "STOP_STREAM"
                         )
-                        if stop_success:
-                            logger.info("Streaming fermato con successo")
-                            break
-                        time.sleep(0.2)  # Attesa breve tra tentativi
+                        # Attendi risposta per completare REQ/REP
+                        self.scanner_controller.receive_response(self.selected_scanner.device_id)
 
-                    # Attesa più breve
-                    time.sleep(0.3)  # Attendi che si fermi completamente
+                        # 2. Reset socket di comunicazione
+                        if hasattr(self.scanner_controller, 'connection_manager'):
+                            try:
+                                cm = self.scanner_controller.connection_manager
+                                cm._reset_socket_state(self.selected_scanner.device_id)
+                                logger.info("Socket di comunicazione resettato")
+                            except Exception as e:
+                                logger.warning(f"Errore nel reset socket: {e}")
 
-                    # Riavvia con richiesta esplicita dual camera - più tentativi
-                    for attempt in range(3):
-                        logger.info(f"Tentativo {attempt + 1} di riavvio streaming con dual_camera=True...")
-                        start_success = self.scanner_controller.send_command(
-                            self.selected_scanner.device_id,
-                            "START_STREAM",
-                            {
-                                "dual_camera": True,
-                                "quality": 90,
-                                "target_fps": 30
-                            }
-                        )
-                        if start_success:
-                            logger.info("Streaming riavviato con successo")
-                            break
-                        time.sleep(0.3)  # Attesa breve tra tentativi
+                        # 3. Piccola pausa per stabilizzazione
+                        time.sleep(1.0)
 
-                    # Reset contatori per prossima verifica
-                    self._frame_count_by_camera = {0: 0, 1: 0}
-                    # Reset del timer di inattività se abbiamo eseguito un'azione
-                    self._camera_inactive_since = time.time()
-                except Exception as e:
-                    logger.error(f"Errore nel riavvio dello streaming: {e}")
+                        # 4. Ricrea completamente lo stream receiver
+                        logger.info("Ricreazione stream receiver...")
+                        self._setup_stream_receiver(self.selected_scanner)
 
-            # STRATEGIA 2: Se l'inattività persiste, riconnessione accelerata
-            if inactivity_time > 15.0:  # Più aggressivo: solo 15 secondi invece di 30
-                logger.warning("Inattività prolungata, tentativo di riconnessione completa accelerata...")
+                        # Reset del timer di inattività
+                        self._camera_inactive_since = time.time()
 
-                try:
-                    # Disconnetti completamente
-                    if self.selected_scanner and self.scanner_controller:
-                        logger.info("Disconnessione forzata...")
-                        self.scanner_controller.disconnect_from_scanner(self.selected_scanner.device_id)
-                        time.sleep(0.5)  # Attesa ridotta
+                    except Exception as e:
+                        logger.error(f"Errore nel recovery streaming: {e}")
 
-                        # Riconnetti
-                        logger.info("Tentativo di riconnessione accelerata...")
-                        reconnect_success = self.scanner_controller.connect_to_scanner(self.selected_scanner.device_id)
-                        if reconnect_success:
-                            logger.info("Riconnessione completata con successo")
-                            # Reset del timer
-                            self._camera_inactive_since = time.time()
-
-                            # Forza anche l'aggiornamento dello streaming
-                            logger.info("Forza aggiornamento del stream receiver...")
-                            if hasattr(self, '_connect_to_stream'):
-                                self._connect_to_stream()
-                        else:
-                            logger.error("Riconnessione fallita")
-                except Exception as e:
-                    logger.error(f"Errore nella riconnessione completa: {e}")
-
-            # Pianifica prossima verifica con intervallo più breve se ci sono problemi
-            check_interval = 2.0 if missing_cameras else 5.0  # Più aggressivo: 2 secondi invece di 3
+            # Sempre: pianifica prossima verifica
+            check_interval = 2.0 if missing_cameras else 5.0
             if not hasattr(self, '_camera_check_timer') or not self._camera_check_timer.is_alive():
                 self._camera_check_timer = threading.Timer(check_interval, self._verify_camera_streams)
                 self._camera_check_timer.daemon = True
@@ -2377,9 +2362,10 @@ class ScanView(QWidget):
         except Exception as e:
             logger.error(f"Errore nella verifica delle camere: {e}")
             # Assicurati che il timer venga comunque riavviato
-            self._camera_check_timer = threading.Timer(5.0, self._verify_camera_streams)
-            self._camera_check_timer.daemon = True
-            self._camera_check_timer.start()
+            if not hasattr(self, '_camera_check_timer') or not self._camera_check_timer.is_alive():
+                self._camera_check_timer = threading.Timer(5.0, self._verify_camera_streams)
+                self._camera_check_timer.daemon = True
+                self._camera_check_timer.start()
 
     def _synchronize_camera_frames(self, camera_index, frame, timestamp):
         """

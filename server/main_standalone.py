@@ -1661,8 +1661,8 @@ class UnLookServer:
 
     def _stream_camera(self, camera: "Picamera2", camera_index: int, mode: str = "color"):
         """
-        Funzione di streaming ottimizzata che utilizza esclusivamente le API native di PiCamera2
-        e Pillow per la massima compatibilità e stabilità.
+        Funzione di streaming ottimizzata che utilizza l'API di PiCamera2 con fallback a OpenCV.
+        Gestisce entrambe le modalità di cattura e robusto fallback in caso di errori.
 
         Args:
             camera: Oggetto Picamera2
@@ -1681,13 +1681,23 @@ class UnLookServer:
                 return
 
         # Configurazioni base
-        quality = max(75, min(92, self._jpeg_quality))  # Qualità bilanciata
+        quality = max(70, min(92, self._jpeg_quality))  # Qualità bilanciata
         frame_interval = max(0.016, self._frame_interval)  # Limita a 60 FPS max
 
         # Importazioni per la codifica JPEG
         from io import BytesIO
         from PIL import Image
         import struct
+        import simplejpeg  # Import migliorato per la compressione
+
+        # Flag per utilizzo dell'encoder hardware (tenta all'inizio, fallback a software)
+        use_hardware_encoder = True
+
+        # Contatori errori per gestione fallback
+        hardware_errors = 0
+
+        # Encoder JPEG (inizializzato quando necessario)
+        jpeg_encoder = None
 
         # Statistiche
         frame_count = 0
@@ -1708,34 +1718,71 @@ class UnLookServer:
                 # Aggiorna timestamp per prossimo frame
                 next_frame_time = time.time() + frame_interval
 
-                # 1. Cattura frame
+                # 1. Cattura frame - con gestione robusta degli errori
                 try:
                     timestamp = time.time()  # Timestamp preciso
+
+                    # Metodo di cattura principale
                     frame = camera.capture_array("main")
 
                     # Verifica frame
                     if frame is None or frame.size == 0:
-                        logger.warning(f"Frame vuoto ricevuto dalla camera {camera_index}")
-                        time.sleep(0.01)
-                        continue
+                        logger.warning(f"Frame vuoto ricevuto dalla camera {camera_index}, ritento con capture_array")
+                        frame = camera.capture_array()
+                        if frame is None or frame.size == 0:
+                            time.sleep(0.01)
+                            continue
 
                     # 2. Converti in grayscale se necessario
                     if mode == "grayscale" and len(frame.shape) == 3:
-                        # Conversione efficiente usando media dei canali
-                        r, g, b = frame[:, :, 0], frame[:, :, 1], frame[:, :, 2]
-                        frame = (0.299 * r + 0.587 * g + 0.114 * b).astype(np.uint8)
+                        # Conversione efficiente usando pesi corretti per luminanza
+                        gray_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                        frame = gray_frame
 
-                    # 3. Compressione JPEG usando Pillow
-                    buffer = BytesIO()
+                    # 3. Compressione JPEG - tenta hardware, poi fallback a software
+                    if use_hardware_encoder:
+                        try:
+                            # Tentativo hardware con gestione errori migliorata
+                            buffer = BytesIO()
 
-                    if len(frame.shape) == 2:  # Grayscale
-                        pil_img = Image.fromarray(frame, mode="L")
-                    else:  # RGB
-                        pil_img = Image.fromarray(frame, mode="RGB")
+                            if len(frame.shape) == 2:  # Grayscale
+                                # Usa compressione simplejpeg per grayscale
+                                jpeg_data = simplejpeg.encode_jpeg(frame, quality=quality, colorspace='GRAY')
+                                frame_data = jpeg_data
+                            else:  # RGB
+                                # Converte BGR se necessario (PiCamera2 può fornire RGB o BGR)
+                                if hasattr(camera, 'camera_config') and camera.camera_config.main.format == "RGB888":
+                                    # Converti RGB->BGR per OpenCV
+                                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-                    # Salva come JPEG con qualità specificata
-                    pil_img.save(buffer, format="JPEG", quality=quality, optimize=False)
-                    frame_data = buffer.getvalue()
+                                # Usa Pillow che è più stabile di simplejpeg per immagini RGB
+                                pil_img = Image.fromarray(frame, mode="RGB" if frame.shape[2] == 3 else "RGBA")
+                                pil_img.save(buffer, format="JPEG", quality=quality, optimize=False)
+                                frame_data = buffer.getvalue()
+
+                        except Exception as e:
+                            hardware_errors += 1
+                            logger.warning(f"Errore encoder hardware (#{hardware_errors}): {e}, passaggio a software")
+
+                            # Dopo 3 errori, passa definitivamente al software
+                            if hardware_errors >= 3:
+                                use_hardware_encoder = False
+
+                            # Fallback immediato a codifica software
+                            buffer = BytesIO()
+                            if len(frame.shape) == 2:  # Grayscale
+                                cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])[1].tofile(buffer)
+                            else:  # RGB/BGR
+                                cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])[1].tofile(buffer)
+                            frame_data = buffer.getvalue()
+                    else:
+                        # Codifica software diretta
+                        buffer = BytesIO()
+                        if len(frame.shape) == 2:  # Grayscale
+                            cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])[1].tofile(buffer)
+                        else:  # RGB/BGR
+                            cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])[1].tofile(buffer)
+                        frame_data = buffer.getvalue()
 
                     # 4. Prepara header compatto in formato binario
                     is_scan_frame = 0  # Non è un frame di scansione
@@ -1743,8 +1790,15 @@ class UnLookServer:
                     header = struct.pack('!BBdI', camera_index, is_scan_frame, timestamp, sequence)
 
                     # 5. Invia header e frame
-                    self.stream_socket.send(header, zmq.SNDMORE)
-                    self.stream_socket.send(frame_data, copy=False)  # Zero-copy
+                    try:
+                        self.stream_socket.send(header, zmq.SNDMORE)
+                        self.stream_socket.send(frame_data, copy=False)  # Zero-copy
+                    except zmq.ZMQError as e:
+                        if e.errno == zmq.EAGAIN:
+                            logger.warning(f"Socket bloccato nell'invio, salto frame camera {camera_index}")
+                            continue
+                        else:
+                            raise
 
                     # Aggiorna contatori
                     frame_count += 1
@@ -1759,11 +1813,11 @@ class UnLookServer:
                         last_stats_time = current_time
 
                 except Exception as e:
-                    logger.warning(f"Errore nella cattura o invio frame: {e}")
+                    logger.warning(f"Errore nella cattura o invio frame camera {camera_index}: {e}")
                     time.sleep(0.01)
 
             except Exception as e:
-                logger.warning(f"Errore nel ciclo di streaming: {e}")
+                logger.warning(f"Errore nel ciclo di streaming camera {camera_index}: {e}")
                 time.sleep(0.01)
 
         logger.info(f"Thread di streaming camera {camera_index} terminato dopo {frame_count} frame")

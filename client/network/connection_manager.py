@@ -230,8 +230,8 @@ class ConnectionManager:
         # Verifica stato socket
         with self._lock:
             # Controlla se il socket è in uno stato valido per l'invio
-            if hasattr(connection.socket, '_zmq_state') and connection.socket._zmq_state != 0:
-                logger.warning(f"Socket in stato non valido prima dell'invio di {command}, ripristino...")
+            if connection.socket is None:
+                logger.warning(f"Socket non inizializzato per {device_id}, tentativo di reset...")
                 self._reset_socket_state(device_id)
                 connection = self._connections[device_id]
 
@@ -244,7 +244,7 @@ class ConnectionManager:
 
         # Aggiungi dati se forniti
         if data:
-            data_copy = data.copy()
+            data_copy = data.copy() if data else {}
             # Rimuovi campi che potrebbero causare conflitti
             data_copy.pop("command", None)
             data_copy.pop("type", None)
@@ -275,13 +275,15 @@ class ConnectionManager:
                 # Aggiorna timestamp attività
                 connection.last_activity = time.time()
 
-            # IMPORTANTE: Per i comandi che non sono GET o PING, attendi esplicitamente la risposta
-            if command not in ["GET_STATUS", "PING"] and not data.get("async", False):
+            # IMPORTANTE: Attendi SEMPRE la risposta per completare il ciclo REQ/REP
+            if not data or not data.get("async", False):
                 # Attendi brevemente la risposta per completare il ciclo REQ/REP
                 response = self.receive_response(device_id, timeout=0.5)
                 if not response:
                     logger.warning(f"Nessuna risposta ricevuta per {command}, possibile violazione pattern REQ/REP")
-                    # Non fare ulteriori azioni qui - il socket verrà ripristinato al prossimo invio se necessario
+                    # Reset socket immediato per prevenire errori futuri
+                    self._reset_socket_state(device_id)
+                    return False
 
             return True
 
@@ -324,9 +326,15 @@ class ConnectionManager:
 
             try:
                 # Chiudi il socket corrente (senza attendere)
-                if old_socket:
+                if old_socket is not None:
                     old_socket.setsockopt(zmq.LINGER, 0)
-                    old_socket.close()
+                    try:
+                        old_socket.close()
+                    except:
+                        pass  # Ignora errori di chiusura
+
+                # Piccola pausa per permettere al sistema ZMQ di liberare risorse
+                time.sleep(0.1)
 
                 # Crea un nuovo socket
                 new_socket = self._zmq_context.socket(zmq.REQ)
@@ -345,6 +353,34 @@ class ConnectionManager:
                 endpoint = f"tcp://{connection.ip_address}:{connection.port}"
                 new_socket.connect(endpoint)
 
+                # Test semplice socket con ping
+                try:
+                    ping_message = {
+                        "command": "PING",
+                        "type": "PING",
+                        "timestamp": time.time(),
+                        "request_id": str(uuid.uuid4()),
+                        "silent": True  # Indica al server di non loggare questo ping
+                    }
+
+                    # Timeout breve per il test
+                    new_socket.setsockopt(zmq.RCVTIMEO, 1000)
+                    new_socket.setsockopt(zmq.SNDTIMEO, 1000)
+
+                    # Invia e attendi risposta
+                    new_socket.send_json(ping_message)
+                    new_socket.recv_json()
+
+                    # Se qui, il ping ha funzionato
+                    logger.info(f"Test ping riuscito sul nuovo socket per {device_id}")
+                except Exception as e:
+                    logger.warning(f"Test ping fallito sul nuovo socket: {e}, ma continuo comunque")
+                    # Continuo comunque, il prossimo comando completerà il ciclo
+
+                # Ripristina timeout standard
+                new_socket.setsockopt(zmq.RCVTIMEO, 5000)
+                new_socket.setsockopt(zmq.SNDTIMEO, 5000)
+
                 # Aggiorna il socket nella connessione
                 connection.socket = new_socket
 
@@ -357,6 +393,8 @@ class ConnectionManager:
 
             except Exception as e:
                 logger.error(f"Errore nel ripristino del socket per {device_id}: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 connection.is_connected = False
                 return False
 
