@@ -275,15 +275,19 @@ class ConnectionManager:
                 # Aggiorna timestamp attività
                 connection.last_activity = time.time()
 
-            # IMPORTANTE: Attendi SEMPRE la risposta per completare il ciclo REQ/REP
-            if not data or not data.get("async", False):
-                # Attendi brevemente la risposta per completare il ciclo REQ/REP
-                response = self.receive_response(device_id, timeout=0.5)
-                if not response:
-                    logger.warning(f"Nessuna risposta ricevuta per {command}, possibile violazione pattern REQ/REP")
-                    # Reset socket immediato per prevenire errori futuri
-                    self._reset_socket_state(device_id)
-                    return False
+            # IMPORTANTE: per comandi asincroni ritorna True qui senza attendere risposta
+            if data and data.get("async", False):
+                return True
+
+            # Per tutti gli altri comandi, è CRITICO completare il ciclo REQ/REP
+            # attendendo SEMPRE la risposta prima di ritornare
+            response = self.receive_response(device_id, timeout=timeout or self._response_timeout)
+
+            if not response:
+                logger.warning(f"Nessuna risposta ricevuta per {command}, possibile violazione pattern REQ/REP")
+                # Reset socket immediato per prevenire errori futuri
+                self._reset_socket_state(device_id)
+                return False
 
             return True
 

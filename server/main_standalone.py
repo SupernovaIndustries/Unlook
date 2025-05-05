@@ -1661,8 +1661,8 @@ class UnLookServer:
 
     def _stream_camera(self, camera: "Picamera2", camera_index: int, mode: str = "color"):
         """
-        Funzione di streaming ottimizzata che utilizza l'API di PiCamera2 con fallback a OpenCV.
-        Gestisce entrambe le modalità di cattura e robusto fallback in caso di errori.
+        Funzione di streaming ottimizzata che utilizza l'API di PiCamera2 con gestione robusta
+        delle modalità colore e grayscale.
 
         Args:
             camera: Oggetto Picamera2
@@ -1686,20 +1686,10 @@ class UnLookServer:
 
         # Importazioni per la codifica JPEG
         from io import BytesIO
-        from PIL import Image
         import struct
-        import simplejpeg  # Import migliorato per la compressione
+        import simplejpeg  # Import per la compressione
 
-        # Flag per utilizzo dell'encoder hardware (tenta all'inizio, fallback a software)
-        use_hardware_encoder = True
-
-        # Contatori errori per gestione fallback
-        hardware_errors = 0
-
-        # Encoder JPEG (inizializzato quando necessario)
-        jpeg_encoder = None
-
-        # Statistiche
+        # Contatori per statistiche
         frame_count = 0
         last_stats_time = time.time()
         next_frame_time = time.time()
@@ -1718,11 +1708,9 @@ class UnLookServer:
                 # Aggiorna timestamp per prossimo frame
                 next_frame_time = time.time() + frame_interval
 
-                # 1. Cattura frame - con gestione robusta degli errori
+                # 1. Cattura frame
                 try:
                     timestamp = time.time()  # Timestamp preciso
-
-                    # Metodo di cattura principale
                     frame = camera.capture_array("main")
 
                     # Verifica frame
@@ -1734,55 +1722,59 @@ class UnLookServer:
                             continue
 
                     # 2. Converti in grayscale se necessario
-                    if mode == "grayscale" and len(frame.shape) == 3:
-                        # Conversione efficiente usando pesi corretti per luminanza
-                        gray_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-                        frame = gray_frame
+                    is_grayscale = False
+                    if mode == "grayscale":
+                        if len(frame.shape) == 3:
+                            # Conversione efficiente usando pesi corretti per luminanza
+                            gray_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                            frame = gray_frame
+                            is_grayscale = True
+                        else:
+                            # Già in grayscale
+                            is_grayscale = True
 
-                    # 3. Compressione JPEG - tenta hardware, poi fallback a software
-                    if use_hardware_encoder:
-                        try:
-                            # Tentativo hardware con gestione errori migliorata
-                            buffer = BytesIO()
+                    # 3. Compressione JPEG - gestione esplicita per grayscale e RGB
+                    try:
+                        if is_grayscale:
+                            # Verifica esplicita dimensioni e tipo frame grayscale
+                            if len(frame.shape) != 2:
+                                logger.warning(
+                                    f"Frame grayscale con dimensioni inattese: {frame.shape}, effettuo reshape")
+                                if len(frame.shape) == 3 and frame.shape[2] == 3:
+                                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
 
-                            if len(frame.shape) == 2:  # Grayscale
-                                # Usa compressione simplejpeg per grayscale
-                                jpeg_data = simplejpeg.encode_jpeg(frame, quality=quality, colorspace='GRAY')
-                                frame_data = jpeg_data
-                            else:  # RGB
-                                # Converte BGR se necessario (PiCamera2 può fornire RGB o BGR)
-                                if hasattr(camera, 'camera_config') and camera.camera_config.main.format == "RGB888":
-                                    # Converti RGB->BGR per OpenCV
-                                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                            # Usa compressione simplejpeg ottimizzata per grayscale
+                            jpeg_data = simplejpeg.encode_jpeg(frame, quality=quality, colorspace='GRAY')
+                            frame_data = jpeg_data
+                        else:
+                            # RGB
+                            # Verifica dimensioni RGB
+                            if len(frame.shape) != 3 or frame.shape[2] != 3:
+                                logger.warning(
+                                    f"Frame RGB con dimensioni inattese: {frame.shape}, effettuo conversione")
+                                # Converti a RGB se necessario
+                                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
 
-                                # Usa Pillow che è più stabile di simplejpeg per immagini RGB
-                                pil_img = Image.fromarray(frame, mode="RGB" if frame.shape[2] == 3 else "RGBA")
-                                pil_img.save(buffer, format="JPEG", quality=quality, optimize=False)
-                                frame_data = buffer.getvalue()
+                            # Usa compressione simplejpeg per RGB
+                            jpeg_data = simplejpeg.encode_jpeg(frame, quality=quality, colorspace='RGB')
+                            frame_data = jpeg_data
 
-                        except Exception as e:
-                            hardware_errors += 1
-                            logger.warning(f"Errore encoder hardware (#{hardware_errors}): {e}, passaggio a software")
+                    except Exception as e:
+                        logger.warning(f"Errore nella compressione JPEG: {e}, fallback a OpenCV")
 
-                            # Dopo 3 errori, passa definitivamente al software
-                            if hardware_errors >= 3:
-                                use_hardware_encoder = False
-
-                            # Fallback immediato a codifica software
-                            buffer = BytesIO()
-                            if len(frame.shape) == 2:  # Grayscale
-                                cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])[1].tofile(buffer)
-                            else:  # RGB/BGR
-                                cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])[1].tofile(buffer)
-                            frame_data = buffer.getvalue()
-                    else:
-                        # Codifica software diretta
+                        # Fallback a OpenCV per codifica JPEG
                         buffer = BytesIO()
-                        if len(frame.shape) == 2:  # Grayscale
-                            cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])[1].tofile(buffer)
-                        else:  # RGB/BGR
-                            cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])[1].tofile(buffer)
-                        frame_data = buffer.getvalue()
+                        if is_grayscale:
+                            _, jpeg_data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+                        else:
+                            # Assicura formato corretto per OpenCV (BGR)
+                            if frame.shape[2] == 3:  # RGB
+                                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                            else:
+                                frame_bgr = frame
+                            _, jpeg_data = cv2.imencode('.jpg', frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
+
+                        frame_data = jpeg_data.tobytes()
 
                     # 4. Prepara header compatto in formato binario
                     is_scan_frame = 0  # Non è un frame di scansione

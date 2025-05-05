@@ -1106,6 +1106,7 @@ class MainWindow(QMainWindow):
     def _initialize_stream_receiver(self):
         """
         Inizializza la variabile stream_receiver ma delega la gestione effettiva a ScanView.
+        Implementa la separazione di responsabilità tra MainWindow e ScanView.
         """
         # Memorizza solo il riferimento, non inizializzare
         self.stream_receiver = None

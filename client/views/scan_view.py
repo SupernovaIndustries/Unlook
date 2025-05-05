@@ -936,15 +936,15 @@ class ScanView(QWidget):
                     # Verifica che la connessione sia attiva prima di inviare comandi
                     is_connected = self.scanner_controller.is_connected(self.selected_scanner.device_id)
                     if is_connected:
-                        # Invia comando STOP_STREAM con comando esplicito, senza await
+                        # Invia comando STOP_STREAM con timeout ragionevole
                         stop_sent = self.scanner_controller.send_command(
                             self.selected_scanner.device_id,
                             "STOP_STREAM",
-                            timeout=2.0  # Timeout ragionevole
+                            timeout=2.0
                         )
 
+                        # Importante: attendi esplicitamente la risposta per completare il ciclo REQ/REP
                         if stop_sent:
-                            # Importante: attendi esplicitamente la risposta per completare il ciclo REQ/REP
                             response = self.scanner_controller.receive_response(self.selected_scanner.device_id,
                                                                                 timeout=2.0)
                             logger.info(f"Risposta STOP_STREAM: {response}")
@@ -1025,8 +1025,8 @@ class ScanView(QWidget):
 
     def _start_streaming(self):
         """
-        Avvia lo streaming video in modo robusto con verifica della risposta e retry.
-        Risolve i problemi di sincronizzazione tra client e server.
+        Avvia lo streaming video in modo robusto con verifica della risposta e gestione
+        del pattern REQ/REP.
         """
         if not self.selected_scanner or not self.scanner_controller:
             logger.error("Impossibile avviare streaming: scanner non selezionato/connesso")
@@ -1055,7 +1055,25 @@ class ScanView(QWidget):
                     logger.info(f"Tentativo {attempt + 1}/{max_attempts} di avvio streaming...")
                     time.sleep(1.0)  # Pausa tra tentativi
 
-                # Invia comando START_STREAM
+                # 1. Prima invia un STOP_STREAM per assicurarsi che il pattern REQ/REP sia pulito
+                if attempt > 0:
+                    try:
+                        stop_cmd = self.scanner_controller.send_command(
+                            device_id,
+                            "STOP_STREAM",
+                            timeout=1.0
+                        )
+
+                        # Attendi la risposta completa
+                        response = self.scanner_controller.receive_response(device_id, timeout=1.0)
+                        logger.info(f"Pulizia con STOP_STREAM: {response}")
+
+                        # Piccola pausa per stabilizzazione
+                        time.sleep(0.5)
+                    except Exception as e:
+                        logger.warning(f"Errore nella pulizia: {e}, continuo comunque")
+
+                # 2. Invia comando START_STREAM
                 cmd_sent = self.scanner_controller.send_command(
                     device_id,
                     "START_STREAM",
@@ -1065,9 +1083,24 @@ class ScanView(QWidget):
 
                 if not cmd_sent:
                     logger.warning(f"Errore nell'invio del comando START_STREAM (tentativo {attempt + 1})")
+
+                    # Importante: completa comunque il ciclo REQ/REP
+                    try:
+                        self.scanner_controller.receive_response(device_id, timeout=0.5)
+                    except:
+                        pass
+
+                    # Prepara il socket per il prossimo tentativo
+                    if hasattr(self.scanner_controller, 'connection_manager'):
+                        try:
+                            self.scanner_controller.connection_manager._reset_socket_state(device_id)
+                            logger.info("Socket di comunicazione resettato prima del prossimo tentativo")
+                        except:
+                            pass
+
                     continue
 
-                # FONDAMENTALE: Attendi ESPLICITAMENTE la risposta per completare il ciclo REQ/REP
+                # 3. FONDAMENTALE: Attendi ESPLICITAMENTE la risposta per completare il ciclo REQ/REP
                 response = self.scanner_controller.receive_response(device_id, timeout=5.0)
 
                 if response and response.get("status") == "ok":
@@ -1091,7 +1124,7 @@ class ScanView(QWidget):
 
                     # Se non c'è risposta, il socket potrebbe essere in stato invalido
                     # Reset socket di comunicazione prima del prossimo tentativo
-                    if not response and hasattr(self.scanner_controller, 'connection_manager'):
+                    if hasattr(self.scanner_controller, 'connection_manager'):
                         try:
                             self.scanner_controller.connection_manager._reset_socket_state(device_id)
                             logger.info("Socket di comunicazione resettato prima del prossimo tentativo")
