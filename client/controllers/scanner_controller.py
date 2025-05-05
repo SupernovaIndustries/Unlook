@@ -3,25 +3,25 @@
 
 """
 Controller per la gestione degli scanner UnLook.
+Gestisce le connessioni, comandi e sincronizzazione tra GUI e dispositivi fisici.
 """
 
 import logging
 import time
-from typing import List, Optional, Callable, Dict, Any
-import uuid
 import threading
+import uuid
+from typing import List, Optional, Dict, Any, Tuple
 from PySide6.QtCore import QObject, Signal, Slot, Property, QSettings, QTimer, QCoreApplication
 from PySide6.QtWidgets import QApplication, QMainWindow
 
-# Importa i moduli del progetto in modo che funzionino sia con esecuzione diretta che tramite launcher
+# Importa i moduli del progetto con gestione robusta delle importazioni
 try:
     from client.models.scanner_model import Scanner, ScannerManager, ScannerStatus
-    from client.network.connection_manager import ConnectionManager
 except ImportError:
     # Fallback per esecuzione diretta
     from client.models.scanner_model import Scanner, ScannerManager, ScannerStatus
-    from client.network.connection_manager import ConnectionManager
 
+# Configurazione logging
 logger = logging.getLogger(__name__)
 
 
@@ -29,12 +29,17 @@ class ScannerController(QObject):
     """
     Controller che gestisce le interazioni tra l'interfaccia utente
     e il modello di gestione degli scanner.
+
+    Implementa pattern di comunicazione robusti e meccanismi di
+    recovery per garantire operatività continua anche in condizioni
+    di rete non ideali.
     """
     # Segnali
     scanners_changed = Signal()
     scanner_connected = Signal(Scanner)
     scanner_disconnected = Signal(Scanner)
     connection_error = Signal(str, str)  # device_id, error_message
+    scan_status_changed = Signal(str, dict)  # device_id, status_info
 
     def __init__(self, scanner_manager=None):
         """
@@ -47,57 +52,119 @@ class ScannerController(QObject):
         self.scanner_manager = scanner_manager or ScannerManager()
         self._selected_scanner = None
 
-        # Importa ConnectionManager come classe, non come istanza
-        from client.network.connection_manager import ConnectionManager
+        # Implementazione corretta per lazy initialization
+        self._connection_mgr = None
 
-        # Memorizza la classe (non creare ancora l'istanza)
-        self._connection_manager_class = ConnectionManager
+        # Cache per migliorare performance delle interrogazioni frequenti
+        self._connection_status_cache = {}
+        self._last_status_check = {}
 
         # Collega segnali del ScannerManager
         self.scanner_manager.scanner_discovered.connect(self._on_scanner_discovered)
         self.scanner_manager.scanner_lost.connect(self._on_scanner_lost)
 
-        # Dizionario per memorizzare le preferenze utente
-        self._last_connected_scanner = None
+        # Timer per pulizia cache e sincronizzazione periodica
+        self._cleanup_timer = QTimer(self)
+        self._cleanup_timer.timeout.connect(self._cleanup_cache)
+        self._cleanup_timer.start(30000)  # 30 secondi
+
+        # Timer per il keepalive
+        self._keepalive_timer = QTimer(self)
+        self._keepalive_timer.timeout.connect(self._send_keepalive)
+        self._keepalive_timer.start(2000)  # 2 secondi
+
+        # Strutture per il monitoraggio
+        self._last_heartbeat_responses = {}
+        self._consecutive_missed_heartbeats = {}
+        self._stream_receiver_instance = None
 
         # Carica le preferenze
         self._load_preferences()
 
         logger.info("ScannerController inizializzato")
 
-        # Metodo getter per ottenere l'istanza di ConnectionManager
-    def _connection_manager(self):
+    @property
+    def connection_manager(self):
         """
         Restituisce l'istanza del connection manager, inizializzandola se necessario.
-        Implementa il pattern Lazy Initialization.
-        """
-        if not hasattr(self, '_connection_manager'):
-            # Crea una nuova istanza usando la classe memorizzata in _connection_manager_class
-            from client.network.connection_manager import ConnectionManager
-            self._connection_manager = ConnectionManager()
+        Implementa il pattern Lazy Initialization corretto.
 
-        return self._connection_manager
+        Returns:
+            ConnectionManager: Istanza del gestore connessioni
+        """
+        if self._connection_mgr is None:
+            # Importiamo qui per evitare dipendenze circolari
+            from client.network.connection_manager import ConnectionManager
+            self._connection_mgr = ConnectionManager()
+            logger.debug("ConnectionManager inizializzato on-demand")
+
+        return self._connection_mgr
 
     def _send_keepalive(self):
-        """Invia un ping per mantenere attiva la connessione."""
+        """
+        Invia un ping keepalive allo scanner selezionato per mantenere
+        attiva la connessione e monitorare lo stato.
+        """
         if self._selected_scanner and self.is_connected(self._selected_scanner.device_id):
             try:
-                self.send_command(self._selected_scanner.device_id, "PING", {"timestamp": time.time()})
-                logger.debug(f"Inviato ping a {self._selected_scanner.name}")
+                # Ottieni l'IP locale per bypass NAT
+                local_ip = self._get_local_ip()
+
+                # Invia comando con timestamp preciso
+                self.send_command(
+                    self._selected_scanner.device_id,
+                    "PING",
+                    {
+                        "timestamp": time.time(),
+                        "client_ip": local_ip,
+                        "keepalive": True
+                    }
+                )
+                logger.debug(f"Keepalive inviato a {self._selected_scanner.name}")
             except Exception as e:
-                logger.error(f"Errore nell'invio del ping: {e}")
+                logger.error(f"Errore nell'invio del keepalive: {e}")
+
+    def _get_local_ip(self):
+        """
+        Rileva l'indirizzo IP locale della macchina per connessioni uscenti.
+        Questo è importante per NAT traversal e configurazione firewall.
+
+        Returns:
+            str: Indirizzo IP locale o None se non rilevabile
+        """
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            return local_ip
+        except Exception:
+            return None
 
     def start_discovery(self):
-        """Avvia la scoperta degli scanner nella rete locale."""
+        """
+        Avvia la scoperta degli scanner nella rete locale usando
+        protocolli broadcast/multicast.
+        """
         self.scanner_manager.start_discovery()
+        logger.info("Avviata scoperta scanner UnLook")
 
     def stop_discovery(self):
-        """Ferma la scoperta degli scanner."""
+        """
+        Ferma la scoperta degli scanner e libera risorse di rete.
+        """
         self.scanner_manager.stop_discovery()
+        logger.info("Fermata scoperta scanner UnLook")
 
     @Property(list, notify=scanners_changed)
     def scanners(self) -> List[Scanner]:
-        """Restituisce la lista degli scanner disponibili."""
+        """
+        Restituisce la lista degli scanner disponibili.
+
+        Returns:
+            List[Scanner]: Lista degli scanner rilevati
+        """
         return self.scanner_manager.scanners
 
     @Slot(str)
@@ -109,62 +176,147 @@ class ScannerController(QObject):
             device_id: ID univoco dello scanner
 
         Returns:
-            True se la connessione è stata avviata, False altrimenti
+            bool: True se la connessione è stata avviata, False altrimenti
         """
+        # Verifica validità dell'ID
+        if not device_id:
+            logger.error("ID scanner non valido")
+            return False
+
+        # Recupera lo scanner dal manager
         scanner = self.scanner_manager.get_scanner(device_id)
         if not scanner:
             logger.error(f"Scanner con ID {device_id} non trovato")
             return False
 
-        # Imposta lo stato dello scanner
-        scanner.status = ScannerStatus.CONNECTING
+        try:
+            # Imposta lo stato a CONNECTING
+            prev_status = scanner.status
+            scanner.status = ScannerStatus.CONNECTING
+            logger.info(f"Scanner {scanner.name} status: {prev_status.name} -> CONNECTING")
 
-        # Avvia la connessione
-        return self._connection_manager.connect(
-            scanner.device_id,
-            scanner.ip_address,
-            scanner.port
-        )
+            # Stabilisce la connessione
+            success = self.connection_manager.connect(
+                scanner.device_id,
+                scanner.ip_address,
+                scanner.port
+            )
+
+            if success:
+                # Aggiorna lo stato e notifica
+                scanner.status = ScannerStatus.CONNECTED
+                logger.info(f"Connessione stabilita con {scanner.name}")
+
+                # Salva l'ultimo scanner connesso
+                settings = QSettings()
+                settings.setValue("scanner/last_device_id", device_id)
+
+                # Emetti il segnale di connessione
+                self.scanner_connected.emit(scanner)
+
+                # Seleziona automaticamente questo scanner
+                if not self._selected_scanner:
+                    self.select_scanner(device_id)
+
+                # Avvia il monitoraggio heartbeat
+                self._consecutive_missed_heartbeats[device_id] = 0
+
+                return True
+            else:
+                # Connessione fallita
+                scanner.status = ScannerStatus.ERROR
+                scanner.error_message = "Connessione fallita"
+                logger.error(f"Impossibile connettersi a {scanner.name}")
+
+                # Notifica errore
+                self.connection_error.emit(device_id, "Connessione fallita")
+                return False
+
+        except Exception as e:
+            # Gestione errori
+            scanner.status = ScannerStatus.ERROR
+            scanner.error_message = str(e)
+            logger.error(f"Errore nella connessione a {scanner.name}: {e}")
+
+            # Notifica errore
+            self.connection_error.emit(device_id, str(e))
+            return False
 
     @Slot(str)
-    def disconnect_from_scanner(self, device_id: str) -> bool:
+    def disconnect_from_scanner(self, device_id: str, force_cleanup: bool = False) -> bool:
         """
         Chiude la connessione con uno scanner specifico.
 
         Args:
             device_id: ID univoco dello scanner
+            force_cleanup: Se True, forza la pulizia delle risorse anche in caso di errore
 
         Returns:
-            True se la disconnessione è stata avviata, False altrimenti
+            bool: True se la disconnessione è stata completata, False altrimenti
         """
         try:
+            # Verifica esistenza scanner
             scanner = self.scanner_manager.get_scanner(device_id)
             if not scanner:
                 logger.error(f"Scanner con ID {device_id} non trovato")
                 return False
 
-            # Imposta lo stato a DISCONNECTING per evitare operazioni durante disconnessione
+            # Imposta stato disconnesso immediatamente (anticipando la disconnessione fisica)
+            old_status = scanner.status
+            scanner.status = ScannerStatus.DISCONNECTED
+            logger.info(f"Stato scanner {scanner.name} cambiato da {old_status.name} a DISCONNECTED")
+
+            # Ferma eventuali streaming attivi
+            if old_status == ScannerStatus.STREAMING:
+                try:
+                    self.send_command(device_id, "STOP_STREAM", timeout=1.0)
+                    logger.info(f"Comando STOP_STREAM inviato a {scanner.name}")
+                except Exception as e:
+                    logger.warning(f"Errore nell'invio del comando STOP_STREAM: {e}")
+
+            # Disconnette effettivamente
+            success = self.connection_manager.disconnect(device_id)
+
+            # Emette segnale di disconnessione
             if scanner:
-                try:
-                    old_status = scanner.status
-                    scanner.status = ScannerStatus.DISCONNECTED  # Impostiamo subito a disconnesso
-                    logger.info(f"Stato scanner {device_id} cambiato da {old_status} a DISCONNECTED")
-                except Exception as e:
-                    logger.error(f"Errore nel cambio stato scanner: {e}")
+                self.scanner_disconnected.emit(scanner)
+                logger.info(f"Disconnessione da {scanner.name} completata")
 
-            # Chiude la connessione
-            success = self._connection_manager.disconnect(device_id)
+                # Se era selezionato, deseleziona
+                if self._selected_scanner and self._selected_scanner.device_id == device_id:
+                    self._selected_scanner = None
 
-            # Emetti il segnale di disconnessione se necessario
-            if success and scanner:
-                try:
-                    self.scanner_disconnected.emit(scanner)
-                except Exception as e:
-                    logger.error(f"Errore nell'emissione del segnale di disconnessione: {e}")
+            # Pulisci cache
+            if device_id in self._connection_status_cache:
+                del self._connection_status_cache[device_id]
+
+            if device_id in self._last_status_check:
+                del self._last_status_check[device_id]
+
+            if device_id in self._consecutive_missed_heartbeats:
+                del self._consecutive_missed_heartbeats[device_id]
+
+            if device_id in self._last_heartbeat_responses:
+                del self._last_heartbeat_responses[device_id]
 
             return success
         except Exception as e:
             logger.error(f"Errore durante la disconnessione da {device_id}: {e}")
+
+            # Cleanup forzato se richiesto
+            if force_cleanup:
+                try:
+                    self.connection_manager.disconnect(device_id)
+                except:
+                    pass
+
+                # Emette comunque il segnale
+                if scanner:
+                    scanner.status = ScannerStatus.DISCONNECTED
+                    self.scanner_disconnected.emit(scanner)
+
+                return True
+
             return False
 
     @Slot(str)
@@ -176,7 +328,7 @@ class ScannerController(QObject):
             device_id: ID univoco dello scanner
 
         Returns:
-            True se la selezione è riuscita, False altrimenti
+            bool: True se la selezione è riuscita, False altrimenti
         """
         scanner = self.scanner_manager.get_scanner(device_id)
         if not scanner:
@@ -189,61 +341,75 @@ class ScannerController(QObject):
 
     @property
     def selected_scanner(self) -> Optional[Scanner]:
-        """Restituisce lo scanner attualmente selezionato."""
+        """
+        Restituisce lo scanner attualmente selezionato.
+
+        Returns:
+            Optional[Scanner]: Scanner selezionato o None
+        """
         return self._selected_scanner
 
     def is_connected(self, device_id: str) -> bool:
         """
-        Verifica se un determinato scanner è connesso.
-        Versione migliorata per dare priorità allo stato di streaming e
-        garantire consistenza tra diversi componenti dell'applicazione.
+        Verifica se un determinato scanner è connesso con gestione
+        ottimizzata della cache per ridurre overhead di rete.
 
         Args:
             device_id: ID univoco dello scanner
 
         Returns:
-            True se il dispositivo è connesso, False altrimenti
+            bool: True se il dispositivo è connesso, False altrimenti
         """
+        # Verifica esistenza scanner
         scanner = self.scanner_manager.get_scanner(device_id)
         if not scanner:
             return False
 
-        # Se lo scanner è in streaming, consideriamolo sempre connesso
+        # Ottimizzazione: se lo scanner è in streaming, è sicuramente connesso
         if scanner.status == ScannerStatus.STREAMING:
             return True
 
-        # Controllo su due livelli:
-        # 1. Verifica lo stato memorizzato nello scanner
-        scanner_state_connected = scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
+        # Ottimizzazione cache: limita verifiche frequenti
+        current_time = time.time()
+        last_check_time = self._last_status_check.get(device_id, 0)
 
-        # 2. Verifica anche con il connection manager per conferma diretta
-        connection_manager_connected = False
+        if current_time - last_check_time < 0.5:  # 500ms di cache
+            return self._connection_status_cache.get(device_id, False)
+
+        # Verifica effettiva dello stato
         try:
-            # Usa l'istanza esistente del connection manager
-            connection_manager_connected = self._connection_manager.is_connected(device_id)
+            # Controllo su due livelli
+            scanner_state_connected = scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
 
-            # Sincronizza lo stato se c'è una discrepanza
+            # Verifica diretta con connection manager
+            connection_manager_connected = self.connection_manager.is_connected(device_id)
+
+            # Sincronizza stato se c'è discrepanza
             if connection_manager_connected and scanner.status == ScannerStatus.DISCONNECTED:
-                # Aggiorna lo stato dello scanner a connesso
                 scanner.status = ScannerStatus.CONNECTED
                 logger.info(f"Correzione automatica stato scanner {device_id}: impostato a CONNECTED")
             elif not connection_manager_connected and scanner.status == ScannerStatus.CONNECTED:
-                # Se lo scanner non è in streaming, aggiorna lo stato a disconnesso
                 if scanner.status != ScannerStatus.STREAMING:
                     scanner.status = ScannerStatus.DISCONNECTED
                     logger.info(f"Correzione automatica stato scanner {device_id}: impostato a DISCONNECTED")
-                    # Emetti il segnale di disconnessione
                     self.scanner_disconnected.emit(scanner)
+
+            # Aggiorna cache
+            is_connected = scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
+            self._connection_status_cache[device_id] = is_connected
+            self._last_status_check[device_id] = current_time
+
+            return is_connected
+
         except Exception as e:
-            logger.error(f"Errore nel controllo della connessione: {e}")
+            logger.error(f"Errore nel controllo della connessione per {device_id}: {e}")
+            return scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
 
-        # La connessione è valida se uno dei due controlli è positivo,
-        # ma diamo priorità allo stato dello scanner se è in streaming
-        return scanner.status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING)
-
-    def send_command(self, device_id, command_type, data=None, timeout=None):
+    def send_command(self, device_id: str, command_type: str,
+                     data: Dict[str, Any] = None, timeout: float = None) -> bool:
         """
         Invia un comando allo scanner con supporto per timeout configurabile.
+        Implementa meccanismo di retry intelligente per comandi critici.
 
         Args:
             device_id: ID del dispositivo
@@ -252,39 +418,64 @@ class ScannerController(QObject):
             timeout: Timeout in secondi (opzionale)
 
         Returns:
-            True se il comando è stato inviato correttamente, False altrimenti
+            bool: True se il comando è stato inviato correttamente, False altrimenti
         """
-        try:
-            # Ottieni ConnectionManager tramite il getter
-            connection_manager = self._connection_manager()
+        if not device_id:
+            logger.error("Device ID non valido")
+            return False
 
-            # Verifica che il device_id sia valido
-            if not device_id:
-                logger.error("Device ID non valido")
+        # Verifica connessione (ottimizzato: bypass cache per comandi critici)
+        bypass_commands = ["START_SCAN", "STOP_SCAN", "START_STREAM", "STOP_STREAM"]
+        if command_type in bypass_commands:
+            # Forza verifica diretta
+            if not self.connection_manager.is_connected(device_id):
+                logger.error(f"Impossibile inviare {command_type}: scanner non connesso")
                 return False
+        elif not self.is_connected(device_id):
+            logger.error(f"Impossibile inviare {command_type}: scanner non connesso")
+            return False
 
-            # Prepara i dati comando
+        try:
+            # Prepara dati comando
             command_data = {
-                "type": command_type,
-                "id": str(uuid.uuid4()),
+                "command": command_type,  # Usa 'command' invece di 'type'
+                "request_id": str(uuid.uuid4()),
                 "timestamp": time.time()
             }
 
-            # Aggiungi i dati se presenti
+            # Aggiungi dati se presenti
             if data:
                 command_data.update(data)
 
-            # Invia il comando con timeout specifico se fornito
-            if timeout is not None:
-                # Se il metodo non esiste, implementiamo qui un fallback
-                if hasattr(connection_manager, 'send_message_with_timeout'):
-                    return connection_manager.send_message_with_timeout(device_id, command_data, timeout)
-                else:
-                    # Implementazione fallback
-                    logger.warning("Metodo send_message_with_timeout non disponibile, uso send_message standard")
-                    return connection_manager.send_message(device_id, command_data)
-            else:
-                return connection_manager.send_message(device_id, command_data)
+            # Determina timeout effettivo
+            effective_timeout = timeout if timeout is not None else 2.0  # Default 2s
+
+            # Log dei comandi principali
+            if command_type not in ["PING", "GET_STATUS"]:
+                logger.debug(f"Invio comando {command_type} a {device_id}")
+
+            # Invia il comando
+            success = self.connection_manager.send_message(
+                device_id,
+                command_type,  # Pass command type separately
+                command_data,  # Pass command data
+                effective_timeout  # Pass timeout
+            )
+
+            # Gestione speciale per comandi che potrebbero richiedere retry
+            if not success and command_type in ["START_SCAN", "STOP_SCAN", "START_STREAM"]:
+                logger.warning(f"Primo tentativo {command_type} fallito, retry...")
+                # Breve attesa
+                time.sleep(0.2)
+                # Ritenta con timeout più lungo
+                success = self.connection_manager.send_message(
+                    device_id,
+                    command_type,
+                    command_data,
+                    effective_timeout * 1.5  # 50% in più di timeout
+                )
+
+            return success
 
         except Exception as e:
             logger.error(f"Errore nell'invio del comando {command_type}: {e}")
@@ -292,139 +483,331 @@ class ScannerController(QObject):
             logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
-    def start_heartbeat(self, interval=5.0):
+    def wait_for_response(self, device_id: str, command_type: str,
+                          timeout: float = None) -> Optional[Dict[str, Any]]:
         """
-        Avvia un timer per l'invio periodico di heartbeat a tutti gli scanner connessi.
-        Importante per mantenere le connessioni attive e rilevare disconnessioni.
+        Attende la risposta a un comando inviato con gestione ottimizzata dell'attesa
+        che non blocca l'interfaccia utente.
 
         Args:
-            interval: Intervallo in secondi tra heartbeat consecutivi (default: 5.0)
+            device_id: ID univoco dello scanner
+            command_type: Tipo di comando per cui si attende la risposta
+            timeout: Timeout in secondi (default: 30 secondi)
+
+        Returns:
+            Optional[Dict[str, Any]]: Dizionario con la risposta o None se non ricevuta
         """
-        # Ferma eventuali timer esistenti
-        if hasattr(self, '_heartbeat_timer') and self._heartbeat_timer:
-            self._heartbeat_timer.cancel()
+        if not self.is_connected(device_id):
+            logger.error(f"Impossibile attendere risposta: scanner {device_id} non connesso")
+            return None
 
-        # Crea un nuovo timer
-        self._heartbeat_interval = interval
-        self._heartbeat_timer = threading.Timer(interval, self._heartbeat_loop)
-        self._heartbeat_timer.daemon = True
-        self._heartbeat_timer.start()
-
-        # Inizializza strutture dati per il monitoraggio
-        if not hasattr(self, '_last_heartbeat_responses'):
-            self._last_heartbeat_responses = {}
-        if not hasattr(self, '_consecutive_missed_heartbeats'):
-            self._consecutive_missed_heartbeats = {}
-
-        logger.info(f"Heartbeat avviato con intervallo di {interval} secondi")
-
-    def _heartbeat_loop(self):
-        """Loop interno per l'invio ciclico di heartbeat."""
         try:
-            # Invia heartbeat a tutti gli scanner connessi
-            self.send_heartbeat()
+            # Timeout effettivo basato sul tipo di comando
+            if command_type.startswith("START_SCAN") or command_type.startswith("STOP_SCAN"):
+                effective_timeout = min(timeout or 30.0, 20.0)  # Max 20s
+            elif command_type.startswith("GET_SCAN") or command_type == "CHECK_SCAN_CAPABILITY":
+                effective_timeout = min(timeout or 30.0, 15.0)  # Max 15s
+            elif command_type == "SYNC_PATTERN":
+                effective_timeout = min(timeout or 5.0, 0.5)  # Max 500ms per low latency
+            else:
+                effective_timeout = min(timeout or 10.0, 10.0)  # Default max 10s
 
-            # Verifica se ci sono scanner che non rispondono
-            self._check_unresponsive_scanners()
+            logger.debug(f"Attesa risposta a {command_type} con timeout {effective_timeout}s")
 
-            # Pianifica il prossimo heartbeat
-            if hasattr(self, '_heartbeat_interval'):
-                self._heartbeat_timer = threading.Timer(self._heartbeat_interval, self._heartbeat_loop)
-                self._heartbeat_timer.daemon = True
-                self._heartbeat_timer.start()
+            # Attesa non bloccante
+            start_time = time.time()
+            check_interval = 0.01  # 10ms per comandi real-time
+
+            # Adatta intervallo per comandi meno sensibili alla latenza
+            if command_type not in ["SYNC_PATTERN", "GET_FRAME"]:
+                check_interval = 0.05  # 50ms
+
+            while (time.time() - start_time) < effective_timeout:
+                # Consenti all'UI di rispondere durante l'attesa
+                QApplication.processEvents()
+
+                # Verifica risposta
+                if self.connection_manager.has_response(device_id, command_type):
+                    response = self.connection_manager.get_response(device_id, command_type)
+
+                    # Log non verboso per comandi frequenti
+                    if command_type not in ["PING", "GET_STATUS", "SYNC_PATTERN"]:
+                        logger.debug(
+                            f"Risposta ricevuta per {command_type} in {(time.time() - start_time) * 1000:.1f}ms")
+
+                    return response
+
+                # Ping periodico per comandi lunghi
+                elapsed = time.time() - start_time
+                if elapsed > 3 and command_type not in ["PING", "SYNC_PATTERN"]:
+                    if elapsed % 3 < check_interval:
+                        try:
+                            # Invia ping silenzioso
+                            self.send_command(
+                                device_id,
+                                "PING",
+                                {"timestamp": time.time(), "silent": True},
+                                timeout=0.5
+                            )
+                        except:
+                            pass
+
+                time.sleep(check_interval)
+
+            # Timeout
+            logger.warning(f"Timeout nell'attesa della risposta a {command_type} dopo {effective_timeout}s")
+
+            # Verifica stato connessione
+            if self.is_connected(device_id):
+                # Gestione speciale per timeout di comandi critici
+                if command_type == "START_SCAN":
+                    # Verifica stato scan
+                    try:
+                        self.send_command(device_id, "GET_SCAN_STATUS", timeout=1.0)
+                    except:
+                        pass
+                elif command_type == "START_STREAM":
+                    # Riprova a fermare e riavviare lo stream
+                    try:
+                        self.send_command(device_id, "STOP_STREAM", timeout=1.0)
+                        time.sleep(0.5)
+                        self.send_command(device_id, "START_STREAM", {"force": True}, timeout=1.0)
+                    except:
+                        pass
+
+            return None
+
         except Exception as e:
-            logger.error(f"Errore nel loop di heartbeat: {e}")
-            # Riprova comunque
-            if hasattr(self, '_heartbeat_interval'):
-                self._heartbeat_timer = threading.Timer(self._heartbeat_interval, self._heartbeat_loop)
-                self._heartbeat_timer.daemon = True
-                self._heartbeat_timer.start()
+            logger.error(f"Errore nell'attesa della risposta a {command_type}: {e}")
+            return None
 
-    def send_heartbeat(self):
+    def try_autoconnect_last_scanner(self) -> bool:
         """
-        Invia un heartbeat a tutti gli scanner connessi.
-        Importante per verificare che la connessione sia ancora attiva.
+        Tenta di connettersi automaticamente all'ultimo scanner utilizzato.
+        Implementa pattern di autoconnessione intelligente.
+
+        Returns:
+            bool: True se la connessione è stata avviata, False altrimenti
         """
-        if not hasattr(self, '_scanner_connections'):
-            logger.warning("Nessuna connessione scanner disponibile per l'invio del heartbeat")
+        try:
+            # Recupera ultimo ID dalle impostazioni
+            settings = QSettings()
+            last_device_id = settings.value("scanner/last_device_id")
+
+            if not last_device_id:
+                logger.info("Nessun ultimo scanner trovato nelle impostazioni")
+                return False
+
+            # Verifica disponibilità
+            target_scanner = None
+            for scanner in self.scanners:
+                if scanner.device_id == last_device_id:
+                    target_scanner = scanner
+                    break
+
+            if not target_scanner:
+                logger.info(f"L'ultimo scanner utilizzato (ID: {last_device_id}) non è disponibile")
+                return False
+
+            # Tenta connessione automatica
+            logger.info(f"Tentativo di connessione automatica a {target_scanner.name}")
+
+            # Prima seleziona
+            self.select_scanner(target_scanner.device_id)
+
+            # Poi connetti
+            success = self.connect_to_scanner(target_scanner.device_id)
+
+            if success:
+                logger.info(f"Connessione automatica a {target_scanner.name} riuscita")
+            else:
+                logger.warning(f"Connessione automatica a {target_scanner.name} fallita")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"Errore nella connessione automatica: {e}")
+            return False
+
+    @Slot(Scanner)
+    def _on_scanner_discovered(self, scanner: Scanner):
+        """
+        Gestisce l'evento di scoperta di un nuovo scanner.
+
+        Args:
+            scanner: Oggetto Scanner scoperto
+        """
+        logger.info(f"Scanner scoperto: {scanner.name} ({scanner.device_id})")
+        self.scanners_changed.emit()
+
+    @Slot(Scanner)
+    def _on_scanner_lost(self, scanner: Scanner):
+        """
+        Gestisce l'evento di perdita di un scanner dalla rete.
+
+        Args:
+            scanner: Oggetto Scanner perso
+        """
+        logger.info(f"Scanner perso: {scanner.name} ({scanner.device_id})")
+
+        # Se lo scanner perso era quello selezionato, deselezionalo
+        if self._selected_scanner and self._selected_scanner.device_id == scanner.device_id:
+            self._selected_scanner = None
+
+        # Pulisci cache
+        device_id = scanner.device_id
+        if device_id in self._connection_status_cache:
+            del self._connection_status_cache[device_id]
+
+        if device_id in self._last_status_check:
+            del self._last_status_check[device_id]
+
+        self.scanners_changed.emit()
+
+    def _cleanup_cache(self):
+        """
+        Pulisce periodicamente le cache per evitare memory leak
+        e obsolescenza dei dati.
+        """
+        # Pulisci cache connessione per scanner non più presenti
+        current_scanners = set(s.device_id for s in self.scanners)
+
+        # Rimuovi riferimenti a scanner non più disponibili
+        for device_id in list(self._connection_status_cache.keys()):
+            if device_id not in current_scanners:
+                del self._connection_status_cache[device_id]
+
+        for device_id in list(self._last_status_check.keys()):
+            if device_id not in current_scanners:
+                del self._last_status_check[device_id]
+
+        for device_id in list(self._consecutive_missed_heartbeats.keys()):
+            if device_id not in current_scanners:
+                del self._consecutive_missed_heartbeats[device_id]
+
+        for device_id in list(self._last_heartbeat_responses.keys()):
+            if device_id not in current_scanners:
+                del self._last_heartbeat_responses[device_id]
+
+    def synchronize_scanner_states(self):
+        """
+        Sincronizza lo stato degli scanner tra i vari componenti
+        dell'applicazione. Risolve inconsistenze di stato verificando
+        la connettività effettiva.
+        """
+        # Ottieni tutti gli scanner
+        scanners = self.scanner_manager.scanners
+
+        for scanner in scanners:
+            try:
+                device_id = scanner.device_id
+
+                # Limita verifiche troppo frequenti (max 1 ogni 2s per scanner)
+                current_time = time.time()
+                if device_id in self._last_status_check:
+                    if current_time - self._last_status_check[device_id] < 2.0:
+                        continue
+
+                # Verifica effettiva (forza refresh della cache)
+                self._last_status_check[device_id] = 0  # Reset timestamp per forzare check
+                is_connected = self.is_connected(device_id)
+
+                # Stato già aggiornato dal metodo is_connected
+                logger.debug(f"Stato sincronizzato per {scanner.name}: {'connesso' if is_connected else 'disconnesso'}")
+
+            except Exception as e:
+                logger.error(f"Errore nella sincronizzazione dello stato di {scanner.name}: {e}")
+
+    def get_stream_receiver(self):
+        """
+        Restituisce il receiver di stream se disponibile.
+        Questo metodo localizza il componente StreamReceiver nell'applicazione
+        per consentire il routing diretto dei frame tra componenti.
+
+        Returns:
+            StreamReceiver: Istanza o None se non disponibile
+        """
+        # Se abbiamo già trovato l'istanza, usiamo quella
+        if self._stream_receiver_instance is not None:
+            return self._stream_receiver_instance
+
+        # Cerca in MainWindow
+        app = QApplication.instance()
+        if app:
+            for widget in app.topLevelWidgets():
+                if isinstance(widget, QMainWindow):
+                    # Cerca direttamente in MainWindow
+                    if hasattr(widget, 'stream_receiver') and widget.stream_receiver:
+                        self._stream_receiver_instance = widget.stream_receiver
+                        return self._stream_receiver_instance
+
+                    # Cerca in streaming_widget
+                    if hasattr(widget, 'streaming_widget') and widget.streaming_widget:
+                        if hasattr(widget.streaming_widget, 'stream_receiver'):
+                            self._stream_receiver_instance = widget.streaming_widget.stream_receiver
+                            return self._stream_receiver_instance
+
+        return None
+
+    def _try_reconnect(self, device_id: str):
+        """
+        Tenta di riconnettersi a uno scanner con backoff esponenziale.
+
+        Args:
+            device_id: ID del dispositivo
+        """
+        scanner = self.scanner_manager.get_scanner(device_id)
+        if not scanner:
+            logger.warning(f"Impossibile riconnettersi: scanner {device_id} non trovato")
             return
 
-        # Ottieni l'IP locale per eventuale configurazione NAT/firewall
-        import socket
-        local_ip = None
+        # Verifica attuale stato
+        is_already_connected = self.is_connected(device_id)
+        if is_already_connected:
+            logger.info(f"Riconnessione non necessaria per {scanner.name}, già connesso")
+            return
+
+        logger.info(f"Tentativo di riconnessione a {scanner.name}...")
+
+        # Reset stato per connessione pulita
+        scanner.status = ScannerStatus.DISCONNECTED
+
+        # Assicurati che eventuali connessioni zombie siano chiuse
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
+            self.connection_manager.disconnect(device_id)
         except:
             pass
 
-        # Timestamp preciso per misurazione latenza
-        timestamp = time.time()
+        # Breve attesa
+        time.sleep(0.5)
 
-        # Invia heartbeat a tutti gli scanner connessi
-        for device_id, connection in self._scanner_connections.items():
-            try:
-                # Verifica se la connessione è attiva
-                if not self.is_connected(device_id):
-                    logger.debug(f"Scanner {device_id} non connesso, salto heartbeat")
-                    continue
+        # Tenta connessione
+        success = self.connect_to_scanner(device_id)
 
-                # Prepara il payload
-                payload = {
-                    "timestamp": timestamp,
-                    "client_ip": local_ip
-                }
+        if success:
+            logger.info(f"Riconnessione a {scanner.name} riuscita")
+        else:
+            logger.warning(f"Riconnessione a {scanner.name} fallita")
 
-                # Invia il comando PING con timeout ridotto
-                success = self.send_command(
-                    device_id,
-                    "PING",
-                    payload,
-                    timeout=1.0  # Timeout ridotto per heartbeat
-                )
+            # Programma un nuovo tentativo con attesa più lunga (backoff)
+            retry_count = getattr(self, '_reconnect_attempts', {}).get(device_id, 0) + 1
 
-                # Aggiorna lo stato basato sulla risposta
-                if success:
-                    self._last_heartbeat_responses[device_id] = timestamp
-                    self._consecutive_missed_heartbeats[device_id] = 0
-                    logger.debug(f"Heartbeat inviato con successo a {device_id}")
-                else:
-                    missed = self._consecutive_missed_heartbeats.get(device_id, 0) + 1
-                    self._consecutive_missed_heartbeats[device_id] = missed
-                    logger.warning(f"Heartbeat fallito per {device_id} (consecutivi: {missed})")
+            # Memorizza conteggio tentativi
+            if not hasattr(self, '_reconnect_attempts'):
+                self._reconnect_attempts = {}
 
-            except Exception as e:
-                logger.error(f"Errore nell'invio del heartbeat a {device_id}: {e}")
-                # Incrementa contatore fallimenti
-                missed = self._consecutive_missed_heartbeats.get(device_id, 0) + 1
-                self._consecutive_missed_heartbeats[device_id] = missed
+            self._reconnect_attempts[device_id] = retry_count
 
-    def _check_unresponsive_scanners(self):
+            # Calcola tempo attesa con backoff esponenziale (max 30s)
+            wait_time = min(5000 * (2 ** (retry_count - 1)), 30000)
+
+            logger.info(f"Programmato tentativo {retry_count} fra {wait_time / 1000}s")
+            QTimer.singleShot(wait_time, lambda: self._try_reconnect(device_id))
+
+    def attempt_reconnection(self, device_id: str) -> bool:
         """
-        Verifica gli scanner che non rispondono e tenta il recupero.
-        Strategia: dopo 3 heartbeat mancati consecutivi, tenta la riconnessione.
-        """
-        current_time = time.time()
-        reconnection_threshold = 3  # Tentativi mancati prima di riconnessione
-
-        for device_id, missed in list(self._consecutive_missed_heartbeats.items()):
-            # Verifica se abbiamo superato la soglia
-            if missed >= reconnection_threshold:
-                logger.warning(
-                    f"Scanner {device_id} non risponde da {missed} heartbeat consecutivi, tentativo di riconnessione")
-
-                # Tenta la riconnessione
-                self.attempt_reconnection(device_id)
-
-                # Reset contatore per dare il tempo di riconnettersi
-                self._consecutive_missed_heartbeats[device_id] = 0
-
-    def attempt_reconnection(self, device_id):
-        """
-        Tenta di riconnettersi a uno scanner specifico.
-        Implementa una strategia di riconnessione robusta con backoff esponenziale.
+        Tenta di riconnettersi a uno scanner specifico con strategia
+        di retry avanzata.
 
         Args:
             device_id: ID del dispositivo scanner da riconnettere
@@ -432,7 +815,7 @@ class ScannerController(QObject):
         Returns:
             bool: True se la riconnessione ha avuto successo, False altrimenti
         """
-        # Verifica se lo scanner è registrato
+        # Trova lo scanner
         scanner = None
         for s in self.scanners:
             if s.device_id == device_id:
@@ -440,22 +823,20 @@ class ScannerController(QObject):
                 break
 
         if not scanner:
-            logger.error(f"Scanner {device_id} non trovato nel registro, impossibile riconnettere")
+            logger.error(f"Scanner {device_id} non trovato, impossibile riconnettere")
             return False
 
         logger.info(f"Tentativo di riconnessione a {scanner.name} ({device_id})")
 
-        # Prima disconnetti per pulire eventuali connessioni zombie
+        # Prima disconnetti
         if self.is_connected(device_id):
             try:
-                # Disconnessione soft per evitare di bloccare risorse
                 self.disconnect_from_scanner(device_id, force_cleanup=True)
-                time.sleep(0.5)  # Pausa breve per permettere la pulizia completa
+                time.sleep(0.5)  # Attesa per pulizia
             except Exception as e:
                 logger.warning(f"Errore nella disconnessione preparatoria: {e}")
-                # Continua comunque con la riconnessione
 
-        # Strategia con backoff esponenziale
+        # Strategia con backoff
         max_attempts = 3
         base_delay = 0.5  # 500ms iniziali
 
@@ -464,21 +845,19 @@ class ScannerController(QObject):
                 # Calcola ritardo crescente
                 delay = base_delay * (2 ** attempt)
 
-                # Log del tentativo
-                logger.info(
-                    f"Tentativo {attempt + 1}/{max_attempts} di riconnessione a {scanner.name} dopo {delay:.1f}s")
+                logger.info(f"Tentativo {attempt + 1}/{max_attempts} dopo {delay:.1f}s")
 
-                # Attendi prima del tentativo
+                # Attesa
                 if attempt > 0:
                     time.sleep(delay)
 
-                # Tenta la connessione
+                # Tenta connessione
                 success = self.connect_to_scanner(device_id)
 
                 if success:
                     logger.info(f"Riconnessione a {scanner.name} riuscita al tentativo {attempt + 1}")
 
-                    # Verifica la connessione con un ping
+                    # Verifica con ping
                     ping_success = self.send_command(
                         device_id,
                         "PING",
@@ -488,288 +867,34 @@ class ScannerController(QObject):
 
                     if ping_success:
                         logger.info(f"Connessione a {scanner.name} verificata con ping")
-                        # Reset contatore heartbeat
+                        # Reset contatore
                         self._consecutive_missed_heartbeats[device_id] = 0
                         return True
                     else:
                         logger.warning(f"Riconnessione a {scanner.name} riuscita ma ping fallito")
-                        # Continua con il prossimo tentativo
                 else:
-                    logger.warning(f"Tentativo {attempt + 1} di riconnessione a {scanner.name} fallito")
+                    logger.warning(f"Tentativo {attempt + 1} fallito")
 
             except Exception as e:
-                logger.error(f"Errore nel tentativo {attempt + 1} di riconnessione a {scanner.name}: {e}")
+                logger.error(f"Errore nel tentativo {attempt + 1}: {e}")
 
-        # Se arriviamo qui, tutti i tentativi sono falliti
+        # Tutti i tentativi falliti
         logger.error(f"Riconnessione a {scanner.name} fallita dopo {max_attempts} tentativi")
 
-        # Aggiorna lo stato dello scanner
+        # Aggiorna stato
         scanner.status = ScannerStatus.DISCONNECTED
         scanner.error_message = "Riconnessione fallita dopo multipli tentativi"
 
         return False
-
-    def synchronize_scanner_states(self):
-        """
-        Sincronizza lo stato degli scanner tra i vari componenti dell'applicazione.
-        Risolve inconsistenze di stato verificando la connettività effettiva.
-        """
-        # Ottieni tutti gli scanner attualmente gestiti
-        scanners = self.scanner_manager.scanners
-
-        for scanner in scanners:
-            try:
-                # Verifica la connettività effettiva con il server
-                connection_active = self._connection_manager.is_connected(scanner.device_id)
-
-                # Lo stato memorizzato nello scanner
-                current_state = scanner.status
-
-                # Risolvi le inconsistenze
-                if connection_active and current_state == ScannerStatus.DISCONNECTED:
-                    # La connessione è attiva ma lo scanner risulta disconnesso
-                    logger.info(f"Correzione stato scanner {scanner.name}: da DISCONNECTED a CONNECTED")
-                    scanner.status = ScannerStatus.CONNECTED
-                    self.scanner_connected.emit(scanner)
-
-                elif not connection_active and current_state in (ScannerStatus.CONNECTED, ScannerStatus.CONNECTING):
-                    # La connessione non è attiva ma lo scanner risulta connesso
-                    logger.info(f"Correzione stato scanner {scanner.name}: da {current_state.name} a DISCONNECTED")
-                    scanner.status = ScannerStatus.DISCONNECTED
-                    self.scanner_disconnected.emit(scanner)
-
-                # Non modifichiamo lo stato STREAMING a meno che non ci sia una disconnessione evidente
-                elif not connection_active and current_state == ScannerStatus.STREAMING:
-                    # Verifica ulteriore con un ping esplicito
-                    ping_result = self.send_command(scanner.device_id, "PING", {"timestamp": time.time()})
-                    if not ping_result:
-                        logger.info(f"Correzione stato scanner {scanner.name}: da STREAMING a DISCONNECTED")
-                        scanner.status = ScannerStatus.DISCONNECTED
-                        self.scanner_disconnected.emit(scanner)
-
-            except Exception as e:
-                logger.error(f"Errore nella sincronizzazione dello stato di {scanner.name}: {e}")
-
-    def wait_for_response(self, device_id: str, command_type: str, timeout: float = 30.0) -> Optional[Dict[str, Any]]:
-        """
-        Attende la risposta a un comando inviato.
-        Versione migliorata che non blocca l'interfaccia utente e gestisce
-        correttamente gli errori e i timeout.
-
-        Args:
-            device_id: ID univoco dello scanner
-            command_type: Tipo di comando per cui si attende la risposta
-            timeout: Timeout in secondi (default: 30 secondi)
-
-        Returns:
-            Dizionario con la risposta o None se non ricevuta entro il timeout
-        """
-        if not self.is_connected(device_id):
-            logger.error(f"Impossibile attendere risposta: scanner {device_id} non connesso")
-            return None
-
-        try:
-            # Per i comandi di scansione, usiamo un timeout più corto
-            # MODIFICA: Ridotti i timeout per evitare blocchi UI
-            if command_type.startswith("START_SCAN") or command_type.startswith("STOP_SCAN"):
-                effective_timeout = 20.0  # Ridotto da 60s a 20s
-            elif command_type.startswith("GET_SCAN") or command_type == "CHECK_SCAN_CAPABILITY":
-                effective_timeout = 15.0  # Ridotto da 60s a 15s
-            else:
-                effective_timeout = min(timeout, 10.0)  # Limitato a massimo 10s
-
-            logger.info(f"Usando timeout di {effective_timeout}s per comando {command_type}")
-
-            # Attendi che la risposta sia disponibile
-            start_time = time.time()
-            check_interval = 0.1  # Controlla più frequentemente (ogni 100ms)
-            while (time.time() - start_time) < effective_timeout:
-                # IMPORTANTE: Permetti all'interfaccia grafica di processare eventi durante l'attesa
-                QApplication.processEvents()
-
-                if self._connection_manager.has_response(device_id, command_type):
-                    response = self._connection_manager.get_response(device_id, command_type)
-                    logger.info(f"Risposta ricevuta per comando {command_type}")
-                    return response
-
-                # Aggiungiamo un tentativo di ping esplicito ogni 3 secondi
-                elapsed = time.time() - start_time
-                if elapsed > 3 and elapsed % 3 < check_interval:
-                    try:
-                        self.send_command(device_id, "PING", {"timestamp": time.time(), "waiting_for": command_type})
-                        logger.debug(f"Inviato ping durante attesa risposta a {command_type}")
-                    except Exception as ping_err:
-                        logger.debug(f"Errore ping durante attesa: {ping_err}")
-
-                time.sleep(check_interval)
-
-            logger.warning(f"Timeout nell'attesa della risposta a {command_type} dopo {effective_timeout}s")
-
-            # Verifica se lo scanner è ancora connesso
-            is_still_connected = self.is_connected(device_id)
-            logger.info(f"Controllo connessione dopo timeout: connesso={is_still_connected}")
-
-            # Prova un'ultima richiesta diretta
-            if is_still_connected:
-                try:
-                    if command_type == "START_SCAN":
-                        # Per START_SCAN, verifica lo stato della scansione
-                        status_result = self.send_command(device_id, "GET_SCAN_STATUS")
-                        if status_result:
-                            logger.info("Richiesto stato scansione dopo timeout di START_SCAN")
-                    elif command_type == "GET_SCAN_STATUS":
-                        # Per GET_SCAN_STATUS, aspetta un po' e riprova
-                        time.sleep(0.5)  # Attesa più breve
-                        status_result = self.send_command(device_id, "GET_SCAN_STATUS")
-                        if status_result:
-                            logger.info("Ritentata richiesta stato scansione dopo timeout")
-                except Exception as retry_err:
-                    logger.debug(f"Errore nel tentativo aggiuntivo: {retry_err}")
-
-            return None
-        except Exception as e:
-            logger.error(f"Errore nell'attesa della risposta a {command_type}: {e}")
-            return None
-
-    def try_autoconnect_last_scanner(self) -> bool:
-        """
-        Tenta di connettersi automaticamente all'ultimo scanner utilizzato.
-
-        Returns:
-            True se la connessione è stata avviata, False altrimenti
-        """
-        try:
-            # Cerca nell'elenco degli scanner recenti
-            settings = QSettings()
-            last_device_id = settings.value("scanner/last_device_id")
-
-            if not last_device_id:
-                logger.info("Nessun ultimo scanner trovato nelle impostazioni")
-                return False
-
-            # Verifica se lo scanner è disponibile
-            for scanner in self.scanners:
-                if scanner.device_id == last_device_id:
-                    logger.info(f"Tentativo di connessione automatica a {scanner.name}")
-                    return self.connect_to_scanner(scanner.device_id)
-
-            logger.info(f"L'ultimo scanner utilizzato (ID: {last_device_id}) non è disponibile")
-            return False
-        except Exception as e:
-            logger.error(f"Errore nella connessione automatica: {e}")
-            return False
-
-    @Slot(Scanner)
-    def _on_scanner_discovered(self, scanner: Scanner):
-        """Gestisce l'evento di scoperta di un nuovo scanner."""
-        logger.info(f"Scanner scoperto: {scanner.name} ({scanner.device_id})")
-        self.scanners_changed.emit()
-
-    @Slot(Scanner)
-    def _on_scanner_lost(self, scanner: Scanner):
-        """Gestisce l'evento di perdita di un scanner."""
-        logger.info(f"Scanner perso: {scanner.name} ({scanner.device_id})")
-
-        # Se lo scanner perso era quello selezionato, deselezionalo
-        if self._selected_scanner and self._selected_scanner.device_id == scanner.device_id:
-            self._selected_scanner = None
-
-        self.scanners_changed.emit()
-
-    @Slot(str)
-    def _on_connection_established(self, device_id: str):
-        """Gestisce l'evento di connessione stabilita."""
-        scanner = self.scanner_manager.get_scanner(device_id)
-        if scanner:
-            scanner.status = ScannerStatus.CONNECTED
-            logger.info(f"Connessione stabilita con {scanner.name}")
-            self.scanner_connected.emit(scanner)
-
-            # Salva l'ultimo scanner connesso
-            try:
-                from PySide6.QtCore import QSettings
-                settings = QSettings()
-                settings.setValue("scanner/last_device_id", device_id)
-            except Exception as e:
-                logger.error(f"Errore nel salvataggio dell'ultimo scanner: {e}")
-    def get_stream_receiver(self):
-        """
-        Restituisce il receiver di stream se disponibile.
-        Questo metodo può essere usato da componenti che hanno bisogno di accedere
-        direttamente al receiver di stream.
-
-        Returns:
-            StreamReceiver o None se non disponibile
-        """
-        # Cerca in MainWindow
-        app = QApplication.instance()
-        if app:
-            for widget in app.topLevelWidgets():
-                if isinstance(widget, QMainWindow):
-                    if hasattr(widget, 'stream_receiver'):
-                        return widget.stream_receiver
-
-        return None
-    @Slot(str, str)
-    def _on_connection_failed(self, device_id: str, error: str):
-        """Gestisce l'evento di fallimento della connessione."""
-        scanner = self.scanner_manager.get_scanner(device_id)
-        if scanner:
-            scanner.status = ScannerStatus.ERROR
-            scanner.error_message = error
-            logger.error(f"Connessione fallita con {scanner.name}: {error}")
-            self.connection_error.emit(device_id, error)
-
-    @Slot(str)
-    def _on_connection_closed(self, device_id: str):
-        """Gestisce l'evento di chiusura della connessione con riconnessione automatica."""
-        scanner = self.scanner_manager.get_scanner(device_id)
-        if scanner:
-            old_status = scanner.status
-            scanner.status = ScannerStatus.DISCONNECTED
-            logger.info(f"Connessione chiusa con {scanner.name}")
-
-            # Notifica la disconnessione
-            self.scanner_disconnected.emit(scanner)
-
-            # Se lo scanner era connesso o in streaming, prova a riconnettersi automaticamente
-            if old_status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING):
-                # Verifica se lo scanner è ancora presente nella lista
-                if device_id in [s.device_id for s in self.scanner_manager.scanners]:
-                    logger.info(f"Tentativo di riconnessione automatica a {scanner.name}")
-
-                    # Attendi un momento prima di riconnetterti
-                    QTimer.singleShot(2000, lambda: self._try_reconnect(device_id))
-
-    def _try_reconnect(self, device_id: str):
-        """Tenta di riconnettersi a uno scanner."""
-        scanner = self.scanner_manager.get_scanner(device_id)
-        if not scanner:
-            logger.warning(f"Impossibile riconnettersi: scanner {device_id} non trovato")
-            return
-
-        logger.info(f"Riconnessione a {scanner.name}...")
-
-        # Tenta la connessione
-        success = self.connect_to_scanner(device_id)
-
-        if success:
-            logger.info(f"Riconnessione a {scanner.name} riuscita")
-        else:
-            logger.warning(f"Riconnessione a {scanner.name} fallita")
-
-            # Riprova dopo un intervallo più lungo
-            QTimer.singleShot(5000, lambda: self._try_reconnect(device_id))
 
     def _load_preferences(self):
         """
         Carica le preferenze dell'utente, come l'ultimo scanner utilizzato.
         """
         try:
-            from PySide6.QtCore import QSettings
             settings = QSettings()
 
-            # Carica l'ID dell'ultimo scanner utilizzato
+            # Carica l'ID dell'ultimo scanner
             last_scanner_id = settings.value("scanner/last_device_id", "")
             self._last_connected_scanner_id = last_scanner_id if last_scanner_id else None
 
