@@ -1736,18 +1736,12 @@ class UnLookServer:
                     # 3. Compressione JPEG - gestione esplicita per grayscale e RGB
                     try:
                         if is_grayscale:
-                            # Verifica esplicita dimensioni e tipo frame grayscale
-                            if len(frame.shape) != 2:
-                                logger.warning(
-                                    f"Frame grayscale con dimensioni inattese: {frame.shape}, effettuo reshape")
-                                if len(frame.shape) == 3 and frame.shape[2] == 3:
-                                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-
-                            # Usa compressione simplejpeg ottimizzata per grayscale
-                            jpeg_data = simplejpeg.encode_jpeg(frame, quality=quality, colorspace='GRAY')
-                            frame_data = jpeg_data
+                            # CORREZIONE: Usa direttamente OpenCV per compressione JPEG grayscale
+                            # invece di simplejpeg che ha problemi con le immagini grayscale
+                            _, jpeg_data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+                            frame_data = jpeg_data.tobytes()
                         else:
-                            # RGB
+                            # RGB - mantieni il codice originale per RGB
                             # Verifica dimensioni RGB
                             if len(frame.shape) != 3 or frame.shape[2] != 3:
                                 logger.warning(
@@ -1763,7 +1757,6 @@ class UnLookServer:
                         logger.warning(f"Errore nella compressione JPEG: {e}, fallback a OpenCV")
 
                         # Fallback a OpenCV per codifica JPEG
-                        buffer = BytesIO()
                         if is_grayscale:
                             _, jpeg_data = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
                         else:

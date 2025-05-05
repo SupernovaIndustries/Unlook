@@ -227,94 +227,94 @@ class ConnectionManager:
 
             connection = self._connections[device_id]
 
-        # Verifica stato socket
-        with self._lock:
-            # Controlla se il socket è in uno stato valido per l'invio
+            # Verifica stato socket
             if connection.socket is None:
                 logger.warning(f"Socket non inizializzato per {device_id}, tentativo di reset...")
-                self._reset_socket_state(device_id)
+                reset_success = self._reset_socket_state(device_id)
+                if not reset_success:
+                    logger.error(f"Reset socket fallito per {device_id}")
+                    return False
                 connection = self._connections[device_id]
 
-        # Prepara il messaggio
-        message = {
-            "command": command,
-            "type": command,  # Per compatibilità col server
-            "request_id": str(uuid.uuid4())
-        }
+            # Prepara il messaggio
+            message = {
+                "command": command,
+                "type": command,  # Per compatibilità col server
+                "request_id": str(uuid.uuid4())
+            }
 
-        # Aggiungi dati se forniti
-        if data:
-            data_copy = data.copy() if data else {}
-            # Rimuovi campi che potrebbero causare conflitti
-            data_copy.pop("command", None)
-            data_copy.pop("type", None)
-            message.update(data_copy)
+            # Aggiungi dati se forniti
+            if data:
+                data_copy = data.copy() if data else {}
+                # Rimuovi campi che potrebbero causare conflitti
+                data_copy.pop("command", None)
+                data_copy.pop("type", None)
+                message.update(data_copy)
 
-        # Timeout effettivo
-        effective_timeout = timeout * 1000 if timeout else self._command_timeout * 1000
+            # Timeout effettivo
+            effective_timeout = timeout * 1000 if timeout else self._command_timeout * 1000
 
-        try:
-            # Acquisisci lock per questa operazione
-            with self._lock:
-                if not connection.is_connected:
-                    logger.error(f"Connessione persa durante preparazione invio a {device_id}")
-                    return False
+            # Memorizza ID richiesta per tracciare la risposta
+            request_id = message["request_id"]
+            connection.pending_responses[request_id] = {
+                "command": command,
+                "timestamp": time.time(),
+                "response": None
+            }
 
-                # Memorizza ID richiesta per tracciare la risposta
-                request_id = message["request_id"]
-                connection.pending_responses[request_id] = {
-                    "command": command,
-                    "timestamp": time.time(),
-                    "response": None
-                }
-
-                # Imposta timeout e invia
+            # Blocco critico: acquisizione del lock SOLO per l'invio del messaggio
+            # per evitare interferenze con altri thread
+            try:
+                # Imposta timeout e invia sotto lock
                 with self._set_socket_timeout(connection.socket, int(effective_timeout)):
                     connection.socket.send_json(message)
 
                 # Aggiorna timestamp attività
                 connection.last_activity = time.time()
 
-            # IMPORTANTE: per comandi asincroni ritorna True qui senza attendere risposta
-            if data and data.get("async", False):
-                return True
+                # IMPORTANTE: per comandi asincroni ritorna True qui senza attendere risposta
+                if data and data.get("async", False):
+                    return True
 
-            # Per tutti gli altri comandi, è CRITICO completare il ciclo REQ/REP
-            # attendendo SEMPRE la risposta prima di ritornare
-            response = self.receive_response(device_id, timeout=timeout or self._response_timeout)
-
-            if not response:
-                logger.warning(f"Nessuna risposta ricevuta per {command}, possibile violazione pattern REQ/REP")
-                # Reset socket immediato per prevenire errori futuri
-                self._reset_socket_state(device_id)
-                return False
-
-            return True
-
-        except zmq.ZMQError as e:
-            # Gestione specifica degli errori ZMQ
-            if "Operation cannot be accomplished in current state" in str(e):
-                logger.warning(f"Errore stato ZMQ inviando '{command}' a {device_id}, ripristino socket...")
-                reset_success = self._reset_socket_state(device_id)
-                if reset_success and command not in ["PING", "GET_STATUS"]:
-                    logger.info(f"Riprovando invio comando {command} dopo reset socket")
-                    return self.send_message(device_id, command, data, timeout)
-                return False
-            elif e.errno == zmq.EAGAIN:
-                logger.error(f"Timeout inviando messaggio '{command}' a {device_id}")
-                return False
-            else:
-                logger.error(f"Errore ZMQ inviando messaggio '{command}' a {device_id}: {e}")
+                # Rilascia il lock prima di attendere la risposta
+            except zmq.ZMQError as e:
+                # Gestione specifica degli errori ZMQ
+                if "Operation cannot be accomplished in current state" in str(e):
+                    logger.warning(f"Errore stato ZMQ inviando '{command}' a {device_id}, ripristino socket...")
+                    # Ripristina il socket
+                    reset_success = self._reset_socket_state(device_id)
+                    if reset_success and command not in ["PING", "GET_STATUS"]:
+                        logger.info(f"Riprovando invio comando {command} dopo reset socket")
+                        # Ricorsione: invia nuovamente il comando dopo il reset
+                        return self.send_message(device_id, command, data, timeout)
+                    return False
+                elif e.errno == zmq.EAGAIN:
+                    logger.error(f"Timeout inviando messaggio '{command}' a {device_id}")
+                    return False
+                else:
+                    logger.error(f"Errore ZMQ inviando messaggio '{command}' a {device_id}: {e}")
+                    with self._lock:
+                        if device_id in self._connections:
+                            self._connections[device_id].is_connected = False
+                    return False
+            except Exception as e:
+                logger.error(f"Errore inviando messaggio '{command}' a {device_id}: {e}")
                 with self._lock:
                     if device_id in self._connections:
                         self._connections[device_id].is_connected = False
                 return False
-        except Exception as e:
-            logger.error(f"Errore inviando messaggio '{command}' a {device_id}: {e}")
-            with self._lock:
-                if device_id in self._connections:
-                    self._connections[device_id].is_connected = False
+
+        # Per tutti gli altri comandi, è CRITICO completare il ciclo REQ/REP
+        # attendendo SEMPRE la risposta prima di ritornare
+        response = self.receive_response(device_id, timeout=timeout or self._response_timeout)
+
+        if not response:
+            logger.warning(f"Nessuna risposta ricevuta per {command}, possibile violazione pattern REQ/REP")
+            # Reset socket immediato per prevenire errori futuri
+            self._reset_socket_state(device_id)
             return False
+
+        return True
 
     def _reset_socket_state(self, device_id: str) -> bool:
         """
