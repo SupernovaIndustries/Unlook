@@ -66,15 +66,17 @@ class ScannerController(QObject):
         logger.info("ScannerController inizializzato")
 
         # Metodo getter per ottenere l'istanza di ConnectionManager
-        def _get_connection_manager(self):
-            """
-            Ottiene l'istanza singleton di ConnectionManager in modo thread-safe.
+    def _connection_manager(self):
+        """
+        Restituisce l'istanza del connection manager, inizializzandola se necessario.
+        Implementa il pattern Lazy Initialization.
+        """
+        if not hasattr(self, '_connection_manager'):
+            # Crea una nuova istanza usando la classe memorizzata in _connection_manager_class
+            from client.network.connection_manager import ConnectionManager
+            self._connection_manager = ConnectionManager()
 
-            Returns:
-                Istanza di ConnectionManager
-            """
-            # Usa il pattern singleton per ottenere l'istanza
-            return self._connection_manager_class()
+        return self._connection_manager
 
     def _send_keepalive(self):
         """Invia un ping per mantenere attiva la connessione."""
@@ -87,16 +89,16 @@ class ScannerController(QObject):
 
     def start_discovery(self):
         """Avvia la scoperta degli scanner nella rete locale."""
-        self._scanner_manager.start_discovery()
+        self.scanner_manager.start_discovery()
 
     def stop_discovery(self):
         """Ferma la scoperta degli scanner."""
-        self._scanner_manager.stop_discovery()
+        self.scanner_manager.stop_discovery()
 
     @Property(list, notify=scanners_changed)
     def scanners(self) -> List[Scanner]:
         """Restituisce la lista degli scanner disponibili."""
-        return self._scanner_manager.scanners
+        return self.scanner_manager.scanners
 
     @Slot(str)
     def connect_to_scanner(self, device_id: str) -> bool:
@@ -109,7 +111,7 @@ class ScannerController(QObject):
         Returns:
             True se la connessione è stata avviata, False altrimenti
         """
-        scanner = self._scanner_manager.get_scanner(device_id)
+        scanner = self.scanner_manager.get_scanner(device_id)
         if not scanner:
             logger.error(f"Scanner con ID {device_id} non trovato")
             return False
@@ -136,7 +138,7 @@ class ScannerController(QObject):
             True se la disconnessione è stata avviata, False altrimenti
         """
         try:
-            scanner = self._scanner_manager.get_scanner(device_id)
+            scanner = self.scanner_manager.get_scanner(device_id)
             if not scanner:
                 logger.error(f"Scanner con ID {device_id} non trovato")
                 return False
@@ -176,7 +178,7 @@ class ScannerController(QObject):
         Returns:
             True se la selezione è riuscita, False altrimenti
         """
-        scanner = self._scanner_manager.get_scanner(device_id)
+        scanner = self.scanner_manager.get_scanner(device_id)
         if not scanner:
             logger.error(f"Scanner con ID {device_id} non trovato")
             return False
@@ -202,7 +204,7 @@ class ScannerController(QObject):
         Returns:
             True se il dispositivo è connesso, False altrimenti
         """
-        scanner = self._scanner_manager.get_scanner(device_id)
+        scanner = self.scanner_manager.get_scanner(device_id)
         if not scanner:
             return False
 
@@ -254,7 +256,7 @@ class ScannerController(QObject):
         """
         try:
             # Ottieni ConnectionManager tramite il getter
-            connection_manager = self._get_connection_manager()
+            connection_manager = self._connection_manager()
 
             # Verifica che il device_id sia valido
             if not device_id:
@@ -513,7 +515,7 @@ class ScannerController(QObject):
         Risolve inconsistenze di stato verificando la connettività effettiva.
         """
         # Ottieni tutti gli scanner attualmente gestiti
-        scanners = self._scanner_manager.scanners
+        scanners = self.scanner_manager.scanners
 
         for scanner in scanners:
             try:
@@ -677,7 +679,7 @@ class ScannerController(QObject):
     @Slot(str)
     def _on_connection_established(self, device_id: str):
         """Gestisce l'evento di connessione stabilita."""
-        scanner = self._scanner_manager.get_scanner(device_id)
+        scanner = self.scanner_manager.get_scanner(device_id)
         if scanner:
             scanner.status = ScannerStatus.CONNECTED
             logger.info(f"Connessione stabilita con {scanner.name}")
@@ -711,7 +713,7 @@ class ScannerController(QObject):
     @Slot(str, str)
     def _on_connection_failed(self, device_id: str, error: str):
         """Gestisce l'evento di fallimento della connessione."""
-        scanner = self._scanner_manager.get_scanner(device_id)
+        scanner = self.scanner_manager.get_scanner(device_id)
         if scanner:
             scanner.status = ScannerStatus.ERROR
             scanner.error_message = error
@@ -721,7 +723,7 @@ class ScannerController(QObject):
     @Slot(str)
     def _on_connection_closed(self, device_id: str):
         """Gestisce l'evento di chiusura della connessione con riconnessione automatica."""
-        scanner = self._scanner_manager.get_scanner(device_id)
+        scanner = self.scanner_manager.get_scanner(device_id)
         if scanner:
             old_status = scanner.status
             scanner.status = ScannerStatus.DISCONNECTED
@@ -733,7 +735,7 @@ class ScannerController(QObject):
             # Se lo scanner era connesso o in streaming, prova a riconnettersi automaticamente
             if old_status in (ScannerStatus.CONNECTED, ScannerStatus.STREAMING):
                 # Verifica se lo scanner è ancora presente nella lista
-                if device_id in [s.device_id for s in self._scanner_manager.scanners]:
+                if device_id in [s.device_id for s in self.scanner_manager.scanners]:
                     logger.info(f"Tentativo di riconnessione automatica a {scanner.name}")
 
                     # Attendi un momento prima di riconnetterti
@@ -741,7 +743,7 @@ class ScannerController(QObject):
 
     def _try_reconnect(self, device_id: str):
         """Tenta di riconnettersi a uno scanner."""
-        scanner = self._scanner_manager.get_scanner(device_id)
+        scanner = self.scanner_manager.get_scanner(device_id)
         if not scanner:
             logger.warning(f"Impossibile riconnettersi: scanner {device_id} non trovato")
             return
@@ -758,3 +760,20 @@ class ScannerController(QObject):
 
             # Riprova dopo un intervallo più lungo
             QTimer.singleShot(5000, lambda: self._try_reconnect(device_id))
+
+    def _load_preferences(self):
+        """
+        Carica le preferenze dell'utente, come l'ultimo scanner utilizzato.
+        """
+        try:
+            from PySide6.QtCore import QSettings
+            settings = QSettings()
+
+            # Carica l'ID dell'ultimo scanner utilizzato
+            last_scanner_id = settings.value("scanner/last_device_id", "")
+            self._last_connected_scanner_id = last_scanner_id if last_scanner_id else None
+
+            logger.debug(f"Preferenze caricate: ultimo scanner ID={self._last_connected_scanner_id}")
+        except Exception as e:
+            logger.warning(f"Impossibile caricare le preferenze: {e}")
+            self._last_connected_scanner_id = None
