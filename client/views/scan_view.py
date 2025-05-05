@@ -11,6 +11,7 @@ import logging
 import time
 import os
 import threading
+import socket
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -871,61 +872,30 @@ class ScanView(QWidget):
 
     def _on_frame_received(self, camera_index: int, frame: np.ndarray, timestamp: float):
         """
-        Gestione ottimizzata dei frame ricevuti con controllo latenza.
-        Implementa strategia intelligente di skip frame per bassa latenza.
+        Gestione ottimizzata dei frame ricevuti con tracciamento attività stream.
+        Cruciale per il monitoraggio dello stato dello streaming.
         """
         try:
-            # Aggiorna timestamp ultimo frame per monitoraggio attività
+            # Aggiorna timestamp ultimo frame (fondamentale per monitoraggio attività)
             self._last_frame_time = time.time()
 
-            # Aggiornamento contatori con lock minimo
-            if hasattr(self, '_frame_count_by_camera'):
-                self._frame_count_by_camera[camera_index] = self._frame_count_by_camera.get(camera_index, 0) + 1
+            # Incrementa contatore frame per questa camera
+            if hasattr(self, '_frames_received'):
+                self._frames_received[camera_index] = self._frames_received.get(camera_index, 0) + 1
 
-            # Skip frame se sotto pressione
-            if hasattr(self, '_frame_pressure') and self._frame_pressure:
-                # Skip alternati per ridurre carico
-                if camera_index == 0 and self._frame_count_by_camera.get(camera_index, 0) % 2 == 0:
-                    return
-                # Per camera destra skip più aggressivo
-                if camera_index == 1 and self._frame_count_by_camera.get(camera_index, 0) % 3 != 0:
-                    return
-
-            # Calcola latenza
+            # Calcola latenza (utile per diagnostica)
             latency_ms = (time.time() - timestamp) * 1000 if timestamp > 0 else 0
 
-            # Log ottimizzato (solo per eventi significativi)
+            # Log ottimizzato per eventi significativi
             if not hasattr(self, '_first_frame_received'):
                 # Primo frame - inizializza tracking
                 self._first_frame_received = {0: False, 1: False}
-                self._last_log_time = time.time()
                 logger.info(f"Inizializzato tracking frame")
 
             # Log primo frame per camera
-            if not self._first_frame_received.get(camera_index, False):
+            if self._first_frame_received is not None and not self._first_frame_received.get(camera_index, False):
                 self._first_frame_received[camera_index] = True
                 logger.info(f"Primo frame camera {camera_index}: {frame.shape}, latenza={latency_ms:.1f}ms")
-
-            # Log periodico prestazioni
-            now = time.time()
-            if now - getattr(self, '_last_log_time', 0) > 5.0:
-                self._last_log_time = now
-
-                # Calcola FPS
-                elapsed = now - getattr(self, '_last_frame_log_time', now - 5.0)
-                frames_0 = self._frame_count_by_camera.get(0, 0)
-                frames_1 = self._frame_count_by_camera.get(1, 0)
-                fps_0 = frames_0 / elapsed if elapsed > 0 else 0
-                fps_1 = frames_1 / elapsed if elapsed > 0 else 0
-
-                logger.info(f"Prestazioni: {fps_0:.1f}/{fps_1:.1f} FPS, latenza={latency_ms:.1f}ms")
-
-                # Reset contatori
-                self._frame_count_by_camera = {0: 0, 1: 0}
-                self._last_frame_log_time = now
-
-                # Valuta pressione di sistema
-                self._frame_pressure = (fps_0 > 25) and (latency_ms > 50)
 
             # Fast path per aggiornamento preview
             if camera_index == 0:
@@ -935,6 +905,306 @@ class ScanView(QWidget):
 
         except Exception as e:
             logger.error(f"Errore in _on_frame_received: {e}")
+
+    def _setup_stream_receiver(self, scanner):
+        """
+        Configura il receiver di stream per lo scanner connesso con gestione robusta degli errori.
+        Centralizza la responsabilità di inizializzazione dello streaming in ScanView.
+
+        Args:
+            scanner: Scanner connesso
+
+        Returns:
+            bool: True se l'inizializzazione è riuscita, False altrimenti
+        """
+        try:
+            # FASE 1: Pulizia delle risorse esistenti
+            # Se esiste già un receiver attivo, fermalo in modo pulito
+            old_receiver = self._get_existing_stream_receiver()
+            if old_receiver:
+                try:
+                    logger.info("Arresto del precedente stream receiver...")
+                    old_receiver.stop()
+                    time.sleep(0.5)  # Attendi il completamento
+                except Exception as e:
+                    logger.warning(f"Errore nell'arresto del receiver esistente: {e}")
+
+            # FASE 2: Invio del comando di stop prima di inizializzare il nuovo receiver
+            try:
+                # Questo è fondamentale per un corretto ciclo REQ/REP: ferma qualsiasi stream attivo
+                if self.scanner_controller and self.selected_scanner:
+                    self.scanner_controller.send_command(
+                        self.selected_scanner.device_id,
+                        "STOP_STREAM"
+                    )
+                    # Importante: attendi esplicitamente la risposta per completare il ciclo REQ/REP
+                    response = self.scanner_controller.receive_response(self.selected_scanner.device_id)
+                    logger.info(f"Risposta STOP_STREAM: {response}")
+                    time.sleep(0.5)  # Attendi che lo streaming si fermi completamente
+            except Exception as e:
+                logger.warning(f"Errore nell'invio del comando STOP_STREAM: {e}")
+
+            # FASE 3: Inizializzazione del nuovo receiver
+            from client.network.stream_receiver import StreamReceiver
+
+            # Informazioni di connessione
+            host = scanner.ip_address
+            port = scanner.port + 1  # La porta di streaming è quella di comando + 1
+
+            logger.info(f"Inizializzazione stream receiver da {host}:{port}")
+
+            # Crea il receiver con timeout di connessione aumentato
+            receiver = StreamReceiver(host, port)
+
+            # Configura il processor di frame - questo è fondamentale e deve essere fatto qui
+            if hasattr(self, 'scan_processor') and self.scan_processor:
+                receiver.set_frame_processor(self.scan_processor)
+                logger.info("Processore di frame configurato nel stream receiver")
+
+            # Configura altre opzioni
+            if hasattr(receiver, 'enable_direct_routing'):
+                receiver.enable_direct_routing(True)
+
+            if hasattr(receiver, 'request_dual_camera'):
+                receiver.request_dual_camera(True)
+
+            if hasattr(receiver, 'set_low_latency_mode'):
+                receiver.set_low_latency_mode(True)
+
+            # FASE 4: Avvia il receiver
+            receiver.start()
+
+            # Verifica che lo streaming si sia avviato con un breve timeout
+            for attempt in range(3):
+                # Attendi un breve periodo per l'inizializzazione
+                time.sleep(0.3 * (attempt + 1))
+
+                # Verifica che il receiver sia attivo
+                if hasattr(receiver, 'is_active') and receiver.is_active():
+                    break
+
+                # Se non è attivo dopo 3 tentativi, registra un warning
+                if attempt == 2:
+                    logger.warning("Receiver avviato ma non sembra attivo. Continuando comunque...")
+
+            # FASE 5: Memorizza il receiver e propaga il riferimento
+            # Nota: è cruciale mantenere un solo riferimento attivo al receiver
+            self._stream_receiver = receiver
+
+            # Aggiorna anche il riferimento nella MainWindow se necessario
+            main_window = self.window()
+            if hasattr(main_window, 'stream_receiver'):
+                main_window.stream_receiver = receiver
+                main_window._stream_initialized = True
+
+            # FASE 6: Avvio esplicito dello streaming nel server
+            self._start_streaming()
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Errore nell'inizializzazione dello stream receiver: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return False
+
+    def _start_streaming(self):
+        """
+        Avvia lo streaming video in modo robusto con verifica della risposta e retry.
+        """
+        if not self.selected_scanner or not self.scanner_controller:
+            logger.error("Impossibile avviare streaming: scanner non selezionato/connesso")
+            return False
+
+        device_id = self.selected_scanner.device_id
+        logger.info(f"Avvio streaming per scanner {device_id}")
+
+        # Configurazione streaming ottimizzata con parametri espliciti
+        streaming_config = {
+            "dual_camera": True,  # Richiedi entrambe le camere
+            "quality": 92,  # Alta qualità per scansione
+            "target_fps": 30,  # Frame rate target ottimale
+            "low_latency": True,  # Priorità alla latenza
+            "timestamp": time.time(),  # Timestamp per sincronizzazione
+            "client_ip": self._get_local_ip()  # Importante per NAT traversal
+        }
+
+        # Implementazione con tentativi multipli
+        max_attempts = 3
+        success = False
+
+        for attempt in range(max_attempts):
+            try:
+                if attempt > 0:
+                    logger.info(f"Tentativo {attempt + 1}/{max_attempts} di avvio streaming...")
+                    time.sleep(1.0)  # Pausa tra tentativi
+
+                # Invia comando START_STREAM
+                cmd_sent = self.scanner_controller.send_command(
+                    device_id,
+                    "START_STREAM",
+                    streaming_config,
+                    timeout=5.0  # Timeout maggiore per il primo comando
+                )
+
+                if not cmd_sent:
+                    logger.warning(f"Errore nell'invio del comando START_STREAM (tentativo {attempt + 1})")
+                    continue
+
+                # IMPORTANTE: Attendi esplicitamente la risposta per completare il ciclo REQ/REP
+                response = self.scanner_controller.receive_response(device_id, timeout=5.0)
+
+                if response and response.get("status") == "ok":
+                    logger.info(f"Streaming avviato con successo: {response}")
+                    success = True
+
+                    # Aggiorna UI e stato
+                    QMetaObject.invokeMethod(
+                        self.status_label,
+                        "setText",
+                        Qt.QueuedConnection,
+                        Q_ARG(str, "Streaming attivo")
+                    )
+
+                    # Imposta timer per verificare lo stato dello streaming
+                    self._start_streaming_monitor()
+
+                    break
+                else:
+                    logger.warning(f"Risposta non valida a START_STREAM: {response}")
+
+            except Exception as e:
+                logger.error(f"Errore nell'avvio dello streaming (tentativo {attempt + 1}): {e}")
+
+        if not success:
+            logger.error(f"Impossibile avviare lo streaming dopo {max_attempts} tentativi")
+
+            # Aggiorna UI con errore
+            QMetaObject.invokeMethod(
+                self.status_label,
+                "setText",
+                Qt.QueuedConnection,
+                Q_ARG(str, "Errore nell'avvio dello streaming")
+            )
+
+        return success
+
+    def _get_local_ip(self):
+        """Ottiene l'indirizzo IP locale per connessioni NAT."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            return local_ip
+        except:
+            return None
+
+    def _start_streaming_monitor(self):
+        """
+        Avvia un timer per monitorare lo stato dello streaming.
+        Essenziale per rilevare interruzioni e riavviare se necessario.
+        """
+        if hasattr(self, '_streaming_monitor') and self._streaming_monitor.isActive():
+            self._streaming_monitor.stop()
+
+        # Crea e configura timer
+        self._streaming_monitor = QTimer(self)
+        self._streaming_monitor.timeout.connect(self._check_streaming_status)
+
+        # Inizializza contatore frame
+        self._frames_received = {0: 0, 1: 0}
+        self._last_frame_time = time.time()
+        self._last_check_time = time.time()
+
+        # Avvia timer - controlla ogni 3 secondi
+        self._streaming_monitor.start(3000)
+        logger.info("Monitor dello streaming avviato")
+
+    def _check_streaming_status(self):
+        """
+        Verifica se lo streaming è attivo e funzionante.
+        Tenta di riavviare lo streaming se inattivo.
+        """
+        current_time = time.time()
+        time_since_last_frame = current_time - self._last_frame_time
+
+        # Se non riceviamo frame da più di 5 secondi, consideriamo lo streaming non attivo
+        if time_since_last_frame > 5.0:
+            logger.warning(f"Streaming inattivo da {time_since_last_frame:.1f}s")
+
+            # Aggiorna UI
+            self.status_label.setText(f"Streaming inattivo da {int(time_since_last_frame)}s. Riconnessione...")
+
+            # Tenta riconnessione solo se non è stato tentato negli ultimi 10 secondi
+            if current_time - getattr(self, '_last_reconnect_attempt', 0) > 10.0:
+                self._last_reconnect_attempt = current_time
+
+                # Tenta di riavviare lo streaming
+                logger.info("Tentativo di riavvio dello streaming...")
+                self._restart_streaming()
+        else:
+            # Streaming funzionante, calcola statistiche
+            frames_since_last_check = sum(self._frames_received.values())
+            if hasattr(self, '_last_frames_count'):
+                new_frames = frames_since_last_check - self._last_frames_count
+                fps = new_frames / (current_time - self._last_check_time)
+
+                # Aggiorna UI solo se ci sono nuovi frame
+                if new_frames > 0:
+                    self.status_label.setText(f"Streaming attivo: {fps:.1f} FPS")
+
+            # Aggiorna contatori
+            self._last_frames_count = frames_since_last_check
+            self._last_check_time = current_time
+
+    def _restart_streaming(self):
+        """
+        Tenta di riavviare lo streaming quando si rileva inattività.
+        Implementa una sequenza di riavvio più robusta.
+        """
+        if not self.selected_scanner or not self.scanner_controller:
+            return
+
+        try:
+            device_id = self.selected_scanner.device_id
+
+            # 1. Prima ferma esplicitamente lo streaming attuale
+            logger.info("Invio comando esplicito STOP_STREAM...")
+            self.scanner_controller.send_command(device_id, "STOP_STREAM")
+
+            # Importante: ricevi la risposta per completare il ciclo REQ/REP
+            response = self.scanner_controller.receive_response(device_id)
+            logger.debug(f"Risposta STOP_STREAM: {response}")
+
+            # 2. Breve pausa
+            time.sleep(0.5)
+
+            # 3. Controlla lo stato della connessione
+            is_connected = self.scanner_controller.is_connected(device_id)
+            if not is_connected:
+                logger.warning("Scanner disconnesso, tentativo di riconnessione...")
+                reconnect_success = self.scanner_controller.attempt_reconnection(device_id)
+                if not reconnect_success:
+                    logger.error("Riconnessione fallita, impossibile riavviare streaming")
+                    return
+
+                # Attendi un momento dopo la riconnessione
+                time.sleep(1.0)
+
+            # 4. Ferma e ricrea lo stream receiver
+            if hasattr(self, '_stream_receiver') and self._stream_receiver:
+                try:
+                    self._stream_receiver.stop()
+                    time.sleep(0.5)
+                except Exception as e:
+                    logger.warning(f"Errore nell'arresto dello stream receiver: {e}")
+
+            # 5. Ricrea il receiver e riavvia lo streaming
+            self._setup_stream_receiver(self.selected_scanner)
+
+        except Exception as e:
+            logger.error(f"Errore nel riavvio dello streaming: {e}")
 
     def _on_scan_frame_received(self, camera_index: int, frame: np.ndarray, frame_info: Dict):
         """Gestisce la ricezione di un frame di scansione."""
@@ -1160,71 +1430,37 @@ class ScanView(QWidget):
 
     def _connect_to_stream(self):
         """
-        Versione ottimizzata per connettere il widget agli stream con latenza minima.
-        Implementa ricerca intelligente dello StreamReceiver e configurazione corretta.
+        Connette il widget agli stream delle camere con approccio più robusto.
+        Rispetta il pattern di assegnazione delle responsabilità.
         """
-        if self._stream_connected:
-            # Verifica integrità della connessione
-            if hasattr(self, '_last_frame_time') and time.time() - self._last_frame_time < 3.0:
-                # Connessione attiva con frame recenti
-                return True
-            # Altrimenti la connessione è stata persa, procedi con riconnessione
+        # Se già connesso e non è passato troppo tempo dall'ultimo frame, non fare nulla
+        if self._stream_connected and hasattr(self, '_last_frame_time') and \
+                time.time() - self._last_frame_time < 2.0:
+            return True
 
         try:
-            # Cerca MainWindow
-            main_window = self.window()
+            # Cerca lo stream receiver in vari possibili percorsi
+            receiver = self._get_existing_stream_receiver()
 
-            # Strategie di ricerca ordinate per priorità
-            receiver = None
-
-            # Strategia 1: stream_receiver diretto in MainWindow
-            if hasattr(main_window, 'stream_receiver') and main_window.stream_receiver:
-                receiver = main_window.stream_receiver
-                logger.info("StreamReceiver trovato in MainWindow")
-
-            # Strategia 2: tramite scanner_controller
-            elif self.scanner_controller:
-                if hasattr(self.scanner_controller, 'get_stream_receiver'):
-                    receiver = self.scanner_controller.get_stream_receiver()
-                    logger.info("StreamReceiver trovato via scanner_controller")
-                elif hasattr(self.scanner_controller, 'stream_receiver'):
-                    receiver = self.scanner_controller.stream_receiver
-                    logger.info("StreamReceiver trovato in scanner_controller")
-
-            # Strategia 3: in streaming_widget
-            elif hasattr(main_window, 'streaming_widget') and main_window.streaming_widget:
-                if hasattr(main_window.streaming_widget, 'stream_receiver'):
-                    receiver = main_window.streaming_widget.stream_receiver
-                    logger.info("StreamReceiver trovato in streaming_widget")
-
-            # Se trovato streamreceiver, configura connessione
             if receiver:
-                # Disconnetti eventuali connessioni esistenti
-                if hasattr(receiver, 'frame_received'):
-                    try:
-                        receiver.frame_received.disconnect(self._on_frame_received)
-                    except:
-                        pass
+                logger.info(f"Stream receiver trovato: {receiver}")
 
-                    # Ricollega con priorità QueuedConnection per performance
-                    receiver.frame_received.connect(self._on_frame_received, Qt.QueuedConnection)
-                    logger.info("Segnale frame_received collegato con QueuedConnection")
+                # Disconnetti eventuali vecchie connessioni per evitare doppie chiamate
+                self._safe_disconnect_signal(receiver.frame_received, self._on_frame_received)
+                self._safe_disconnect_signal(receiver.scan_frame_received, self._on_scan_frame_received)
 
-                # Configura anche scan_frame_received se disponibile
+                # Connetti i segnali con Qt.QueuedConnection per thread safety
+                receiver.frame_received.connect(self._on_frame_received, Qt.QueuedConnection)
+
                 if hasattr(receiver, 'scan_frame_received'):
-                    try:
-                        receiver.scan_frame_received.disconnect(self._on_scan_frame_received)
-                    except:
-                        pass
-
                     receiver.scan_frame_received.connect(self._on_scan_frame_received, Qt.QueuedConnection)
 
-                # Configura processore di frame per routing diretto (più veloce)
-                if hasattr(receiver, 'set_frame_processor'):
+                # Imposta il processore di frame
+                if hasattr(receiver, 'set_frame_processor') and hasattr(self, 'scan_processor'):
                     receiver.set_frame_processor(self.scan_processor)
                     logger.info("Frame processor collegato direttamente")
 
-                # Abilita ottimizzazioni latenza
+                # Configura ottimizzazioni
                 if hasattr(receiver, 'enable_direct_routing'):
                     receiver.enable_direct_routing(True)
 
@@ -1232,87 +1468,46 @@ class ScanView(QWidget):
                     receiver.set_low_latency_mode(True)
                     logger.info("Modalità bassa latenza attivata")
 
-                # Richiedi esplicitamente dual camera
-                if hasattr(receiver, 'request_dual_camera'):
-                    receiver.request_dual_camera(True)
-
-                # Avvia stream se necessario
-                if hasattr(receiver, 'is_active') and not receiver.is_active():
-                    logger.info("Avvio automatico StreamReceiver")
-                    receiver.start()
-
-                # Configura sistema verifica attività
+                # Inizializza monitoraggio attività
                 self._last_frame_time = time.time()
                 self._stream_connected = True
 
-                # Inizializza contatori per diagnostica
-                if not hasattr(self, '_frame_count_by_camera'):
-                    self._frame_count_by_camera = {0: 0, 1: 0}
-                    self._last_frame_log_time = time.time()
-
-                # Avvia timer verifica attività
-                self._start_activity_monitor()
-
                 return True
 
-            # Strategia 4: Creazione nuovo StreamReceiver
+            # Se arriviamo qui, nessun receiver esistente è stato trovato
             if self.selected_scanner:
-                try:
-                    from client.network.stream_receiver import StreamReceiver
-                    host = self.selected_scanner.ip_address
-                    port = self.selected_scanner.port + 1
-
-                    logger.info(f"Creazione nuovo StreamReceiver su {host}:{port}")
-                    receiver = StreamReceiver(host, port)
-
-                    # Configura
-                    receiver.frame_received.connect(self._on_frame_received, Qt.QueuedConnection)
-
-                    if hasattr(receiver, 'scan_frame_received'):
-                        receiver.scan_frame_received.connect(self._on_scan_frame_received, Qt.QueuedConnection)
-
-                    receiver.set_frame_processor(self.scan_processor)
-                    receiver.enable_direct_routing(True)
-                    receiver.request_dual_camera(True)
-                    receiver.set_low_latency_mode(True)
-
-                    # Avvia
-                    receiver.start()
-
-                    # Mantieni riferimento
-                    self._local_stream_receiver = receiver
-
-                    # Invia comando START_STREAM tramite scanner_controller
-                    if self.scanner_controller:
-                        self.scanner_controller.send_command(
-                            self.selected_scanner.device_id,
-                            "START_STREAM",
-                            {
-                                "dual_camera": True,
-                                "quality": 92,  # Bilanciamento qualità/latenza
-                                "target_fps": 30,
-                                "low_latency": True
-                            }
-                        )
-
-                    self._stream_connected = True
-                    self._last_frame_time = time.time()
-                    self._start_activity_monitor()
-
-                    return True
-                except Exception as e:
-                    logger.error(f"Errore creazione StreamReceiver: {e}")
-                    import traceback
-                    logger.error(f"Traceback: {traceback.format_exc()}")
-
-            logger.error("Impossibile trovare o creare StreamReceiver")
-            return False
+                logger.info("Nessun receiver esistente trovato, creazione nuovo receiver")
+                return self._setup_stream_receiver(self.selected_scanner)
+            else:
+                logger.warning("Nessuno scanner selezionato, impossibile creare stream receiver")
+                return False
 
         except Exception as e:
-            logger.error(f"Errore generale in _connect_to_stream: {e}")
+            logger.error(f"Errore nella connessione agli stream: {e}")
             import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Traceback completo: {traceback.format_exc()}")
             return False
+
+    def _get_existing_stream_receiver(self):
+        """
+        Cerca lo stream receiver in tutte le possibili locazioni.
+        """
+        # 1. Cerca in MainWindow
+        main_window = self.window()
+        if hasattr(main_window, 'stream_receiver') and main_window.stream_receiver:
+            return main_window.stream_receiver
+
+        # 2. Cerca tramite scanner_controller
+        if self.scanner_controller and hasattr(self.scanner_controller, 'get_stream_receiver'):
+            receiver = self.scanner_controller.get_stream_receiver()
+            if receiver:
+                return receiver
+
+        # 3. Controlla se abbiamo già un'istanza locale
+        if hasattr(self, '_stream_receiver') and self._stream_receiver:
+            return self._stream_receiver
+
+        return None
 
     def _start_activity_monitor(self):
         """

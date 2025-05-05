@@ -1699,11 +1699,17 @@ class UnLookServer:
 
         # Usa encoder hardware se disponibile
         picamera2_encoder = None
+        encoder_requires_request = False
         try:
+            # Verifica se l'API richiede il metodo create_request
+            encoder_requires_request = hasattr(JpegEncoder, 'encode') and 'request' in str(
+                JpegEncoder.encode.__code__.co_varnames)
+
             # Crea encoder con configurazione ottimizzata per bassa latenza
             picamera2_encoder = JpegEncoder(num_threads=2, q=quality)
             picamera2_encoder.start()
-            logger.info(f"Encoder JPEG inizializzato con qualità={quality}")
+            logger.info(
+                f"Encoder JPEG inizializzato con qualità={quality}, API richiede request: {encoder_requires_request}")
         except Exception as e:
             logger.error(f"Errore nell'inizializzazione dell'encoder JPEG: {e}")
             picamera2_encoder = None
@@ -1813,17 +1819,33 @@ class UnLookServer:
                     if mode == "grayscale" and len(frame.shape) == 3:
                         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
 
-                    # Compressione JPEG hardware se disponibile, altrimenti usa OpenCV
+                    # Compressione JPEG con controllo del tipo di API
                     frame_data = None
                     if picamera2_encoder:
                         try:
-                            # Usa l'encoder hardware per comprimere l'immagine
-                            if mode == "grayscale" and len(frame.shape) == 2:
-                                # Converte in RGB per l'encoder hardware
-                                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
-                                frame_data = picamera2_encoder.encode(rgb_frame)
+                            # Determina se usare API con request o diretta
+                            if encoder_requires_request:
+                                # Nuova API con request
+                                try:
+                                    request = picamera2_encoder.create_request()
+                                    if mode == "grayscale" and len(frame.shape) == 2:
+                                        # Converte in RGB per l'encoder hardware
+                                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+                                        request.set_buffer(rgb_frame)
+                                    else:
+                                        request.set_buffer(frame)
+                                    frame_data = picamera2_encoder.encode(request)
+                                except AttributeError:
+                                    # Se create_request non è disponibile, fallback a OpenCV
+                                    logger.warning("API create_request non disponibile, fallback a OpenCV")
+                                    picamera2_encoder = None
                             else:
-                                frame_data = picamera2_encoder.encode(frame)
+                                # Vecchia API diretta
+                                if mode == "grayscale" and len(frame.shape) == 2:
+                                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+                                    frame_data = picamera2_encoder.encode(rgb_frame)
+                                else:
+                                    frame_data = picamera2_encoder.encode(frame)
                         except Exception as e:
                             logger.warning(f"Errore encoder hardware, fallback a OpenCV: {e}")
                             picamera2_encoder = None

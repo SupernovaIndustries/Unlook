@@ -1105,16 +1105,13 @@ class MainWindow(QMainWindow):
 
     def _initialize_stream_receiver(self):
         """
-        Inizializza il receiver di stream a livello di applicazione.
-        Questo sostituisce l'inizializzazione che era in DualStreamView.
+        Inizializza la variabile stream_receiver ma delega la gestione effettiva a ScanView.
         """
-        # Memorizza il receiver come attributo della finestra principale
+        # Memorizza solo il riferimento, non inizializzare
         self.stream_receiver = None
-
-        # Questo sarà inizializzato quando ci si connette a uno scanner
         self._stream_initialized = False
 
-        logger.info("Stream receiver sarà inizializzato alla connessione con uno scanner")
+        logger.info("Stream receiver sarà inizializzato da ScanView alla connessione con uno scanner")
     def _update_ui_for_selected_scanner(self):
         """Aggiorna l'interfaccia in base allo scanner selezionato."""
         # Ottieni lo scanner selezionato
